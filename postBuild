@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
-set -e
+set -euxo pipefail
+
+echo "postBuild starting in: $(pwd)"
+echo "Python: $(python --version)"
+echo "Installing Playwright Chromium..."
+
+# Ensure browsers install into a writable, predictable location
+export PLAYWRIGHT_BROWSERS_PATH=0
 
 python -m playwright install chromium
+
+echo "postBuild finished. Browsers at:"
+python - <<'PY'
+import os, pathlib
+p = pathlib.Path.home()/".cache/ms-playwright"
+print(p, "exists:", p.exists())
+print(list(p.glob("*")))
+PY
