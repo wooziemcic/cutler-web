@@ -66,6 +66,29 @@ import seekingalpha_excerpts as sa_scraper
 
 # local imports
 import importlib.util
+
+@st.cache_resource(show_spinner=False)
+def ensure_playwright_chromium():
+    """
+    Streamlit Community Cloud doesn't reliably run postBuild anymore.
+    So we install Chromium lazily at runtime if it's missing.
+    Cached so it runs once per container.
+    """
+    # Get the path Playwright *expects* Chromium to be at
+    ensure_playwright_chromium()
+    with sync_playwright() as pw:
+        chromium_path = pw.chromium.executable_path
+
+    if not os.path.exists(chromium_path):
+        # Download Chromium into the default cache
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True
+        )
+
+    return True
+
+
 HERE = Path(__file__).resolve().parent
 
 def _import(name: str, path: Path):
@@ -1671,6 +1694,7 @@ def get_available_quarters() -> List[str]:
     """
     vals: List[str] = []
     try:
+        ensure_playwright_chromium()
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
@@ -1795,6 +1819,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
         return
     tokens = [(b, _first_word(b) if use_first_word else b) for b in brands]
 
+    ensure_playwright_chromium()
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=True,
@@ -1955,6 +1980,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
     current_rows: List[Dict[str, Any]] = []
     row_by_key: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
 
+    ensure_playwright_chromium()
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=True,
