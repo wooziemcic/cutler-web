@@ -1,0 +1,16 @@
+streamlit==1.33.0
+openai==0.28.1
+requests==2.31.0
+beautifulsoup4==4.12.2
+feedparser==6.0.10
+python-dotenv==1.0.1
+pandas==2.1.4
+playwright==1.44.0
+pypdf==4.2.0
+reportlab==4.0.7
+lxml==5.2.1
+numpy==1.26.4
+tqdm==4.66.3
+selenium==4.22.0
+webdriver-manager==4.0.1
+pymupdf==1.24.9
