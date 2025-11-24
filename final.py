@@ -1672,7 +1672,10 @@ def get_available_quarters() -> List[str]:
     vals: List[str] = []
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
             ctx = browser.new_context()
             page = ctx.new_page()
             page.set_default_timeout(30000)
@@ -1788,7 +1791,10 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
     tokens = [(b, _first_word(b) if use_first_word else b) for b in brands]
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30000)
@@ -1940,7 +1946,10 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
     row_by_key: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30000)
