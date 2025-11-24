@@ -1674,7 +1674,12 @@ def get_available_quarters() -> List[str]:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
             )
             ctx = browser.new_context()
             page = ctx.new_page()
@@ -1793,7 +1798,12 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
         )
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
@@ -1948,7 +1958,12 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
         )
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
