@@ -4,8 +4,9 @@ reddit_excerpts.py
 Lightweight Reddit snapshot module for the Cutler platform.
 
 - Uses the reddit34 RapidAPI (socialminer / reddit34) for per-subreddit tops.
-- Uses Reddit's own /search.json endpoint to build an Extras bucket that
+- Tries Reddit's own /search.json endpoint to build an Extras bucket that
   matches the browser search for `$TICKER` with Relevance + Past week.
+- If Reddit blocks /search.json (403), falls back to reddit34 getSearchPosts.
 
 This module is used both as:
   - a CLI tester:  python reddit_excerpts.py AMZN
@@ -21,6 +22,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 import requests
+from requests import HTTPError
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -35,6 +37,7 @@ if not logger.handlers:
 
 RAPIDAPI_HOST = "reddit34.p.rapidapi.com"
 TOP_POSTS_ENDPOINT = f"https://{RAPIDAPI_HOST}/getTopPostsBySubreddit"
+SEARCH_POSTS_ENDPOINT = f"https://{RAPIDAPI_HOST}/getSearchPosts"
 
 # Core finance subs we care about
 FINANCE_SUBREDDITS: List[str] = [
@@ -185,8 +188,8 @@ def _matches_ticker(text: str, ticker: str) -> bool:
       - Match 'TICKER' as a standalone token (after stripping punctuation)
       - Do NOT match 'TICKER' as a pure substring inside other words/URLs.
 
-    This keeps the finance-sub view focused, while Extras relies directly on
-    Reddit search results.
+    This keeps the finance-sub view focused. Extras may rely more directly on
+    search, but this is still a good filter to avoid junk.
     """
     if not text:
         return False
@@ -236,7 +239,7 @@ def _fetch_top_posts_by_subreddit(
 
 
 # ---------------------------------------------------------------------------
-# Extras bucket via reddit.com search.json
+# Extras: primary via reddit.com search.json, fallback via reddit34
 # ---------------------------------------------------------------------------
 
 
@@ -289,6 +292,51 @@ def _search_reddit_web(
     return posts
 
 
+def _search_cross_subreddits_rapidapi(
+    query: str,
+    *,
+    time_window: str = "week",
+    max_results: int = 5,
+) -> List[RedditPost]:
+    """
+    Fallback for Extras: use reddit34 getSearchPosts when reddit.com search
+    is blocked or not available.
+
+    reddit34 requires:
+      - time only used with sort='top'
+    So we use:
+      query="$TICKER", sort="top", time="week"
+    """
+    params = {
+        "query": query,
+        "sort": "top",                   # required when using 'time'
+        "time": time_window or "week",   # hour / day / week / month / year / all
+    }
+    payload = _http_get(SEARCH_POSTS_ENDPOINT, params)
+
+    if isinstance(payload, dict) and not payload.get("success", True):
+        logger.warning(
+            "[reddit34] fallback search unsuccessful for query=%r time=%r; data=%r",
+            query,
+            time_window,
+            payload.get("data"),
+        )
+        return []
+
+    wrappers = _extract_wrapped_posts(payload)
+    posts = [_to_reddit_post(w) for w in wrappers]
+    posts = posts[:max_results]
+
+    logger.info(
+        "[reddit34] fallback search '%s' (%s) -> %d posts (capped to %d)",
+        query,
+        time_window,
+        len(wrappers),
+        len(posts),
+    )
+    return posts
+
+
 def _build_extras_bucket(
     ticker: str,
     current_by_subreddit: Optional[Dict[str, List[RedditPost]]] = None,
@@ -296,23 +344,57 @@ def _build_extras_bucket(
     time_window: str = "week",
 ) -> List[RedditPost]:
     """
-    Build a cross-subreddit 'extras' bucket for a ticker by doing a
-    Reddit web search for **$TICKER** over the given time window.
+    Build a cross-subreddit 'extras' bucket for a ticker.
 
-    Design goal: match the browser view when you search `$TICKER` with
-        Relevance + Past week
-    and just take the first N posts in that order.
+    Preferred:
+      - Reddit web search `/search.json`:
+          q=$TICKER, sort=relevance, t=week, type=link, limit=...
+    Fallback (if 403 or other HTTP error):
+      - reddit34 getSearchPosts:
+          query="$TICKER", sort="top", time=week
+
+    Both paths:
+      - De-duplicate vs existing finance-sub posts via permalink
+      - Keep order from the underlying source, cap to max_total
     """
     query = f"${ticker.upper()}"
 
-    # 1) Call Reddit web search
-    search_posts = _search_reddit_web(
-        query=query,
-        time_window=time_window,
-        limit=max_total * 2,  # grab a few extra so we can dedupe
-    )
+    # 1) Try Reddit web search (ideal parity with browser UI)
+    search_posts: List[RedditPost] = []
+    try:
+        search_posts = _search_reddit_web(
+            query=query,
+            time_window=time_window,
+            limit=max_total * 2,  # grab extra to allow dedupe
+        )
+    except HTTPError as http_exc:
+        status = getattr(http_exc.response, "status_code", None)
+        logger.warning(
+            "[reddit_extras] reddit web search HTTPError (%s) for %s: %s",
+            status,
+            query,
+            http_exc,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[reddit_extras] reddit web search error for %s: %s",
+            query,
+            exc,
+        )
 
-    # 2) Build a set of permalinks we already have, to avoid duplicates
+    # 2) Fallback via reddit34 if web search failed or returned nothing
+    if not search_posts:
+        logger.info(
+            "[reddit_extras] falling back to reddit34 search for %s",
+            query,
+        )
+        search_posts = _search_cross_subreddits_rapidapi(
+            query=query,
+            time_window=time_window,
+            max_results=max_total * 2,
+        )
+
+    # 3) Build de-duplication set
     existing_permalinks = set()
     if current_by_subreddit:
         for posts in current_by_subreddit.values():
@@ -320,20 +402,17 @@ def _build_extras_bucket(
                 if p.permalink:
                     existing_permalinks.add(p.permalink)
 
-    # 3) Take posts in the order Reddit returned them, skipping duplicates,
-    #    and cap to max_total.
+    # 4) Take posts in original order (web or fallback), skipping duplicates
     extras: List[RedditPost] = []
     for p in search_posts:
         if len(extras) >= max_total:
             break
-
         if p.permalink and p.permalink in existing_permalinks:
             continue
-
         extras.append(p)
 
     logger.info(
-        "[reddit_extras] web-search extras for %s -> %d posts",
+        "[reddit_extras] extras for %s -> %d posts",
         ticker,
         len(extras),
     )
@@ -359,12 +438,8 @@ def fetch_posts_for_ticker(
       - Fetch top posts from each finance subreddit (weekly) via reddit34.
       - Filter posts that mention the ticker (title/body) using _matches_ticker.
       - Cap to max_per_sub per subreddit.
-      - Build an "__extras__" bucket from Reddit web search:
-        * q=$TICKER
-        * sort=relevance
-        * t=week
-        * type=link
-        * limit=5
+      - Build an "__extras__" bucket primarily from Reddit web search; if that
+        fails or is blocked, fall back to reddit34 getSearchPosts.
     """
     ticker = (ticker or "").strip().upper()
     if not ticker:
@@ -404,7 +479,7 @@ def fetch_posts_for_ticker(
                 ticker,
             )
 
-    # Extras via reddit web search
+    # Extras via reddit web search + fallback
     try:
         extras = _build_extras_bucket(
             ticker=ticker,
