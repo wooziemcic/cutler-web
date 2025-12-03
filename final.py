@@ -7,8 +7,6 @@ data source; all branding in the UI is Cutler-only.
 """
 from __future__ import annotations
 
-
-
 # Windows Playwright policy fix
 import asyncio, platform
 if platform.system() == "Windows":
@@ -62,18 +60,13 @@ except Exception:
 from pypdf import PdfReader as _PdfReader, PdfWriter as _PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-def _ensure_chromium():
-    cache = Path.home() / ".cache" / "ms-playwright"
-    if not cache.exists() or not any("chromium" in p.name for p in cache.glob("*")):
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-_ensure_chromium()
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import sa_news_ai as sa_news
 import seekingalpha_excerpts as sa_scraper
 
+
 # local imports
 import importlib.util
-
 HERE = Path(__file__).resolve().parent
 
 def _import(name: str, path: Path):
@@ -84,6 +77,8 @@ def _import(name: str, path: Path):
     sys.modules[name] = mod
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
+
+reddit_excerpts = _import("reddit_excerpts", HERE / "reddit_excerpts.py")
 
 excerpt_check = _import("excerpt_check", HERE / "excerpt_check.py")
 make_pdf = _import("make_pdf", HERE / "make_pdf.py")
@@ -1026,6 +1021,163 @@ def draw_seeking_alpha_news_section() -> None:
 
             st.write(cleaned_text)
 
+
+# --- Reddit snapshot section (uses reddit34 via reddit_excerpts) ---
+
+def _get_available_tickers_for_reddit():
+    """
+    Build the Reddit ticker universe from your tickers.py file.
+    """
+    try:
+        if isinstance(tickers, dict):
+            return sorted(str(sym).upper() for sym in tickers.keys())
+        elif isinstance(tickers, (list, tuple, set)):
+            return sorted(str(sym).upper() for sym in tickers)
+    except Exception:
+        pass
+
+    # Fallback so the UI doesn’t break if something changes
+    return ["AAPL", "AMZN", "MSFT", "GOOG"]
+
+
+def draw_reddit_pulse_section():
+    st.markdown("### Reddit pulse – weekly sentiment snapshot")
+    st.caption(
+        "Lightweight Reddit snapshot: we pull a small number of high-signal posts from "
+        "the last week in key finance subs, filtered by ticker, to keep API usage under control."
+    )
+
+    # 1) Ticker selection from your real universe
+    available_tickers = _get_available_tickers_for_reddit()
+    default_index = available_tickers.index("AMZN") if "AMZN" in available_tickers else 0
+
+    selected_ticker = st.selectbox(
+        "Ticker symbol",
+        options=available_tickers,
+        index=default_index,
+        key="reddit_ticker_select",
+    )
+
+    # 2) Simple cache so we don't hit the API on every rerun
+    cache_key = "reddit_pulse_cache"
+    if cache_key not in st.session_state:
+        st.session_state[cache_key] = {}
+
+    posts_by_subreddit = st.session_state[cache_key].get(selected_ticker)
+
+    # 3) Fetch button – ONLY here do we call the API
+    run_clicked = st.button(
+        f"Fetch Reddit posts for {selected_ticker}",
+        use_container_width=True,
+        key="reddit_fetch_button",
+    )
+
+    if run_clicked:
+        with st.spinner("Querying Reddit…"):
+            posts_by_subreddit = reddit_excerpts.fetch_posts_for_ticker(
+                selected_ticker,
+                time_window="week",  # weekly snapshot
+                max_per_sub=5,       # cost control
+            )
+        # store result in cache
+        st.session_state[cache_key][selected_ticker] = posts_by_subreddit
+
+    # If we have no data yet (button never clicked, or API returned nothing)
+    if not posts_by_subreddit:
+        st.info(
+            "No relevant Reddit posts found in the last week for this ticker, "
+            "or the API did not return any results yet."
+        )
+        return
+
+    # 4) Subreddit + extras dropdown (only subs that actually have posts)
+    extras_key = "__extras__"
+    subreddit_labels = []
+    label_to_sub = {}
+
+    # Core finance subs first
+    core_items = [
+        (k, v) for k, v in posts_by_subreddit.items()
+        if k != extras_key
+    ]
+    core_items = sorted(core_items, key=lambda kv: kv[0].lower())
+
+    for sub, posts in core_items:
+        if not posts:
+            continue
+        label = f"r/{sub} ({len(posts)} posts)"
+        subreddit_labels.append(label)
+        label_to_sub[label] = sub
+
+    # Extras bucket if present
+    extras_posts = posts_by_subreddit.get(extras_key)
+    if extras_posts:
+        extras_label = (
+            f"Extras – top cross-subreddit posts mentioning "
+            f"${selected_ticker} ({len(extras_posts)} posts)"
+        )
+        subreddit_labels.append(extras_label)
+        label_to_sub[extras_label] = extras_key
+
+    if not subreddit_labels:
+        st.info(
+            "We fetched data from Reddit, but none of the top posts mentioned this ticker "
+            "explicitly in the last week."
+        )
+        return
+
+    chosen_label = st.selectbox(
+        "Choose a subreddit or extras view",
+        options=subreddit_labels,
+        key="reddit_subreddit_select",
+    )
+    chosen_sub = label_to_sub[chosen_label]
+
+    if chosen_sub == extras_key:
+        st.markdown(
+            f"Showing posts from **all finance subreddits** mentioning `${selected_ticker}` "
+            f"(top {len(posts_by_subreddit.get(chosen_sub, []))} this week):"
+        )
+    else:
+        st.markdown(f"Showing posts for **r/{chosen_sub}**:")
+
+    # 5) Render posts for the chosen key
+    for post in posts_by_subreddit.get(chosen_sub, []):
+        title = post.title or "(no title)"
+        permalink = post.permalink or ""
+        score = post.score or 0
+        num_comments = post.num_comments or 0
+
+        body = (
+            getattr(post, "selftext", None)
+            or getattr(post, "body", None)
+            or ""
+        ).strip()
+
+        header = f"{title} – Score {score} · {num_comments} comments"
+
+        with st.expander(header, expanded=False):
+            if permalink:
+                url = f"https://www.reddit.com{permalink}"
+                st.markdown(f"[Open on Reddit]({url})")
+
+            if body:
+                max_chars = 4000
+                if len(body) > max_chars:
+                    st.write(body[:max_chars] + " …")
+                    st.caption(
+                        "Truncated for length – open on Reddit to read the full post."
+                    )
+                else:
+                    st.write(body)
+            else:
+                st.caption(
+                    "This is a link post with no text body on Reddit. "
+                    "Open on Reddit to read the article and full discussion."
+                )
+
+            st.markdown("---")
+
 def build_podcast_groups(n_groups: int = 9):
     """
     Split PODCASTS into up to n_groups buckets.
@@ -1680,15 +1832,7 @@ def get_available_quarters() -> List[str]:
     vals: List[str] = []
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
-            )
+            browser = pw.chromium.launch(headless=True)
             ctx = browser.new_context()
             page = ctx.new_page()
             page.set_default_timeout(30000)
@@ -1804,15 +1948,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
     tokens = [(b, _first_word(b) if use_first_word else b) for b in brands]
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-        )
+        browser = pw.chromium.launch(headless=True)
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30000)
@@ -1964,15 +2100,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
     row_by_key: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-        )
+        browser = pw.chromium.launch(headless=True)
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30000)
@@ -2647,6 +2775,9 @@ def main():
                 prev_idx = (current_idx - 1) % len(selected_tickers)
                 st.session_state["sa_current_index"] = prev_idx
                 st.rerun()
+    
+    # ---------- Reddit pulse (retail sentiment) ----------
+    draw_reddit_pulse_section()
 
     # ---------- Podcast intelligence (ticker mentions across podcasts) ----------
     draw_podcast_intelligence_section()
