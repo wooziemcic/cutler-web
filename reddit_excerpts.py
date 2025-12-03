@@ -3,9 +3,10 @@ reddit_excerpts.py
 
 Lightweight Reddit snapshot module for the Cutler platform.
 
-- Uses the reddit34 RapidAPI (socialminer / reddit34) for per-subreddit tops.
-- Uses Reddit's own /search.json endpoint to build an Extras bucket that
-  matches the browser search for `$TICKER` with Relevance + Past week.
+- Uses the reddit34 RapidAPI (socialminer / reddit34).
+- Pulls top posts from a fixed set of finance subreddits.
+- Additionally does a cross-subreddit search for the ticker using
+  getSearchPosts and exposes that as an "__extras__" bucket.
 
 This module is used both as:
   - a CLI tester:  python reddit_excerpts.py AMZN
@@ -35,6 +36,7 @@ if not logger.handlers:
 
 RAPIDAPI_HOST = "reddit34.p.rapidapi.com"
 TOP_POSTS_ENDPOINT = f"https://{RAPIDAPI_HOST}/getTopPostsBySubreddit"
+SEARCH_POSTS_ENDPOINT = f"https://{RAPIDAPI_HOST}/getSearchPosts"
 
 # Core finance subs we care about
 FINANCE_SUBREDDITS: List[str] = [
@@ -73,17 +75,21 @@ class RedditPost:
 
 def _get_api_key() -> str:
     """
-    Fetch RapidAPI key from environment. We reuse your existing RAPIDAPI_KEY
-    so you don't have to add anything new.
+    Fetch RapidAPI key from environment.
+
+    We support multiple variable names so you can reuse keys you already have.
     """
     key = (
         os.environ.get("RAPIDAPI_KEY")
         or os.environ.get("REDDIT34_API_KEY")
+        or os.environ.get("REDDIT34_KEY")
+        or os.environ.get("SA_RAPIDAPI_KEY")
         or os.environ.get("REDDAPI_KEY")
     )
     if not key:
         raise RuntimeError(
-            "No RapidAPI key found. Please set RAPIDAPI_KEY (or REDDIT34_API_KEY)."
+            "No RapidAPI key found. Please set RAPIDAPI_KEY (or REDDIT34_API_KEY / "
+            "REDDIT34_KEY / SA_RAPIDAPI_KEY)."
         )
     return key
 
@@ -139,11 +145,8 @@ def _extract_wrapped_posts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _to_reddit_post(wrapper: Dict[str, Any]) -> RedditPost:
     """
-    Convert a reddit34 or reddit.com "post wrapper" into our RedditPost dataclass.
-
-    Works with:
-      - {"kind": "t3", "data": {...}}
-      - {"subreddit": "...", "title": "...", ...} (we treat this as data directly)
+    Convert a reddit34 "post wrapper" into our RedditPost dataclass.
+    We expect wrapper like {"kind": "t3", "data": {...}} but keep it robust.
     """
     if not isinstance(wrapper, dict):
         wrapper = {}
@@ -180,9 +183,6 @@ def _matches_ticker(text: str, ticker: str) -> bool:
       - Match '$TICKER' anywhere, case-insensitive
       - Match 'TICKER' as a standalone token (after stripping punctuation)
       - Do NOT match 'TICKER' as a pure substring inside other words/URLs.
-
-    This keeps the finance-sub view focused, while Extras relies directly on
-    Reddit search results.
     """
     if not text:
         return False
@@ -203,7 +203,7 @@ def _matches_ticker(text: str, ticker: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# reddit34 calls for finance subs
+# reddit34 calls
 # ---------------------------------------------------------------------------
 
 
@@ -231,57 +231,55 @@ def _fetch_top_posts_by_subreddit(
     return posts
 
 
-# ---------------------------------------------------------------------------
-# Extras bucket via reddit.com search.json
-# ---------------------------------------------------------------------------
-
-
-def _search_reddit_web(
+def _search_cross_subreddits(
     query: str,
-    *,
     time_window: str = "week",
-    limit: int = 5,
+    max_results: int = 5,
 ) -> List[RedditPost]:
     """
-    Use Reddit's public /search.json endpoint to mimic browser search:
+    Use reddit34 getSearchPosts endpoint for a ticker search across Reddit.
 
-      q=$TICKER, sort=relevance, t=week, type=link, limit=5
-
-    This gives you the same kind of results as the UI screenshot for `$AMZN`
-    with "Relevance" + "Past week".
+    reddit34 docs:
+      - Timeframe `time` can only be used with sort='top'.
+    So we use:
+      query="$TICKER", sort="top", time="week"
+    and then take the first max_results posts in that order.
     """
-    url = "https://www.reddit.com/search.json"
-
     params = {
-        "q": query,
-        "sort": "relevance",
-        "t": time_window,   # hour / day / week / month / year / all
-        "type": "link",
-        "limit": limit,
+        "query": query,
+        "sort": "top",                     # required when using 'time'
+        "time": time_window or "week",    # hour / day / week / month / year / all
     }
+    payload = _http_get(SEARCH_POSTS_ENDPOINT, params)
 
-    headers = {
-        # Reddit requires a User-Agent for API/JSON calls
-        "User-Agent": "CutlerRedditPulse/1.0 (by u/your_internal_tool)",
-    }
+    if isinstance(payload, dict) and not payload.get("success", True):
+        logger.warning(
+            "[reddit34] search unsuccessful for query=%r time=%r; data=%r",
+            query,
+            time_window,
+            payload.get("data"),
+        )
+        return []
 
-    logger.debug("[reddit_web] GET %s params=%s", url, params)
-    resp = requests.get(url, headers=headers, params=params, timeout=20)
-    logger.debug("[reddit_web] Status %s", resp.status_code)
-    resp.raise_for_status()
-    data = resp.json()
+    wrappers = _extract_wrapped_posts(payload)
+    posts = [_to_reddit_post(w) for w in wrappers]
 
-    children = data.get("data", {}).get("children", []) or []
-    posts = [_to_reddit_post(child) for child in children]
+    # Keep ordering from API, just cap to max_results
+    posts = posts[:max_results]
 
     logger.info(
-        "[reddit_web] search '%s' (t=%s, limit=%d) -> %d posts",
+        "[reddit34] search '%s' (%s) -> %d posts (capped to %d)",
         query,
         time_window,
-        limit,
+        len(wrappers),
         len(posts),
     )
     return posts
+
+
+# ---------------------------------------------------------------------------
+# Extras bucket construction
+# ---------------------------------------------------------------------------
 
 
 def _build_extras_bucket(
@@ -292,23 +290,21 @@ def _build_extras_bucket(
 ) -> List[RedditPost]:
     """
     Build a cross-subreddit 'extras' bucket for a ticker by doing a
-    Reddit web search for **$TICKER** over the given time window.
+    global Reddit search for **$TICKER** over the given time window.
 
-    Design goal: match the browser view when you search `$TICKER` with
-   :
-        Relevance + Past week
-    and just take the first N posts in that order.
+    Design goal: simple and predictable:
+      - query="$TICKER", sort="top", time="week"
+      - take the first max_total posts
+      - dedupe against finance-sub buckets via permalink
     """
     query = f"${ticker.upper()}"
 
-    # 1) Call Reddit web search
-    search_posts = _search_reddit_web(
+    search_posts = _search_cross_subreddits(
         query=query,
         time_window=time_window,
-        limit=max_total * 2,  # grab a few extra so we can dedupe
+        max_results=max_total * 2,  # grab a few extra so we can dedupe
     )
 
-    # 2) Build a set of permalinks we already have, to avoid duplicates
     existing_permalinks = set()
     if current_by_subreddit:
         for posts in current_by_subreddit.values():
@@ -316,20 +312,16 @@ def _build_extras_bucket(
                 if p.permalink:
                     existing_permalinks.add(p.permalink)
 
-    # 3) Take posts in the order Reddit returned them, skipping duplicates,
-    #    and cap to max_total.
     extras: List[RedditPost] = []
     for p in search_posts:
         if len(extras) >= max_total:
             break
-
         if p.permalink and p.permalink in existing_permalinks:
             continue
-
         extras.append(p)
 
     logger.info(
-        "[reddit_extras] web-search extras for %s -> %d posts",
+        "[reddit34] extras for %s -> %d posts",
         ticker,
         len(extras),
     )
@@ -352,15 +344,11 @@ def fetch_posts_for_ticker(
     Main entry point used by final.py.
 
     For a given ticker:
-      - Fetch top posts from each finance subreddit (weekly) via reddit34.
-      - Filter posts that mention the ticker (title/body) using _matches_ticker.
+      - Fetch top posts from each finance subreddit (weekly).
+      - Filter posts that mention the ticker (title/body).
       - Cap to max_per_sub per subreddit.
-      - Build an "__extras__" bucket from Reddit web search:
-        * q=$TICKER
-        * sort=relevance
-        * t=week
-        * type=link
-        * limit=5
+      - Build an "__extras__" bucket from cross-subreddit search
+        (up to 5 posts by default).
     """
     ticker = (ticker or "").strip().upper()
     if not ticker:
@@ -375,7 +363,6 @@ def fetch_posts_for_ticker(
         len(subs),
     )
 
-    # Finance subs via reddit34
     for sub in subs:
         try:
             raw_posts = _fetch_top_posts_by_subreddit(sub, time_window=time_window)
@@ -400,7 +387,7 @@ def fetch_posts_for_ticker(
                 ticker,
             )
 
-    # Extras via reddit web search
+    # Build extras bucket (cross-subreddit search) and attach if non-empty
     try:
         extras = _build_extras_bucket(
             ticker=ticker,
@@ -413,7 +400,6 @@ def fetch_posts_for_ticker(
     except Exception as exc:
         logger.warning("Error building extras bucket for %s: %s", ticker, exc)
 
-    # Return only subs with at least one post
     cleaned = {k: v for k, v in result.items() if v}
     logger.info(
         "[reddit_pulse] DONE %s -> %d buckets (including extras if present)",
