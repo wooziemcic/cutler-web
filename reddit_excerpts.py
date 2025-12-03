@@ -8,10 +8,13 @@ Lightweight Reddit snapshot module for the Cutler platform.
     * Cross-subreddit "Extras" search for a given ticker
 
 Extras logic:
-    - query="$TICKER"
+    - query="$TICKER stock"
     - sort="top"
     - time="week"
-    - take the first N posts in API order (after de-duping)
+    - fetch a larger pool, then:
+        * filter with _matches_ticker
+        * de-duplicate vs finance subs
+        * take the first N posts
 
 This module is used both as:
   - a CLI tester:  python reddit_excerpts.py AMZN
@@ -126,7 +129,6 @@ def _extract_wrapped_posts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
       {"success": true, "data": {"cursor": "...", "posts": [ { "kind": "t3",
                                                                 "data": {...}}, ...]}}
 
-    But we keep this helper defensive to survive minor shape changes.
     Returns a list of "post wrapper" dicts (usually with keys kind + data).
     """
     if not isinstance(payload, dict):
@@ -186,7 +188,7 @@ def _to_reddit_post(wrapper: Dict[str, Any]) -> RedditPost:
 
 def _matches_ticker(text: str, ticker: str) -> bool:
     """
-    Heuristic for finance-sub filtering:
+    Heuristic for filtering:
 
       - Match '$TICKER' anywhere, case-insensitive
       - Match 'TICKER' as a standalone token (after stripping punctuation)
@@ -242,16 +244,16 @@ def _fetch_top_posts_by_subreddit(
 def _search_cross_subreddits(
     query: str,
     time_window: str = "week",
-    max_results: int = 5,
+    max_results: int = 30,
 ) -> List[RedditPost]:
     """
     Use reddit34 getSearchPosts endpoint for a ticker search across Reddit.
 
     reddit34 docs:
       - Timeframe `time` can only be used with sort='top'.
-    So we use:
-      query="$TICKER", sort="top", time="week"
-    and then take the first max_results posts in that order.
+
+    We deliberately fetch a *larger* pool (max_results) and let the caller
+    filter + cap, so Extras can stay very ticker-focused.
     """
     params = {
         "query": query,
@@ -272,17 +274,14 @@ def _search_cross_subreddits(
     wrappers = _extract_wrapped_posts(payload)
     posts = [_to_reddit_post(w) for w in wrappers]
 
-    # Keep ordering from API, then cap
-    posts = posts[:max_results]
-
     logger.info(
-        "[reddit34] search '%s' (%s) -> %d posts (capped to %d)",
+        "[reddit34] raw search '%s' (%s) -> %d posts (pool size)",
         query,
         time_window,
-        len(wrappers),
         len(posts),
     )
-    return posts
+    # Let caller decide how many to keep / filter
+    return posts[:max_results]
 
 
 # ---------------------------------------------------------------------------
@@ -298,21 +297,26 @@ def _build_extras_bucket(
 ) -> List[RedditPost]:
     """
     Build a cross-subreddit 'extras' bucket for a ticker by doing a
-    global Reddit search for **$TICKER** over the given time window.
+    global Reddit search for **$TICKER stock** over the given time window.
 
-    Design goal: simple and predictable:
-      - query="$TICKER", sort="top", time="week"
-      - take the first max_total posts
-      - dedupe against finance-sub buckets via permalink
+    Design goal:
+      - query="$TICKER stock", sort="top", time="week"
+      - fetch a larger pool
+      - keep only posts that clearly mention the ticker (via _matches_ticker)
+      - dedupe vs finance subs
+      - then cap to max_total posts
     """
-    query = f"${ticker.upper()}"
+    # The "+ stock" bias pushes reddit34 toward equity-discussion posts
+    query = f"${ticker.upper()} stock"
 
+    # Fetch a larger pool so we can afford to filter aggressively
     search_posts = _search_cross_subreddits(
         query=query,
         time_window=time_window,
-        max_results=max_total * 2,  # grab a few extra so we can dedupe
+        max_results=max_total * 6,  # generous pool
     )
 
+    # Build a set of permalinks we already have, to avoid duplicates
     existing_permalinks = set()
     if current_by_subreddit:
         for posts in current_by_subreddit.values():
@@ -321,17 +325,28 @@ def _build_extras_bucket(
                     existing_permalinks.add(p.permalink)
 
     extras: List[RedditPost] = []
+    seen_permalinks = set(existing_permalinks)
+
     for p in search_posts:
         if len(extras) >= max_total:
             break
-        if p.permalink and p.permalink in existing_permalinks:
+
+        text = f"{p.title}\n{p.selftext}\n{p.body}"
+        if not _matches_ticker(text, ticker):
             continue
+
+        if p.permalink and p.permalink in seen_permalinks:
+            continue
+
         extras.append(p)
+        if p.permalink:
+            seen_permalinks.add(p.permalink)
 
     logger.info(
-        "[reddit34] extras for %s -> %d posts",
+        "[reddit34] extras for %s -> %d posts (from %d raw search results)",
         ticker,
         len(extras),
+        len(search_posts),
     )
     return extras
 
@@ -396,7 +411,7 @@ def fetch_posts_for_ticker(
                 ticker,
             )
 
-    # Extras via reddit34 search
+    # Extras via reddit34 search + strict ticker filter
     try:
         extras = _build_extras_bucket(
             ticker=ticker,
