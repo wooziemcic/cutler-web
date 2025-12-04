@@ -7,12 +7,17 @@ Lightweight Reddit snapshot module for the Cutler platform.
     * Top posts per finance subreddit
     * Cross-subreddit "Extras" search for a given ticker
 
-Extras logic:
-    - query="$TICKER stock"
-    - sort="relevance"
-    - internally filter to posts from the last 7 days (past week)
+Finance subs:
+    - getTopPostsBySubreddit(time='week')
+    - strict ticker filter (_matches_ticker)
+    - up to max_per_sub posts per subreddit
+
+Extras:
+    - getSearchPosts(query="$TICKER stock", sort="top", time="week")
+    - NO extra ticker filter (query already does that)
+    - NO manual created_utc filter (API enforces week window)
     - de-duplicate vs finance subs
-    - take the first N posts
+    - up to max_total posts
 
 This module is used both as:
   - a CLI tester:  python reddit_excerpts.py AMZN
@@ -23,7 +28,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
@@ -177,6 +181,7 @@ def _to_reddit_post(wrapper: Dict[str, Any]) -> RedditPost:
         try:
             created_utc = float(created_utc)
         except ValueError:
+        #         normalize failure -> None
             created_utc = None
 
     return RedditPost(
@@ -250,36 +255,31 @@ def _fetch_top_posts_by_subreddit(
 def _search_cross_subreddits(
     query: str,
     *,
-    sort: str = "top",
-    time_window: Optional[str] = None,
-    max_results: int = 60,
+    time_window: str = "week",
+    max_results: int = 30,
 ) -> List[RedditPost]:
     """
     Use reddit34 getSearchPosts endpoint for a ticker search across Reddit.
 
-    Important:
-      - Backend enforces: timeframe (time) can only be used with sort='top'.
-      - So:
-          * For sort='top' we send time=time_window (if provided).
-          * For other sorts (e.g., 'relevance') we DO NOT send 'time' and
-            instead filter by created_utc on our side if we want a window.
+    According to the API:
+      - Timeframe `time` *can* be used with sort='top'.
 
-    We fetch a larger pool (max_results) and let the caller filter + cap.
+    For Extras, we fix:
+      - sort='top'
+      - time='week' (or whatever time_window is)
     """
     params: Dict[str, Any] = {
         "query": query,
-        "sort": sort,
+        "sort": "top",
+        "time": time_window or "week",  # hour / day / week / month / year / all
     }
-    if sort == "top" and time_window:
-        params["time"] = time_window  # hour / day / week / month / year / all
 
     payload = _http_get(SEARCH_POSTS_ENDPOINT, params)
 
     if isinstance(payload, dict) and not payload.get("success", True):
         logger.warning(
-            "[reddit34] search unsuccessful for query=%r sort=%r time=%r; data=%r",
+            "[reddit34] search unsuccessful for query=%r time=%r; data=%r",
             query,
-            sort,
             time_window,
             payload.get("data"),
         )
@@ -289,9 +289,8 @@ def _search_cross_subreddits(
     posts = [_to_reddit_post(w) for w in wrappers]
 
     logger.info(
-        "[reddit34] raw search '%s' (sort=%s, time=%s) -> %d posts (pool size)",
+        "[reddit34] raw search '%s' (time=%s) -> %d posts (pool size)",
         query,
-        sort,
         time_window,
         len(posts),
     )
@@ -312,27 +311,23 @@ def _build_extras_bucket(
     """
     Build a cross-subreddit 'extras' bucket for a ticker.
 
-    Target behavior (conceptually):
+    Target behavior:
       - query="$TICKER stock"
-      - sort="relevance"
-      - restrict to past week
+      - sort="top"
+      - time="week"
       - dedupe vs finance subs
+      - up to max_total posts
     """
     query = f"${ticker.upper()} stock"
 
-    # 1) Fetch a relevance-sorted pool (no time param — we'll enforce week)
+    # 1) Fetch a weekly, top-sorted pool
     search_posts = _search_cross_subreddits(
         query=query,
-        sort="relevance",
-        time_window=None,          # cannot send time with relevance
-        max_results=max_total * 10,
+        time_window=time_window,
+        max_results=max_total * 6,
     )
 
-    # 2) Compute 7-day cutoff in epoch seconds
-    now_ts = time.time()
-    week_ago_ts = now_ts - 7 * 24 * 60 * 60
-
-    # 3) Build a set of permalinks we already have, to avoid duplicates
+    # 2) Build a set of permalinks we already have, to avoid duplicates
     existing_permalinks = set()
     if current_by_subreddit:
         for posts in current_by_subreddit.values():
@@ -347,12 +342,9 @@ def _build_extras_bucket(
         if len(extras) >= max_total:
             break
 
-        # 3a) Filter to last week if created_utc available
-        if p.created_utc is not None and p.created_utc < week_ago_ts:
-            continue
-
-        # NOTE: no _matches_ticker() here — query is already "$TICKER stock",
-        # so we trust the search relevance and just enforce recency + dedupe.
+        # No extra _matches_ticker or created_utc filter here:
+        #   - query="$TICKER stock" already biases results heavily
+        #   - time="week" ensures recent posts
 
         if p.permalink and p.permalink in seen_permalinks:
             continue
@@ -430,7 +422,7 @@ def fetch_posts_for_ticker(
                 ticker,
             )
 
-    # Extras via relevance+week-style search
+    # Extras via search
     try:
         extras = _build_extras_bucket(
             ticker=ticker,
