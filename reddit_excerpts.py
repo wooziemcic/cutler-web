@@ -11,10 +11,8 @@ Extras logic:
     - query="$TICKER stock"
     - sort="relevance"
     - internally filter to posts from the last 7 days (past week)
-    - fetch a larger pool, then:
-        * filter with _matches_ticker
-        * de-duplicate vs finance subs
-        * take the first N posts
+    - de-duplicate vs finance subs
+    - take the first N posts
 
 This module is used both as:
   - a CLI tester:  python reddit_excerpts.py AMZN
@@ -196,7 +194,7 @@ def _to_reddit_post(wrapper: Dict[str, Any]) -> RedditPost:
 
 def _matches_ticker(text: str, ticker: str) -> bool:
     """
-    Heuristic for filtering:
+    Heuristic for filtering in finance subs:
 
       - Match '$TICKER' anywhere, case-insensitive
       - Match 'TICKER' as a standalone token (after stripping punctuation)
@@ -318,10 +316,8 @@ def _build_extras_bucket(
       - query="$TICKER stock"
       - sort="relevance"
       - restrict to past week
-      - strongly require clear ticker mention
       - dedupe vs finance subs
     """
-    # The "+ stock" bias pushes reddit34 toward equity-discussion posts
     query = f"${ticker.upper()} stock"
 
     # 1) Fetch a relevance-sorted pool (no time param — we'll enforce week)
@@ -355,12 +351,9 @@ def _build_extras_bucket(
         if p.created_utc is not None and p.created_utc < week_ago_ts:
             continue
 
-        # 3b) Strong ticker filter
-        text = f"{p.title}\n{p.selftext}\n{p.body}"
-        if not _matches_ticker(text, ticker):
-            continue
+        # NOTE: no _matches_ticker() here — query is already "$TICKER stock",
+        # so we trust the search relevance and just enforce recency + dedupe.
 
-        # 3c) De-duplication
         if p.permalink and p.permalink in seen_permalinks:
             continue
 
