@@ -311,20 +311,22 @@ def _build_extras_bucket(
     """
     Build a cross-subreddit 'extras' bucket for a ticker.
 
-    Target behavior:
-      - query="$TICKER stock"
-      - sort="top"
-      - time="week"
-      - dedupe vs finance subs
-      - up to max_total posts
+    Logic:
+      - reddit34 search: query="$TICKER stock", sort="top", time="week"
+      - From the results, keep only posts that:
+          * clearly mention the ticker (via _matches_ticker on title/body), AND
+          * are either in a finance subreddit OR contain a finance keyword
+        This filters out noise like gun parts that happen to hit the query.
+      - De-duplicate vs finance subs.
+      - Cap to max_total posts (default 5).
     """
     query = f"${ticker.upper()} stock"
 
-    # 1) Fetch a weekly, top-sorted pool
+    # 1) Fetch weekly, top-sorted pool from reddit34
     search_posts = _search_cross_subreddits(
         query=query,
         time_window=time_window,
-        max_results=max_total * 6,
+        max_results=max_total * 10,  # overfetch so we can filter aggressively
     )
 
     # 2) Build a set of permalinks we already have, to avoid duplicates
@@ -338,14 +340,63 @@ def _build_extras_bucket(
     extras: List[RedditPost] = []
     seen_permalinks = set(existing_permalinks)
 
+    # Finance-ish subs (lowercased) for whitelisting
+    finance_subs = {s.lower() for s in FINANCE_SUBREDDITS}
+
+    # Simple finance keyword list to distinguish "gun stock" from "company stock"
+    finance_keywords = [
+        "stock",
+        "stocks",
+        "share",
+        "shares",
+        "earning",
+        "earnings",
+        "eps",
+        "dividend",
+        "valuation",
+        "price target",
+        "guidance",
+        "revenue",
+        "profit",
+        "loss",
+        "call option",
+        "put option",
+        "options",
+        "calls",
+        "puts",
+        "portfolio",
+        "ticker",
+        "analyst",
+        "upgrade",
+        "downgrade",
+        "buy rating",
+        "sell rating",
+        "overweight",
+        "underweight",
+        "long",
+        "short",
+    ]
+
     for p in search_posts:
         if len(extras) >= max_total:
             break
 
-        # No extra _matches_ticker or created_utc filter here:
-        #   - query="$TICKER stock" already biases results heavily
-        #   - time="week" ensures recent posts
+        # --- 2a) Require the ticker to actually appear in the text ---
+        text = f"{p.title}\n{p.selftext}\n{p.body}"
+        if not _matches_ticker(text, ticker):
+            # This is what will kill things like the Slimthicc MP5k build for AEM
+            continue
 
+        # --- 2b) Require some sign it's about finance, not random gear ---
+        text_lower = text.lower()
+        is_finance_sub = p.subreddit.lower() in finance_subs
+        has_finance_word = any(kw in text_lower for kw in finance_keywords)
+
+        if not (is_finance_sub or has_finance_word):
+            # e.g., gun/airsoft sub, no finance words -> drop
+            continue
+
+        # --- 2c) De-duplicate vs finance subs + already-chosen extras ---
         if p.permalink and p.permalink in seen_permalinks:
             continue
 
@@ -360,6 +411,7 @@ def _build_extras_bucket(
         len(search_posts),
     )
     return extras
+
 
 
 # ---------------------------------------------------------------------------
