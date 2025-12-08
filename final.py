@@ -63,6 +63,47 @@ from reportlab.lib import colors
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import sa_news_ai as sa_news
 import seekingalpha_excerpts as sa_scraper
+import sys
+
+def ensure_playwright_chromium_installed() -> bool:
+    """
+    Ensure Chromium exists in the default Playwright cache directory.
+    Streamlit Cloud sometimes wipes this on container rebuilds.
+    Returns True if Chromium is installed and ready, False if installation failed.
+    """
+
+    # The default Python-playwright installation path:
+    chromium_dir = Path.home() / ".cache/ms-playwright"
+    found = list(chromium_dir.glob("chromium-*/*/chrome-linux/chrome"))
+
+    if found:
+        return True  # Chromium already present
+
+    # Not found — try installing now
+    st.warning("Chromium not found. Installing Playwright browser… (this may take ~20–40 seconds)")
+
+    try:
+        # Run: python -m playwright install chromium
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        if result.returncode == 0:
+            st.success("Playwright Chromium installed successfully.")
+            return True
+        else:
+            st.error("Playwright Chromium installation failed.")
+            st.code(result.stderr)
+            return False
+
+    except Exception as e:
+        st.error("Unexpected error during Chromium installation.")
+        st.code(repr(e))
+        return False
+
 
 
 # local imports
@@ -1968,6 +2009,10 @@ def choose_default_quarter(available: List[str]) -> Optional[str]:
 
 def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset: Optional[List[str]] = None):
     st.markdown(f"### Running {batch_name}")
+    # NEW: auto-ensure Chromium is present
+    if not ensure_playwright_chromium_installed():
+        st.error("Cannot proceed — Chromium is not available.")
+        return
     brands = RUNNABLE_BATCHES.get(batch_name, [])
     if subset:
         brands = [b for b in brands if b in subset]
