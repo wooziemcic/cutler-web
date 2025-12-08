@@ -104,6 +104,13 @@ def ensure_playwright_chromium_installed() -> bool:
         st.code(repr(e))
         return False
 
+def _brand_progress_path(batch_name: str, quarter: str, brand: str) -> Path:
+    """
+    Return a small marker file path that indicates we have fully processed
+    this fund family (brand) for a given batch + quarter in this container.
+    Used to resume long runs without re-doing earlier brands.
+    """
+    return MAN_DIR / "_progress" / _safe(batch_name) / quarter / f"{_safe(brand)}.done"
 
 
 # local imports
@@ -2127,10 +2134,30 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                     continue
 
                 outs: List[Path] = []
+                # NEW: seed outs with any existing excerpt PDFs on disk for this batch+quarter
+                existing_outs: List[Path] = []
+                existing_root = EX_DIR / q
+                if existing_root.exists():
+                    for brand in RUNNABLE_BATCHES.get(batch_name, []):
+                        base = existing_root / _safe(brand)
+                        if not base.exists():
+                            continue
+                        for pdf in base.rglob("*.pdf"):
+                            if pdf.is_file():
+                                existing_outs.append(pdf)
+
+                existing_outs_set = {p.resolve() for p in existing_outs}
+                outs.extend(existing_outs)
+
                 manifest_items: List[Dict[str, Any]] = []
                 table_rows: List[Dict[str, Any]] = []  # snapshot of table rows
 
                 for i, (brand, token) in enumerate(tokens, 1):
+                    progress_path = _brand_progress_path(batch_name, q, brand)
+                    if progress_path.exists():
+                        st.info(f"[{q}] Skipping {brand} (already completed in this container).")
+                        continue
+
                     st.write(f"[{q}] {i}/{len(tokens)} — {brand} (search: {token})")
                     try:
                         _search_by_fund(page, token)
@@ -2183,7 +2210,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                                     }
                                 )
 
-                                if built:
+                                if built and built.resolve() not in existing_outs_set:
                                     outs.append(built)
 
                             page.go_back()
@@ -2191,6 +2218,10 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                     except Exception as e:
                         st.error(f"Error on fund family {brand}: {e}")
                         continue
+                    else:
+                        # Mark this brand as fully processed for this batch+quarter
+                        progress_path.parent.mkdir(parents=True, exist_ok=True)
+                        progress_path.write_text(datetime.now().isoformat())
 
                 # 1) Compiled excerpt PDF (BatchN_Date_Excerpt.pdf)
                 compiled = compile_merged(batch_name, q, outs, incremental=False)
