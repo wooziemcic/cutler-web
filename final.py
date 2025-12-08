@@ -2159,69 +2159,77 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                         continue
 
                     st.write(f"[{q}] {i}/{len(tokens)} — {brand} (search: {token})")
+
                     try:
                         _search_by_fund(page, token)
                         hits = _parse_rows(page, q)
+
                         if not hits:
-                            continue
-                        seen = set()
-                        for h in hits:
-                            # record table row
-                            table_rows.append(
-                                {
-                                    "fund_family": brand,
-                                    "search_token": token,
-                                    "quarter": h.quarter,
-                                    "letter_date": h.letter_date,
-                                    "fund_name": h.fund_name,
-                                    "fund_href": h.fund_href,
-                                }
-                            )
-
-                            if h.fund_href in seen:
-                                continue
-                            seen.add(h.fund_href)
-                            page.goto(h.fund_href)
-                            page.wait_for_load_state("domcontentloaded")
-
-                            dest = DL_DIR / q / _safe(brand)
-                            pdfs = _download_quarter_pdf_from_fund(page, q, dest)
-                            for pdf in pdfs:
-                                out_dir = EX_DIR / q / _safe(brand) / _safe(pdf.stem)
-                                built = run_excerpt_and_build(
-                                    pdf,
-                                    out_dir,
-                                    source_pdf_name=pdf.name,
-                                    letter_date=h.letter_date or None,
-                                )
-
-                                manifest_items.append(
+                            # Brand was searched, but there were no letters for this quarter.
+                            # We still want to mark it as completed so we don’t search again.
+                            pass
+                        else:
+                            seen = set()
+                            for h in hits:
+                                # record table row
+                                table_rows.append(
                                     {
                                         "fund_family": brand,
                                         "search_token": token,
-                                        "letter_date": h.letter_date or "",
-                                        "downloaded_pdf": str(pdf),
-                                        "source_pdf_name": pdf.name,
-                                        "excerpt_dir": str(out_dir),
-                                        "excerpts_json": str(out_dir / "excerpts_clean.json"),
-                                        "excerpt_pdf": str(built) if built else "",
+                                        "quarter": h.quarter,
+                                        "letter_date": h.letter_date,
                                         "fund_name": h.fund_name,
                                         "fund_href": h.fund_href,
                                     }
                                 )
 
-                                if built and built.resolve() not in existing_outs_set:
-                                    outs.append(built)
+                                if h.fund_href in seen:
+                                    continue
+                                seen.add(h.fund_href)
+                                page.goto(h.fund_href)
+                                page.wait_for_load_state("domcontentloaded")
 
-                            page.go_back()
-                            page.wait_for_load_state("domcontentloaded")
+                                dest = DL_DIR / q / _safe(brand)
+                                pdfs = _download_quarter_pdf_from_fund(page, q, dest)
+                                for pdf in pdfs:
+                                    out_dir = EX_DIR / q / _safe(brand) / _safe(pdf.stem)
+                                    built = run_excerpt_and_build(
+                                        pdf,
+                                        out_dir,
+                                        source_pdf_name=pdf.name,
+                                        letter_date=h.letter_date or None,
+                                    )
+
+                                    manifest_items.append(
+                                        {
+                                            "fund_family": brand,
+                                            "search_token": token,
+                                            "letter_date": h.letter_date or "",
+                                            "downloaded_pdf": str(pdf),
+                                            "source_pdf_name": pdf.name,
+                                            "excerpt_dir": str(out_dir),
+                                            "excerpts_json": str(out_dir / "excerpts_clean.json"),
+                                            "excerpt_pdf": str(built) if built else "",
+                                            "fund_name": h.fund_name,
+                                            "fund_href": h.fund_href,
+                                        }
+                                    )
+
+                                    if built and built.resolve() not in existing_outs_set:
+                                        outs.append(built)
+
+                                page.go_back()
+                                page.wait_for_load_state("domcontentloaded")
+
                     except Exception as e:
                         st.error(f"Error on fund family {brand}: {e}")
+                        # do NOT mark this brand as done – we want to retry on next run
                         continue
-                    else:
-                        # Mark this brand as fully processed for this batch+quarter
-                        progress_path.parent.mkdir(parents=True, exist_ok=True)
-                        progress_path.write_text(datetime.now().isoformat())
+
+                    # If we reach here, the search for this brand+quarter finished without error,
+                    # regardless of whether there were hits or downloads. Mark it as completed.
+                    progress_path.parent.mkdir(parents=True, exist_ok=True)
+                    progress_path.write_text(datetime.now().isoformat())
 
                 # 1) Compiled excerpt PDF (BatchN_Date_Excerpt.pdf)
                 compiled = compile_merged(batch_name, q, outs, incremental=False)
@@ -2752,10 +2760,24 @@ def main():
                     "(leave empty to run the entire batch):",
                     options=names_in_batch,
                 )
+                subset = selected_funds or None
 
-                if st.button(f"Run {selected_batch}", use_container_width=True):
-                    subset = selected_funds or None
+                # Button only decides whether we *run* scraping.
+                run_clicked = st.button(f"Run {selected_batch}", use_container_width=True)
+
+                if run_clicked:
+                    # First time or explicit re-run: run_batch may scrape,
+                    # build excerpts, compile, and update session cache.
                     run_batch(selected_batch, quarters, use_first_word, subset=subset)
+                else:
+                    # No click this rerun (e.g. user just hit a download button),
+                    # but if we have cached results for this batch+quarters,
+                    # re-render them without scraping.
+                    cache_all = st.session_state.get("batch_cache", {})
+                    cache_entry = cache_all.get(selected_batch)
+                    if cache_entry and cache_entry.get("quarters") == quarters:
+                        run_batch(selected_batch, quarters, use_first_word, subset=subset)
+
 
         st.markdown("</div>", unsafe_allow_html=True)
 
