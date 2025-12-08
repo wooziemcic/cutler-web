@@ -354,28 +354,57 @@ def _stamp_pdf(src: Path, left: str, mid: str, right: str) -> Path:
         w.write(f)
     return tmp
 
-def compile_merged(batch: str, quarter: str, collected: List[Path]) -> Optional[Path]:
+def _build_compiled_filename(batch: str, *, incremental: bool = False, dt: Optional[datetime] = None) -> str:
+    """Return a human-friendly compiled PDF name like Batch1_2025-12-04_Excerpt.pdf.
+
+    We keep the actual quarter inside the PDF body/header; the file name is what
+    interns will see and archive in their 2025/Dec folders.
+    """
+    if dt is None:
+        dt = datetime.now()
+    batch_token = batch.replace(" ", "")  # "Batch 1" -> "Batch1"
+    date_str = dt.strftime("%Y-%m-%d")
+    suffix = "Incremental_Excerpt" if incremental else "Excerpt"
+    return f"{batch_token}_{date_str}_{suffix}.pdf"
+
+
+def compile_merged(batch: str, quarter: str, collected: List[Path], *, incremental: bool = False) -> Optional[Path]:
     if not collected:
         return None
-    out = CP_DIR / f"Compiled_Cutler_{batch.replace(' ', '')}_{quarter}_{datetime.now():%Y%m%d_%H%M%S}.pdf"
+
+    # File name now matches your convention:
+    #   BatchN_YYYY-MM-DD_Excerpt.pdf
+    #   BatchN_YYYY-MM-DD_Incremental_Excerpt.pdf
+    out_name = _build_compiled_filename(batch, incremental=incremental)
+    out = CP_DIR / out_name
+
     m = PdfMerger()
     added = 0
     for p in collected:
         try:
             title = p.stem.replace('_', ' ').replace('-', ' ')
-            stamped = _stamp_pdf(p, left=batch, mid=title, right=f"Run {datetime.now():%Y-%m-%d %H:%M}")
+            stamped = _stamp_pdf(
+                p,
+                left=batch,
+                mid=title,
+                right=f"Run {datetime.now():%Y-%m-%d %H:%M}",
+            )
             m.append(str(stamped))
             added += 1
         except Exception:
             continue
+
     if not added:
         m.close()
         return None
+
     try:
         m.write(str(out))
     finally:
         m.close()
+
     return out
+
 
 # -------------------------------------------------------------------
 # Seeking Alpha Analysis API helpers (RapidAPI)
@@ -1947,102 +1976,130 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
         return
     tokens = [(b, _first_word(b) if use_first_word else b) for b in brands]
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        ctx = browser.new_context(accept_downloads=True)
-        page = ctx.new_page()
-        page.set_default_timeout(30000)
-        page.goto(BSD_URL)
+    # Correct public Playwright error class
+    from playwright.sync_api import Error as PlaywrightError
 
-        for q in quarters:
-            st.write(f"Searching quarter {q} across {len(tokens)} fund families…")
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox"]  # important for Streamlit/other PaaS
+            )
+            ctx = browser.new_context(accept_downloads=True)
+            page = ctx.new_page()
+            page.set_default_timeout(30000)
+            page.goto(BSD_URL)
 
-            if not _set_quarter(page, q):
-                st.warning(
-                    f"Quarter **{q}** is not available on the data source at the moment. "
-                    "It may not have any letters yet."
-                )
-                continue
+            for q in quarters:
+                st.write(f"Searching quarter {q} across {len(tokens)} fund families…")
 
-            outs: List[Path] = []
-            manifest_items: List[Dict[str, Any]] = []
-            table_rows: List[Dict[str, Any]] = []  # snapshot of table rows
+                if not _set_quarter(page, q):
+                    st.warning(
+                        f"Quarter **{q}** is not available on the data source at the moment. "
+                        "It may not have any letters yet."
+                    )
+                    continue
 
-            for i, (brand, token) in enumerate(tokens, 1):
-                st.write(f"[{q}] {i}/{len(tokens)} — {brand} (search: {token})")
-                try:
-                    _search_by_fund(page, token)
-                    hits = _parse_rows(page, q)
-                    if not hits:
-                        continue
-                    seen = set()
-                    for h in hits:
-                        # record table row
-                        table_rows.append(
-                            {
-                                "fund_family": brand,
-                                "search_token": token,
-                                "quarter": h.quarter,
-                                "letter_date": h.letter_date,
-                                "fund_name": h.fund_name,
-                                "fund_href": h.fund_href,
-                            }
-                        )
+                outs: List[Path] = []
+                manifest_items: List[Dict[str, Any]] = []
+                table_rows: List[Dict[str, Any]] = []  # snapshot of table rows
 
-                        if h.fund_href in seen:
+                for i, (brand, token) in enumerate(tokens, 1):
+                    st.write(f"[{q}] {i}/{len(tokens)} — {brand} (search: {token})")
+                    try:
+                        _search_by_fund(page, token)
+                        hits = _parse_rows(page, q)
+                        if not hits:
                             continue
-                        seen.add(h.fund_href)
-                        page.goto(h.fund_href)
-                        page.wait_for_load_state("domcontentloaded")
-
-                        dest = DL_DIR / q / _safe(brand)
-                        pdfs = _download_quarter_pdf_from_fund(page, q, dest)
-                        for pdf in pdfs:
-                            out_dir = EX_DIR / q / _safe(brand) / _safe(pdf.stem)
-                            built = run_excerpt_and_build(
-                                pdf,
-                                out_dir,
-                                source_pdf_name=pdf.name,
-                                letter_date=h.letter_date or None,
-                            )
-
-                            manifest_items.append(
+                        seen = set()
+                        for h in hits:
+                            # record table row
+                            table_rows.append(
                                 {
                                     "fund_family": brand,
                                     "search_token": token,
-                                    "letter_date": h.letter_date or "",
-                                    "downloaded_pdf": str(pdf),
-                                    "source_pdf_name": pdf.name,
-                                    "excerpt_dir": str(out_dir),
-                                    "excerpts_json": str(out_dir / "excerpts_clean.json"),
-                                    "excerpt_pdf": str(built) if built else "",
+                                    "quarter": h.quarter,
+                                    "letter_date": h.letter_date,
                                     "fund_name": h.fund_name,
                                     "fund_href": h.fund_href,
                                 }
                             )
 
-                            if built:
-                                outs.append(built)
+                            if h.fund_href in seen:
+                                continue
+                            seen.add(h.fund_href)
+                            page.goto(h.fund_href)
+                            page.wait_for_load_state("domcontentloaded")
 
-                        page.go_back()
-                        page.wait_for_load_state("domcontentloaded")
-                except Exception as e:
-                    st.error(f"Error on fund family {brand}: {e}")
-                    continue
+                            dest = DL_DIR / q / _safe(brand)
+                            pdfs = _download_quarter_pdf_from_fund(page, q, dest)
+                            for pdf in pdfs:
+                                out_dir = EX_DIR / q / _safe(brand) / _safe(pdf.stem)
+                                built = run_excerpt_and_build(
+                                    pdf,
+                                    out_dir,
+                                    source_pdf_name=pdf.name,
+                                    letter_date=h.letter_date or None,
+                                )
 
-            compiled = compile_merged(batch_name, q, outs)
-            if compiled:
-                st.success(f"Compiled PDF for {q}: {compiled}")
-            else:
-                st.info(
-                    f"No excerpt PDFs produced for **{q}**. "
-                    "The selected fund families may not yet have letters or ticker mentions for this quarter."
-                )
+                                manifest_items.append(
+                                    {
+                                        "fund_family": brand,
+                                        "search_token": token,
+                                        "letter_date": h.letter_date or "",
+                                        "downloaded_pdf": str(pdf),
+                                        "source_pdf_name": pdf.name,
+                                        "excerpt_dir": str(out_dir),
+                                        "excerpts_json": str(out_dir / "excerpts_clean.json"),
+                                        "excerpt_pdf": str(built) if built else "",
+                                        "fund_name": h.fund_name,
+                                        "fund_href": h.fund_href,
+                                    }
+                                )
 
-            # write manifest regardless (so we capture table_rows snapshot)
-            _write_manifest(batch_name, q, compiled, manifest_items, table_rows=table_rows)
+                                if built:
+                                    outs.append(built)
 
-        browser.close()
+                            page.go_back()
+                            page.wait_for_load_state("domcontentloaded")
+                    except Exception as e:
+                        st.error(f"Error on fund family {brand}: {e}")
+                        continue
+
+                compiled = compile_merged(batch_name, q, outs, incremental=False)
+                if compiled:
+                    st.success(f"Compiled PDF for {q}: {compiled}")
+
+                    try:
+                        with open(compiled, "rb") as f:
+                            st.download_button(
+                                label=f"Download {batch_name} {q} excerpt PDF",
+                                data=f.read(),
+                                file_name=compiled.name,
+                                mime="application/pdf",
+                                key=f"download_{batch_name.replace(' ', '')}_{q}".replace('/', '_'),
+                            )
+                    except Exception:
+                        st.warning("Compiled PDF created but could not be opened for download.")
+
+                else:
+                    st.info(
+                        f"No excerpt PDFs produced for **{q}**. "
+                        "The selected fund families may not yet have letters or ticker mentions for this quarter."
+                    )
+
+                _write_manifest(batch_name, q, compiled, manifest_items, table_rows=table_rows)
+
+            browser.close()
+
+    except PlaywrightError as e:
+        st.error("Playwright could not start Chromium in this environment.")
+        st.code(repr(e))
+        return
+    except Exception as e:
+        st.error("Unexpected error starting Playwright browser.")
+        st.code(repr(e))
+        return
 
 # ---------- NEW: incremental per-batch updater ----------
 
@@ -2212,19 +2269,27 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 
         compiled = None
         if outs:
-            compiled = compile_merged(batch_name, quarter, outs)
+            compiled = compile_merged(batch_name, quarter, outs, incremental=True)
             if compiled:
                 st.success(f"Incremental compiled PDF created: {compiled}")
+
+                # Direct download: BatchN_Date_Incremental_Excerpt.pdf
+                try:
+                    with open(compiled, "rb") as f:
+                        st.download_button(
+                            label="Download incremental excerpt PDF",
+                            data=f.read(),
+                            file_name=compiled.name,  # e.g. Batch1_2025-12-04_Incremental_Excerpt.pdf
+                            mime="application/pdf",
+                            key=f"download_inc_{batch_name.replace(' ', '')}_{quarter}".replace('/', '_'),
+                        )
+                except Exception:
+                    st.warning("Incremental PDF created but could not be opened for download. Check server logs.")
             else:
                 st.info(
                     "New letters were found, but no excerpt PDFs were produced. "
                     "They may not contain any tracked tickers."
                 )
-        else:
-            st.info(
-                "New letters were detected in the table, but their PDFs could not be "
-                "downloaded or yielded no excerpts."
-            )
 
         # Write manifest capturing current snapshot + any new items we processed
         _write_manifest(batch_name, quarter, compiled, manifest_items, table_rows=current_rows)
