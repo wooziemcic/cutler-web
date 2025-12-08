@@ -2009,10 +2009,12 @@ def choose_default_quarter(available: List[str]) -> Optional[str]:
 
 def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset: Optional[List[str]] = None):
     st.markdown(f"### Running {batch_name}")
-    # NEW: auto-ensure Chromium is present
+
+    # Ensure Chromium exists in this container (auto-install if needed)
     if not ensure_playwright_chromium_installed():
         st.error("Cannot proceed — Chromium is not available.")
         return
+
     brands = RUNNABLE_BATCHES.get(batch_name, [])
     if subset:
         brands = [b for b in brands if b in subset]
@@ -2021,14 +2023,13 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
         return
     tokens = [(b, _first_word(b) if use_first_word else b) for b in brands]
 
-    # Correct public Playwright error class
     from playwright.sync_api import Error as PlaywrightError
 
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
-                args=["--no-sandbox"]  # important for Streamlit/other PaaS
+                args=["--no-sandbox"],  # important for Streamlit/other PaaS
             )
             ctx = browser.new_context(accept_downloads=True)
             page = ctx.new_page()
@@ -2111,28 +2112,68 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                         st.error(f"Error on fund family {brand}: {e}")
                         continue
 
+                # 1) Compiled excerpt PDF (BatchN_Date_Excerpt.pdf)
                 compiled = compile_merged(batch_name, q, outs, incremental=False)
                 if compiled:
                     st.success(f"Compiled PDF for {q}: {compiled}")
 
+                    # Offer direct download so interns always get BatchN_Date_Excerpt.pdf
                     try:
                         with open(compiled, "rb") as f:
                             st.download_button(
                                 label=f"Download {batch_name} {q} excerpt PDF",
                                 data=f.read(),
-                                file_name=compiled.name,
+                                file_name=compiled.name,  # e.g. Batch1_2025-12-04_Excerpt.pdf
                                 mime="application/pdf",
                                 key=f"download_{batch_name.replace(' ', '')}_{q}".replace('/', '_'),
                             )
                     except Exception:
-                        st.warning("Compiled PDF created but could not be opened for download.")
-
+                        st.warning("Compiled PDF created but could not be opened for download. Check server logs.")
                 else:
                     st.info(
                         f"No excerpt PDFs produced for **{q}**. "
                         "The selected fund families may not yet have letters or ticker mentions for this quarter."
                     )
 
+                # 2) Full-letter downloads (original PDFs)
+                #    De-duplicate by downloaded_pdf path and expose download buttons.
+                if manifest_items:
+                    unique_letters: Dict[str, Dict[str, Any]] = {}
+                    for item in manifest_items:
+                        pdf_path = item.get("downloaded_pdf") or ""
+                        if not pdf_path:
+                            continue
+                        if pdf_path in unique_letters:
+                            continue
+                        unique_letters[pdf_path] = item
+
+                    if unique_letters:
+                        with st.expander(f"View / download full letters for {q}"):
+                            for idx, item in enumerate(unique_letters.values(), start=1):
+                                pdf_path = Path(item["downloaded_pdf"])
+                                label_bits = [
+                                    item.get("fund_family") or "",
+                                    item.get("fund_name") or "",
+                                    item.get("letter_date") or "",
+                                ]
+                                label_text = " – ".join([b for b in label_bits if b])
+
+                                if pdf_path.exists():
+                                    try:
+                                        with open(pdf_path, "rb") as f:
+                                            st.download_button(
+                                                label=f"Download full letter #{idx}: {label_text or pdf_path.name}",
+                                                data=f.read(),
+                                                file_name=pdf_path.name,
+                                                mime="application/pdf",
+                                                key=f"download_full_{q}_{idx}",
+                                            )
+                                    except Exception:
+                                        st.warning(f"Could not open full letter: {pdf_path}")
+                                else:
+                                    st.warning(f"Full letter file not found on disk: {pdf_path}")
+
+                # write manifest regardless (so we capture table_rows snapshot)
                 _write_manifest(batch_name, q, compiled, manifest_items, table_rows=table_rows)
 
             browser.close()
@@ -2145,6 +2186,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
         st.error("Unexpected error starting Playwright browser.")
         st.code(repr(e))
         return
+
 
 # ---------- NEW: incremental per-batch updater ----------
 
