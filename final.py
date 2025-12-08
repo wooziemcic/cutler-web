@@ -1977,12 +1977,14 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
     tokens = [(b, _first_word(b) if use_first_word else b) for b in brands]
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox"]  # important for Streamlit/other PaaS
+        )
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30000)
         page.goto(BSD_URL)
-
         for q in quarters:
             st.write(f"Searching quarter {q} across {len(tokens)} fund families…")
 
