@@ -17,3 +17,12 @@ p = pathlib.Path.home()/".cache/ms-playwright"
 print(p, "exists:", p.exists())
 print(list(p.glob("*")))
 PY
+
+#!/bin/bash
+set -e
+
+# Install Playwright browsers for this image
+playwright install chromium
+
+# Try to install OS deps; if some are already present, ignore errors
+playwright install-deps chromium || true
