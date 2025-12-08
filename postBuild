@@ -3,26 +3,12 @@ set -euxo pipefail
 
 echo "postBuild starting in: $(pwd)"
 echo "Python: $(python --version)"
-echo "Installing Playwright Chromium..."
+echo "Installing Playwright Chromium into default cache..."
 
-# Ensure browsers install into a writable, predictable location
-export PLAYWRIGHT_BROWSERS_PATH=0
+# IMPORTANT: no PLAYWRIGHT_BROWSERS_PATH override here.
+# This installs to ~/.cache/ms-playwright, which is exactly where
+# Playwright looks at runtime (your error path).
 
 python -m playwright install chromium
 
-echo "postBuild finished. Browsers at:"
-python - <<'PY'
-import os, pathlib
-p = pathlib.Path.home()/".cache/ms-playwright"
-print(p, "exists:", p.exists())
-print(list(p.glob("*")))
-PY
-
-#!/bin/bash
-set -e
-
-# Install Playwright browsers for this image
-playwright install chromium
-
-# Try to install OS deps; if some are already present, ignore errors
-playwright install-deps chromium || true
+echo "postBuild finished."
