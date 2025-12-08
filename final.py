@@ -354,57 +354,28 @@ def _stamp_pdf(src: Path, left: str, mid: str, right: str) -> Path:
         w.write(f)
     return tmp
 
-def _build_compiled_filename(batch: str, *, incremental: bool = False, dt: Optional[datetime] = None) -> str:
-    """Return a human-friendly compiled PDF name like Batch1_2025-12-04_Excerpt.pdf.
-
-    We keep the actual quarter inside the PDF body/header; the file name is what
-    interns will see and archive in their 2025/Dec folders.
-    """
-    if dt is None:
-        dt = datetime.now()
-    batch_token = batch.replace(" ", "")  # "Batch 1" -> "Batch1"
-    date_str = dt.strftime("%Y-%m-%d")
-    suffix = "Incremental_Excerpt" if incremental else "Excerpt"
-    return f"{batch_token}_{date_str}_{suffix}.pdf"
-
-
-def compile_merged(batch: str, quarter: str, collected: List[Path], *, incremental: bool = False) -> Optional[Path]:
+def compile_merged(batch: str, quarter: str, collected: List[Path]) -> Optional[Path]:
     if not collected:
         return None
-
-    # File name now matches your convention:
-    #   BatchN_YYYY-MM-DD_Excerpt.pdf
-    #   BatchN_YYYY-MM-DD_Incremental_Excerpt.pdf
-    out_name = _build_compiled_filename(batch, incremental=incremental)
-    out = CP_DIR / out_name
-
+    out = CP_DIR / f"Compiled_Cutler_{batch.replace(' ', '')}_{quarter}_{datetime.now():%Y%m%d_%H%M%S}.pdf"
     m = PdfMerger()
     added = 0
     for p in collected:
         try:
             title = p.stem.replace('_', ' ').replace('-', ' ')
-            stamped = _stamp_pdf(
-                p,
-                left=batch,
-                mid=title,
-                right=f"Run {datetime.now():%Y-%m-%d %H:%M}",
-            )
+            stamped = _stamp_pdf(p, left=batch, mid=title, right=f"Run {datetime.now():%Y-%m-%d %H:%M}")
             m.append(str(stamped))
             added += 1
         except Exception:
             continue
-
     if not added:
         m.close()
         return None
-
     try:
         m.write(str(out))
     finally:
         m.close()
-
     return out
-
 
 # -------------------------------------------------------------------
 # Seeking Alpha Analysis API helpers (RapidAPI)
@@ -1977,14 +1948,12 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
     tokens = [(b, _first_word(b) if use_first_word else b) for b in brands]
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox"]  # important for Streamlit/other PaaS
-        )
+        browser = pw.chromium.launch(headless=True)
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30000)
         page.goto(BSD_URL)
+
         for q in quarters:
             st.write(f"Searching quarter {q} across {len(tokens)} fund families…")
 
@@ -2061,22 +2030,9 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                     st.error(f"Error on fund family {brand}: {e}")
                     continue
 
-            compiled = compile_merged(batch_name, q, outs, incremental=False)
+            compiled = compile_merged(batch_name, q, outs)
             if compiled:
                 st.success(f"Compiled PDF for {q}: {compiled}")
-
-                # Offer direct download so interns always get BatchN_Date_Excerpt.pdf
-                try:
-                    with open(compiled, "rb") as f:
-                        st.download_button(
-                            label=f"Download {batch_name} {q} excerpt PDF",
-                            data=f.read(),
-                            file_name=compiled.name,          # e.g. Batch1_2025-12-04_Excerpt.pdf
-                            mime="application/pdf",
-                            key=f"download_{batch_name.replace(' ', '')}_{q}".replace('/', '_'),
-                        )
-                except Exception:
-                    st.warning("Compiled PDF created but could not be opened for download. Check server logs.")
             else:
                 st.info(
                     f"No excerpt PDFs produced for **{q}**. "
@@ -2256,27 +2212,19 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 
         compiled = None
         if outs:
-            compiled = compile_merged(batch_name, quarter, outs, incremental=True)
+            compiled = compile_merged(batch_name, quarter, outs)
             if compiled:
                 st.success(f"Incremental compiled PDF created: {compiled}")
-
-                # Direct download: BatchN_Date_Incremental_Excerpt.pdf
-                try:
-                    with open(compiled, "rb") as f:
-                        st.download_button(
-                            label="Download incremental excerpt PDF",
-                            data=f.read(),
-                            file_name=compiled.name,  # e.g. Batch1_2025-12-04_Incremental_Excerpt.pdf
-                            mime="application/pdf",
-                            key=f"download_inc_{batch_name.replace(' ', '')}_{quarter}".replace('/', '_'),
-                        )
-                except Exception:
-                    st.warning("Incremental PDF created but could not be opened for download. Check server logs.")
             else:
                 st.info(
                     "New letters were found, but no excerpt PDFs were produced. "
                     "They may not contain any tracked tickers."
                 )
+        else:
+            st.info(
+                "New letters were detected in the table, but their PDFs could not be "
+                "downloaded or yielded no excerpts."
+            )
 
         # Write manifest capturing current snapshot + any new items we processed
         _write_manifest(batch_name, quarter, compiled, manifest_items, table_rows=current_rows)
