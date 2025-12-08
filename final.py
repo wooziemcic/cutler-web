@@ -2010,6 +2010,80 @@ def choose_default_quarter(available: List[str]) -> Optional[str]:
 def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset: Optional[List[str]] = None):
     st.markdown(f"### Running {batch_name}")
 
+    # --------- SESSION MEMORY: reuse results if this batch+quarters already ran ---------
+    cache_all = st.session_state.get("batch_cache", {})
+    cache_entry = cache_all.get(batch_name)
+
+    if cache_entry and cache_entry.get("quarters") == quarters:
+        st.info("Using cached results for this batch in this session (no new scraping).")
+
+        for q in quarters:
+            qdata = cache_entry["by_quarter"].get(q, {})
+            compiled_str = qdata.get("compiled") or ""
+            compiled = Path(compiled_str) if compiled_str else None
+            manifest_items = qdata.get("manifest_items") or []
+
+            # 1) Compiled excerpt PDF download (if still present)
+            if compiled and compiled.exists():
+                st.success(f"[Cached] Compiled PDF for {q}: {compiled}")
+
+                try:
+                    with open(compiled, "rb") as f:
+                        st.download_button(
+                            label=f"Download {batch_name} {q} excerpt PDF",
+                            data=f.read(),
+                            file_name=compiled.name,  # e.g. Batch1_2025-12-04_Excerpt.pdf
+                            mime="application/pdf",
+                            key=f"download_cached_{batch_name.replace(' ', '')}_{q}".replace('/', '_'),
+                        )
+                except Exception:
+                    st.warning("Cached compiled PDF exists but could not be opened for download.")
+            else:
+                st.info(
+                    f"[Cached] No compiled excerpt PDF found for **{q}**. "
+                    "It may have been deleted from disk."
+                )
+
+            # 2) Full-letter downloads (original PDFs) from cached manifest_items
+            if manifest_items:
+                unique_letters: Dict[str, Dict[str, Any]] = {}
+                for item in manifest_items:
+                    pdf_path = item.get("downloaded_pdf") or ""
+                    if not pdf_path:
+                        continue
+                    if pdf_path in unique_letters:
+                        continue
+                    unique_letters[pdf_path] = item
+
+                if unique_letters:
+                    with st.expander(f"[Cached] View / download full letters for {q}"):
+                        for idx, item in enumerate(unique_letters.values(), start=1):
+                            pdf_path = Path(item["downloaded_pdf"])
+                            label_bits = [
+                                item.get("fund_family") or "",
+                                item.get("fund_name") or "",
+                                item.get("letter_date") or "",
+                            ]
+                            label_text = " – ".join([b for b in label_bits if b])
+
+                            if pdf_path.exists():
+                                try:
+                                    with open(pdf_path, "rb") as f:
+                                        st.download_button(
+                                            label=f"Download full letter #{idx}: {label_text or pdf_path.name}",
+                                            data=f.read(),
+                                            file_name=pdf_path.name,
+                                            mime="application/pdf",
+                                            key=f"download_full_cached_{q}_{idx}",
+                                        )
+                                except Exception:
+                                    st.warning(f"Could not open full letter: {pdf_path}")
+                            else:
+                                st.warning(f"Full letter file not found on disk: {pdf_path}")
+
+        return  # IMPORTANT: skip scraping if we used cache
+    # ---------------------------------------------------------------------- END CACHE ----
+
     # Ensure Chromium exists in this container (auto-install if needed)
     if not ensure_playwright_chromium_installed():
         st.error("Cannot proceed — Chromium is not available.")
@@ -2024,6 +2098,12 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
     tokens = [(b, _first_word(b) if use_first_word else b) for b in brands]
 
     from playwright.sync_api import Error as PlaywrightError
+
+    # We'll fill this and store it into st.session_state at the end
+    batch_cache_entry: Dict[str, Any] = {
+        "quarters": quarters,
+        "by_quarter": {},
+    }
 
     try:
         with sync_playwright() as pw:
@@ -2136,7 +2216,6 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                     )
 
                 # 2) Full-letter downloads (original PDFs)
-                #    De-duplicate by downloaded_pdf path and expose download buttons.
                 if manifest_items:
                     unique_letters: Dict[str, Dict[str, Any]] = {}
                     for item in manifest_items:
@@ -2176,6 +2255,13 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                 # write manifest regardless (so we capture table_rows snapshot)
                 _write_manifest(batch_name, q, compiled, manifest_items, table_rows=table_rows)
 
+                # Save this quarter's results into cache entry
+                batch_cache_entry["by_quarter"][q] = {
+                    "compiled": str(compiled) if compiled else "",
+                    "manifest_items": manifest_items,
+                    "table_rows": table_rows,
+                }
+
             browser.close()
 
     except PlaywrightError as e:
@@ -2187,6 +2273,10 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
         st.code(repr(e))
         return
 
+    # --------- AFTER SUCCESS: persist cache into session_state ---------
+    cache_all = st.session_state.get("batch_cache", {})
+    cache_all[batch_name] = batch_cache_entry
+    st.session_state["batch_cache"] = cache_all
 
 # ---------- NEW: incremental per-batch updater ----------
 
