@@ -2720,362 +2720,374 @@ def main():
 
     batch_names = list(RUNNABLE_BATCHES.keys())
 
-    # Main controls in a card – full run
-    with st.container():
-        st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-        st.markdown("#### Run scope", unsafe_allow_html=True)
-        st.write("Choose whether you want a full run across all batches or a targeted test.")
+    tab_mf, tab_sa, tab_reddit, tab_podcast = st.tabs(
+        ["Mutual Fund", "Seeking Alpha", "Reddit", "Podcast"]
+    )
 
-        run_mode = st.radio(
-            "Run mode",
-            ["Run all 7 batches", "Run a specific batch"],
-            index=1,
+    with tab_mf:
+        # Main controls in a card – full run
+        with st.container():
+            st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+            st.markdown("#### Run scope", unsafe_allow_html=True)
+            st.write("Choose whether you want a full run across all batches or a targeted test.")
+
+            run_mode = st.radio(
+                "Run mode",
+                ["Run all 7 batches", "Run a specific batch"],
+                index=1,
+            )
+
+            if run_mode == "Run all 7 batches":
+                st.info(
+                    "Runs every fund family in all 7 batches for the selected quarter(s). "
+                    "Use the specific batch mode below if you are just testing a few names."
+                )
+                if st.button("Run all 7 batches", use_container_width=True):
+                    for bn in batch_names:
+                        run_batch(bn, quarters, use_first_word, subset=None)
+                    st.markdown("</div>", unsafe_allow_html=True)
+                    st.stop()
+            else:
+                selected_batch = st.selectbox("Choose a batch to run", batch_names)
+                if selected_batch:
+                    names_in_batch = RUNNABLE_BATCHES[selected_batch]
+                    st.write(f"{selected_batch} contains **{len(names_in_batch)}** fund families.")
+
+                    with st.expander("Preview fund families in this batch"):
+                        chips = "".join(
+                            f"<span class='fund-chip'>{name}</span>"
+                            for name in names_in_batch
+                        )
+                        st.markdown(chips, unsafe_allow_html=True)
+
+                    selected_funds = st.multiselect(
+                        "Optionally target specific fund families "
+                        "(leave empty to run the entire batch):",
+                        options=names_in_batch,
+                    )
+                    subset = selected_funds or None
+
+                    # Button only decides whether we *run* scraping.
+                    run_clicked = st.button(f"Run {selected_batch}", use_container_width=True)
+
+                    if run_clicked:
+                        # First time or explicit re-run: run_batch may scrape,
+                        # build excerpts, compile, and update session cache.
+                        run_batch(selected_batch, quarters, use_first_word, subset=subset)
+                    else:
+                        # No click this rerun (e.g. user just hit a download button),
+                        # but if we have cached results for this batch+quarters,
+                        # re-render them without scraping.
+                        cache_all = st.session_state.get("batch_cache", {})
+                        cache_entry = cache_all.get(selected_batch)
+                        if cache_entry and cache_entry.get("quarters") == quarters:
+                            run_batch(selected_batch, quarters, use_first_word, subset=subset)
+
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Incremental per-batch updater
+        st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+        st.markdown("#### Incremental update (per batch)", unsafe_allow_html=True)
+        st.write(
+            "Use this when interns run the tool daily. It compares the current BSD table "
+            "to the latest stored manifest for a batch and quarter, and only downloads "
+            "letters that are new or changed."
         )
 
-        if run_mode == "Run all 7 batches":
-            st.info(
-                "Runs every fund family in all 7 batches for the selected quarter(s). "
-                "Use the specific batch mode below if you are just testing a few names."
-            )
-            if st.button("Run all 7 batches", use_container_width=True):
-                for bn in batch_names:
-                    run_batch(bn, quarters, use_first_word, subset=None)
-                st.markdown("</div>", unsafe_allow_html=True)
-                st.stop()
-        else:
-            selected_batch = st.selectbox("Choose a batch to run", batch_names)
-            if selected_batch:
-                names_in_batch = RUNNABLE_BATCHES[selected_batch]
-                st.write(f"{selected_batch} contains **{len(names_in_batch)}** fund families.")
+        inc_quarter = st.selectbox(
+            "Quarter for incremental check",
+            options=quarter_options,
+            index=quarter_options.index(default_q) if default_q in quarter_options else 0,
+            key="inc_quarter",
+        )
+        inc_batch = st.selectbox(
+            "Batch for incremental update",
+            options=batch_names,
+            index=0,
+            key="inc_batch",
+        )
 
-                with st.expander("Preview fund families in this batch"):
-                    chips = "".join(
-                        f"<span class='fund-chip'>{name}</span>"
-                        for name in names_in_batch
-                    )
-                    st.markdown(chips, unsafe_allow_html=True)
-
-                selected_funds = st.multiselect(
-                    "Optionally target specific fund families "
-                    "(leave empty to run the entire batch):",
-                    options=names_in_batch,
-                )
-                subset = selected_funds or None
-
-                # Button only decides whether we *run* scraping.
-                run_clicked = st.button(f"Run {selected_batch}", use_container_width=True)
-
-                if run_clicked:
-                    # First time or explicit re-run: run_batch may scrape,
-                    # build excerpts, compile, and update session cache.
-                    run_batch(selected_batch, quarters, use_first_word, subset=subset)
-                else:
-                    # No click this rerun (e.g. user just hit a download button),
-                    # but if we have cached results for this batch+quarters,
-                    # re-render them without scraping.
-                    cache_all = st.session_state.get("batch_cache", {})
-                    cache_entry = cache_all.get(selected_batch)
-                    if cache_entry and cache_entry.get("quarters") == quarters:
-                        run_batch(selected_batch, quarters, use_first_word, subset=subset)
-
+        if st.button("Check for updates and download new letters", key="inc_btn"):
+            run_incremental_update(inc_batch, inc_quarter, use_first_word)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Incremental per-batch updater
-    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.markdown("#### Incremental update (per batch)", unsafe_allow_html=True)
-    st.write(
-        "Use this when interns run the tool daily. It compares the current BSD table "
-        "to the latest stored manifest for a batch and quarter, and only downloads "
-        "letters that are new or changed."
-    )
-
-    inc_quarter = st.selectbox(
-        "Quarter for incremental check",
-        options=quarter_options,
-        index=quarter_options.index(default_q) if default_q in quarter_options else 0,
-        key="inc_quarter",
-    )
-    inc_batch = st.selectbox(
-        "Batch for incremental update",
-        options=batch_names,
-        index=0,
-        key="inc_batch",
-    )
-
-    if st.button("Check for updates and download new letters", key="inc_btn"):
-        run_incremental_update(inc_batch, inc_quarter, use_first_word)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # Document Checker
-    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.markdown("#### Document Checker", unsafe_allow_html=True)
-    st.write(
-        "Compare two compiled runs for a given batch and quarter, and generate a PDF "
-        "containing only **new** ticker-related paragraphs found in the newer run."
-    )
-
-    checker_quarter = st.selectbox(
-        "Quarter to inspect",
-        options=quarter_options,
-        index=quarter_options.index(default_q) if default_q in quarter_options else 0,
-        key="checker_quarter",
-    )
-    checker_batch = st.selectbox(
-        "Batch",
-        options=batch_names,
-        index=0,
-        key="checker_batch",
-    )
-
-    manifests = _load_manifests(checker_batch, checker_quarter)
-    if not manifests:
-        st.info(
-            "No history found yet for this batch and quarter. "
-            "Run the scraper at least twice to compare documents."
-        )
-    elif len(manifests) == 1:
-        only = manifests[0]
-        st.info(
-            "Only one compiled run is stored so far for this batch and quarter "
-            f"(created {only.get('created_at', '')}). Run the scraper again to "
-            "create a second run for comparison."
-        )
-    else:
-        labels = [
-            f"{i+1}. {m.get('created_at', '')} – {Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
-            for i, m in enumerate(manifests)
-        ]
-        idx_new = 0
-        idx_old = 1 if len(manifests) > 1 else 0
-
-        new_idx = st.selectbox(
-            "Newer run",
-            options=list(range(len(manifests))),
-            format_func=lambda i: labels[i],
-            index=idx_new,
-            key="checker_new",
-        )
-        old_idx = st.selectbox(
-            "Older run to compare against",
-            options=list(range(len(manifests))),
-            format_func=lambda i: labels[i],
-            index=idx_old,
-            key="checker_old",
+        # Document Checker
+        st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+        st.markdown("#### Document Checker", unsafe_allow_html=True)
+        st.write(
+            "Compare two compiled runs for a given batch and quarter, and generate a PDF "
+            "containing only **new** ticker-related paragraphs found in the newer run."
         )
 
-        if new_idx == old_idx:
-            st.warning("Please select two different runs to compare.")
-        else:
-            if st.button("Generate 'New Since' PDF", key="checker_btn"):
-                delta_pdf = build_delta_pdf(
-                    old_manifest=manifests[old_idx],
-                    new_manifest=manifests[new_idx],
-                )
-                if delta_pdf:
-                    st.success(f"Delta PDF created: {delta_pdf}")
-                    try:
-                        with open(delta_pdf, "rb") as f:
-                            st.download_button(
-                                "Download delta PDF",
-                                data=f,
-                                file_name=delta_pdf.name,
-                                mime="application/pdf",
-                                key="checker_download",
-                            )
-                    except Exception:
-                        pass
-                else:
-                    st.info(
-                        "No new ticker-related commentary found between these two runs. "
-                        "Everything appears to be the same."
-                    )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-        # ---------- AI Insights: Buy / Hold / Sell ----------
-    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.markdown("#### AI Insights – Buy / Hold / Sell by company", unsafe_allow_html=True)
-    st.write(
-        "Use OpenAI to classify each ticker in a compiled run as **buy**, **hold**, "
-        "**sell**, or **unclear**, with reasoning grounded in the excerpted letters."
-    )
-
-    ai_quarter = st.selectbox(
-        "Quarter for AI analysis",
-        options=quarter_options,
-        index=quarter_options.index(default_q) if default_q in quarter_options else 0,
-        key="ai_quarter",
-    )
-    ai_batch = st.selectbox(
-        "Batch for AI analysis",
-        options=batch_names,
-        index=0,
-        key="ai_batch",
-    )
-
-    ai_manifests = _load_manifests(ai_batch, ai_quarter)
-    if not ai_manifests:
-        st.info(
-            "No manifests found yet for this batch and quarter. "
-            "Run this batch at least once (full or incremental) before using AI insights."
+        checker_quarter = st.selectbox(
+            "Quarter to inspect",
+            options=quarter_options,
+            index=quarter_options.index(default_q) if default_q in quarter_options else 0,
+            key="checker_quarter",
         )
-    else:
-        labels = [
-            f"{i+1}. {m.get('created_at', '')} – "
-            f"{Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
-            for i, m in enumerate(ai_manifests)
-        ]
-        ai_manifest_idx = st.selectbox(
-            "Which run should the AI analyse?",
-            options=list(range(len(ai_manifests))),
-            format_func=lambda i: labels[i],
+        checker_batch = st.selectbox(
+            "Batch",
+            options=batch_names,
             index=0,
-            key="ai_manifest_idx",
+            key="checker_batch",
         )
 
-        ai_model = st.text_input(
-            "OpenAI model name",
-            value="gpt-4o-mini",
-            help="Any chat-compatible model, e.g. gpt-4o or gpt-4o-mini.",
-        )
-        ai_use_web = st.checkbox(
-            "Allow OpenAI to use web search",
-            value=True,
-            help="For now this mainly controls how much external context the model "
-                 "is encouraged to bring into the `web_check` field.",
-        )
-
-        results: List[Dict[str, Any]] = []
-        if st.button("Run AI analysis for this run", key="ai_run_btn"):
-            manifest = ai_manifests[ai_manifest_idx]
-            with st.spinner("Calling OpenAI for ticker-level stances…"):
-                try:
-                    results = ai_insights.generate_ticker_stances(
-                        manifest=manifest,
-                        batch=ai_batch,
-                        quarter=ai_quarter,
-                        model=ai_model,
-                        use_web=ai_use_web,
-                    )
-                except Exception as e:
-                    st.error(f"AI analysis failed: {e}")
-                    results = []
-
-            st.session_state["ai_results"] = results
-
-        # If we already have results in session, reuse them so we can interact with dropdown
-        if "ai_results" in st.session_state and not results:
-            results = st.session_state["ai_results"]
-
-        if results:
-            # Compact summary table
-            summary_rows = []
-            for r in results:
-                summary_rows.append(
-                    {
-                        "Ticker": r.get("ticker"),
-                        "Company": ", ".join(r.get("company_names") or []),
-                        "Stance": r.get("stance"),
-                        "Confidence": round(float(r.get("confidence", 0.0)), 2),
-                    }
-                )
-            st.write("**Summary by ticker**")
-            st.dataframe(summary_rows, use_container_width=True)
-
-            # Detailed view: dropdown + gauge + reasoning
-            ticker_options = [row["Ticker"] for row in summary_rows]
-            if ticker_options:
-                focus_ticker = st.selectbox(
-                    "Detailed view – choose a ticker",
-                    options=ticker_options,
-                    key="ai_focus_ticker",
-                )
-                detail = next((r for r in results if r.get("ticker") == focus_ticker), None)
-
-                if detail:
-                    stance = (detail.get("stance") or "").lower()
-                    conf = float(detail.get("confidence") or 0.0)
-
-                    # Map stance + confidence to a 0–1 position for the gauge
-                    if stance == "buy":
-                        pos = 0.5 + 0.5 * conf
-                    elif stance == "sell":
-                        pos = 0.5 - 0.5 * conf
-                    elif stance == "hold":
-                        pos = 0.5
-                    else:  # unclear
-                        pos = 0.5
-                    pos = max(0.0, min(1.0, pos))
-                    angle = -90 + 180 * pos  # -90 (sell) .. 0 (hold) .. +90 (buy)
-
-                    gauge_html = f"""
-                    <div class="gauge-wrapper">
-                      <div class="gauge">
-                        <div class="gauge-body">
-                          <div class="gauge-needle" style="transform: rotate({angle:.1f}deg);"></div>
-                          <div class="gauge-cover">{stance.upper() if stance else "UNCLEAR"}</div>
-                        </div>
-                      </div>
-                      <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:#6b4f7a;margin-top:0.15rem;">
-                        <span>Sell</span><span>Hold</span><span>Buy</span>
-                      </div>
-                    </div>
-                    """
-                    st.markdown(gauge_html, unsafe_allow_html=True)
-
-                    company_label = ", ".join(detail.get("company_names") or [])
-                    st.markdown(f"**Reasoning for {focus_ticker} ({company_label})**")
-                    st.write(detail.get("primary_reasoning", ""))
-
-                    st.markdown("**Evidence from commentaries**")
-                    for ev in detail.get("commentary_evidence") or []:
-                        st.markdown(f"- {ev}")
-
-                    st.markdown("**Web check**")
-                    st.write(detail.get("web_check_summary") or "No additional web context used.")
-
-                    funds = detail.get("fund_families") or []
-                    if funds:
-                        chips = "".join(
-                            f"<span class='fund-chip'>{f}</span>" for f in funds
-                        )
-                        st.markdown("**Fund sources used in this decision:**", unsafe_allow_html=True)
-                        st.markdown(chips, unsafe_allow_html=True)
-        else:
+        manifests = _load_manifests(checker_batch, checker_quarter)
+        if not manifests:
             st.info(
-                "Run the AI analysis above to see ticker stances, then select a ticker "
-                "for a detailed gauge view."
+                "No history found yet for this batch and quarter. "
+                "Run the scraper at least twice to compare documents."
+            )
+        elif len(manifests) == 1:
+            only = manifests[0]
+            st.info(
+                "Only one compiled run is stored so far for this batch and quarter "
+                f"(created {only.get('created_at', '')}). Run the scraper again to "
+                "create a second run for comparison."
+            )
+        else:
+            labels = [
+                f"{i+1}. {m.get('created_at', '')} – {Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
+                for i, m in enumerate(manifests)
+            ]
+            idx_new = 0
+            idx_old = 1 if len(manifests) > 1 else 0
+
+            new_idx = st.selectbox(
+                "Newer run",
+                options=list(range(len(manifests))),
+                format_func=lambda i: labels[i],
+                index=idx_new,
+                key="checker_new",
+            )
+            old_idx = st.selectbox(
+                "Older run to compare against",
+                options=list(range(len(manifests))),
+                format_func=lambda i: labels[i],
+                index=idx_old,
+                key="checker_old",
             )
 
-    st.markdown("</div>", unsafe_allow_html=True)
+            if new_idx == old_idx:
+                st.warning("Please select two different runs to compare.")
+            else:
+                if st.button("Generate 'New Since' PDF", key="checker_btn"):
+                    delta_pdf = build_delta_pdf(
+                        old_manifest=manifests[old_idx],
+                        new_manifest=manifests[new_idx],
+                    )
+                    if delta_pdf:
+                        st.success(f"Delta PDF created: {delta_pdf}")
+                        try:
+                            with open(delta_pdf, "rb") as f:
+                                st.download_button(
+                                    "Download delta PDF",
+                                    data=f,
+                                    file_name=delta_pdf.name,
+                                    mime="application/pdf",
+                                    key="checker_download",
+                                )
+                        except Exception:
+                            pass
+                    else:
+                        st.info(
+                            "No new ticker-related commentary found between these two runs. "
+                            "Everything appears to be the same."
+                        )
 
-    # ---------- Seeking Alpha news + AI digest ----------
-    draw_seeking_alpha_news_section()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---------- Navigation: move to next ticker in the selected list ----------
-    selected_tickers = st.session_state.get("sa_selected_tickers_prev", [])
-    if selected_tickers and len(selected_tickers) > 1:
-        col_prev, col_spacer, col_next = st.columns([1, 3, 1])
-        with col_next:
-            if st.button("Next ticker ▶", key="sa_next_ticker"):
-                current_idx = st.session_state.get("sa_current_index", 0)
-                next_idx = (current_idx + 1) % len(selected_tickers)
-                st.session_state["sa_current_index"] = next_idx
-                st.rerun()
-        with col_prev:
-            if st.button("◀ Previous", key="sa_prev_ticker"):
-                current_idx = st.session_state.get("sa_current_index", 0)
-                prev_idx = (current_idx - 1) % len(selected_tickers)
-                st.session_state["sa_current_index"] = prev_idx
-                st.rerun()
+            # ---------- AI Insights: Buy / Hold / Sell ----------
+        st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+        st.markdown("#### AI Insights – Buy / Hold / Sell by company", unsafe_allow_html=True)
+        st.write(
+            "Use OpenAI to classify each ticker in a compiled run as **buy**, **hold**, "
+            "**sell**, or **unclear**, with reasoning grounded in the excerpted letters."
+        )
+
+        ai_quarter = st.selectbox(
+            "Quarter for AI analysis",
+            options=quarter_options,
+            index=quarter_options.index(default_q) if default_q in quarter_options else 0,
+            key="ai_quarter",
+        )
+        ai_batch = st.selectbox(
+            "Batch for AI analysis",
+            options=batch_names,
+            index=0,
+            key="ai_batch",
+        )
+
+        ai_manifests = _load_manifests(ai_batch, ai_quarter)
+        if not ai_manifests:
+            st.info(
+                "No manifests found yet for this batch and quarter. "
+                "Run this batch at least once (full or incremental) before using AI insights."
+            )
+        else:
+            labels = [
+                f"{i+1}. {m.get('created_at', '')} – "
+                f"{Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
+                for i, m in enumerate(ai_manifests)
+            ]
+            ai_manifest_idx = st.selectbox(
+                "Which run should the AI analyse?",
+                options=list(range(len(ai_manifests))),
+                format_func=lambda i: labels[i],
+                index=0,
+                key="ai_manifest_idx",
+            )
+
+            ai_model = st.text_input(
+                "OpenAI model name",
+                value="gpt-4o-mini",
+                help="Any chat-compatible model, e.g. gpt-4o or gpt-4o-mini.",
+            )
+            ai_use_web = st.checkbox(
+                "Allow OpenAI to use web search",
+                value=True,
+                help="For now this mainly controls how much external context the model "
+                     "is encouraged to bring into the `web_check` field.",
+            )
+
+            results: List[Dict[str, Any]] = []
+            if st.button("Run AI analysis for this run", key="ai_run_btn"):
+                manifest = ai_manifests[ai_manifest_idx]
+                with st.spinner("Calling OpenAI for ticker-level stances…"):
+                    try:
+                        results = ai_insights.generate_ticker_stances(
+                            manifest=manifest,
+                            batch=ai_batch,
+                            quarter=ai_quarter,
+                            model=ai_model,
+                            use_web=ai_use_web,
+                        )
+                    except Exception as e:
+                        st.error(f"AI analysis failed: {e}")
+                        results = []
+
+                st.session_state["ai_results"] = results
+
+            # If we already have results in session, reuse them so we can interact with dropdown
+            if "ai_results" in st.session_state and not results:
+                results = st.session_state["ai_results"]
+
+            if results:
+                # Compact summary table
+                summary_rows = []
+                for r in results:
+                    summary_rows.append(
+                        {
+                            "Ticker": r.get("ticker"),
+                            "Company": ", ".join(r.get("company_names") or []),
+                            "Stance": r.get("stance"),
+                            "Confidence": round(float(r.get("confidence", 0.0)), 2),
+                        }
+                    )
+                st.write("**Summary by ticker**")
+                st.dataframe(summary_rows, use_container_width=True)
+
+                # Detailed view: dropdown + gauge + reasoning
+                ticker_options = [row["Ticker"] for row in summary_rows]
+                if ticker_options:
+                    focus_ticker = st.selectbox(
+                        "Detailed view – choose a ticker",
+                        options=ticker_options,
+                        key="ai_focus_ticker",
+                    )
+                    detail = next((r for r in results if r.get("ticker") == focus_ticker), None)
+
+                    if detail:
+                        stance = (detail.get("stance") or "").lower()
+                        conf = float(detail.get("confidence") or 0.0)
+
+                        # Map stance + confidence to a 0–1 position for the gauge
+                        if stance == "buy":
+                            pos = 0.5 + 0.5 * conf
+                        elif stance == "sell":
+                            pos = 0.5 - 0.5 * conf
+                        elif stance == "hold":
+                            pos = 0.5
+                        else:  # unclear
+                            pos = 0.5
+                        pos = max(0.0, min(1.0, pos))
+                        angle = -90 + 180 * pos  # -90 (sell) .. 0 (hold) .. +90 (buy)
+
+                        gauge_html = f"""
+                        <div class="gauge-wrapper">
+                          <div class="gauge">
+                            <div class="gauge-body">
+                              <div class="gauge-needle" style="transform: rotate({angle:.1f}deg);"></div>
+                              <div class="gauge-cover">{stance.upper() if stance else "UNCLEAR"}</div>
+                            </div>
+                          </div>
+                          <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:#6b4f7a;margin-top:0.15rem;">
+                            <span>Sell</span><span>Hold</span><span>Buy</span>
+                          </div>
+                        </div>
+                        """
+                        st.markdown(gauge_html, unsafe_allow_html=True)
+
+                        company_label = ", ".join(detail.get("company_names") or [])
+                        st.markdown(f"**Reasoning for {focus_ticker} ({company_label})**")
+                        st.write(detail.get("primary_reasoning", ""))
+
+                        st.markdown("**Evidence from commentaries**")
+                        for ev in detail.get("commentary_evidence") or []:
+                            st.markdown(f"- {ev}")
+
+                        st.markdown("**Web check**")
+                        st.write(detail.get("web_check_summary") or "No additional web context used.")
+
+                        funds = detail.get("fund_families") or []
+                        if funds:
+                            chips = "".join(
+                                f"<span class='fund-chip'>{f}</span>" for f in funds
+                            )
+                            st.markdown("**Fund sources used in this decision:**", unsafe_allow_html=True)
+                            st.markdown(chips, unsafe_allow_html=True)
+            else:
+                st.info(
+                    "Run the AI analysis above to see ticker stances, then select a ticker "
+                    "for a detailed gauge view."
+                )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+    with tab_sa:
+        # ---------- Seeking Alpha news + AI digest ----------
+        draw_seeking_alpha_news_section()
+
+        # ---------- Navigation: move to next ticker in the selected list ----------
+        selected_tickers = st.session_state.get("sa_selected_tickers_prev", [])
+        if selected_tickers and len(selected_tickers) > 1:
+            col_prev, col_spacer, col_next = st.columns([1, 3, 1])
+            with col_next:
+                if st.button("Next ticker ▶", key="sa_next_ticker"):
+                    current_idx = st.session_state.get("sa_current_index", 0)
+                    next_idx = (current_idx + 1) % len(selected_tickers)
+                    st.session_state["sa_current_index"] = next_idx
+                    st.rerun()
+            with col_prev:
+                if st.button("◀ Previous", key="sa_prev_ticker"):
+                    current_idx = st.session_state.get("sa_current_index", 0)
+                    prev_idx = (current_idx - 1) % len(selected_tickers)
+                    st.session_state["sa_current_index"] = prev_idx
+                    st.rerun()
     
-    # ---------- Reddit pulse (retail sentiment) ----------
-    draw_reddit_pulse_section()
 
-    # ---------- Podcast intelligence (ticker mentions across podcasts) ----------
-    draw_podcast_intelligence_section()
+    with tab_reddit:
+        # ---------- Reddit pulse (retail sentiment) ----------
+        draw_reddit_pulse_section()
+
+
+    with tab_podcast:
+        # ---------- Podcast intelligence (ticker mentions across podcasts) ----------
+        draw_podcast_intelligence_section()
+
 
     # Output path
     st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
