@@ -43,7 +43,6 @@ from tickers import tickers
 import math
 import subprocess
 from datetime import datetime, timedelta, timezone
-from pypdf.generic import NameObject, ArrayObject
 
 # pypdf compat
 try:
@@ -194,22 +193,6 @@ FILTERS = {
 TABLE_ROW = "table tbody tr"
 COLMAP = {"quarter": 1, "letter_date": 2, "fund_name": 3}
 
-def _merge_page_preserve_annots(base_page, overlay_page):
-    """
-    Merge overlay onto base page but preserve existing link annotations.
-    Without this, ReportLab hyperlink annotations often disappear in compiled PDFs.
-    """
-    annots = base_page.get("/Annots")
-    base_page.merge_page(overlay_page)
-
-    if annots:
-        # Ensure annots remains an ArrayObject in the final page dict
-        try:
-            base_page[NameObject("/Annots")] = annots if isinstance(annots, ArrayObject) else ArrayObject(annots)
-        except Exception:
-            # fallback: try setting raw
-            base_page[NameObject("/Annots")] = annots
-
 @dataclass
 class Hit:
     quarter: str
@@ -358,64 +341,20 @@ def run_excerpt_and_build(
     letter_date: Optional[str] = None,
     source_url: Optional[str] = None,
 ) -> Optional[Path]:
-    """Run ticker excerption on a single downloaded PDF and build a Cutler-branded excerpt PDF.
-
-    Notes:
-      - excerpt_check writes excerpts_clean.json somewhere (historically next to pdf_path, but this can vary).
-      - make_pdf expects a tickers.py in the working folder it runs from, so we keep a copy in out_dir.
-    """
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Ensure make_pdf can import user tickers (it imports tickers.py from the current folder)
         tp = out_dir / "tickers.py"
         if not tp.exists():
-            if (HERE / "tickers.py").exists():
-                shutil.copy2(HERE / "tickers.py", tp)
+            # place a copy so make_pdf can import user tickers
+            (HERE / "tickers.py").exists() and shutil.copy2(HERE / "tickers.py", tp)
 
-        # Run the excerption step
         excerpt_check.excerpt_pdf_for_tickers(str(pdf_path), debug=False)
 
-        raw_json = pdf_path.parent / "excerpts.json"
-        clean_json = pdf_path.parent / "excerpts_clean.json"
-
-        def _count_items(p: Path) -> int:
-            try:
-                obj = json.loads(p.read_text(encoding="utf-8"))
-                return sum(len(v) for v in obj.values()) if isinstance(obj, dict) else 0
-            except Exception:
-                return -1
-
-        print("DEBUG excerpt counts:",
-            "raw=", _count_items(raw_json),
-            "clean=", _count_items(clean_json),
-            "pdf=", str(pdf_path))
-
-        # excerpt_check historically writes 'excerpts_clean.json' next to the PDF,
-        # but in some environments the working dir can differ. We search a few likely places.
-        candidates: List[Path] = []
-        for p in [
-            pdf_path.parent / "excerpts_clean.json",
-            out_dir / "excerpts_clean.json",
-            HERE / "excerpts_clean.json",
-        ]:
-            if p.exists():
-                candidates.append(p)
-
-        # As a last resort, grab the most recently modified excerpts_clean.json under the download folder.
-        if not candidates:
-            try:
-                possibles = list(pdf_path.parent.glob("**/excerpts_clean.json"))
-                if possibles:
-                    possibles.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                    candidates.append(possibles[0])
-            except Exception:
-                pass
-
-        if not candidates:
+        src_json = pdf_path.parent / "excerpts_clean.json"
+        if not src_json.exists():
             return None
 
-        src_json = candidates[0]
         dst_json = out_dir / "excerpts_clean.json"
         if src_json != dst_json:
             shutil.copy2(src_json, dst_json)
@@ -429,16 +368,14 @@ def run_excerpt_and_build(
             source_pdf_name=source_pdf_name or pdf_path.name,
             format_style="legacy",
             letter_date=letter_date,
-            source_url=source_url,
+            source_url=source_url, 
         )
+
         return out_pdf if out_pdf.exists() else None
 
     except Exception:
         traceback.print_exc()
         return None
-
-
-
 
 
 # stamping + compile
@@ -461,22 +398,25 @@ def _overlay_single_page(w: float, h: float, left: str, mid: str, right: str) ->
     buf.seek(0)
     return buf
 
-def _stamp_pdf(in_pdf: Path, out_pdf: Path, stamp_pdf: Path) -> Path:
-    r = PdfReader(str(in_pdf))
-    s = PdfReader(str(stamp_pdf))
-    w = PdfWriter()
-
-    stamp_page = s.pages[0]
-
-    for page in r.pages:
-        _merge_page_preserve_annots(page, stamp_page)  # <-- use helper
-        w.add_page(page)
-
-    with open(out_pdf, "wb") as f:
+def _stamp_pdf(src: Path, left: str, mid: str, right: str) -> Path:
+    try:
+        r = _PdfReader(str(src))
+    except Exception:
+        return src
+    w = _PdfWriter()
+    for pg in r.pages:
+        W = float(pg.mediabox.width)
+        H = float(pg.mediabox.height)
+        ov = _PdfReader(_overlay_single_page(W, H, left, mid, right)).pages[0]
+        try:
+            pg.merge_page(ov)
+        except Exception:
+            pass
+        w.add_page(pg)
+    tmp = src.with_suffix('.stamped.tmp.pdf')
+    with open(tmp, 'wb') as f:
         w.write(f)
-
-    return out_pdf
-
+    return tmp
 
 def _build_compiled_filename(batch: str, *, incremental: bool = False, dt: Optional[datetime] = None) -> str:
     """Return a human-friendly compiled PDF name like Batch1_2025-12-04_Excerpt.pdf.
@@ -2090,7 +2030,7 @@ def choose_default_quarter(available: List[str]) -> Optional[str]:
 
 # ---------- run one batch (full run, with manifest + table rows) ----------
 
-def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset: Optional[List[str]] = None, force_rerun: bool = False):
+def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset: Optional[List[str]] = None):
     st.markdown(f"### Running {batch_name}")
 
     # --------- SESSION MEMORY: reuse results if this batch+quarters already ran ---------
@@ -2230,14 +2170,9 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 
                 for i, (brand, token) in enumerate(tokens, 1):
                     progress_path = _brand_progress_path(batch_name, q, brand)
-                    if progress_path.exists() and not force_rerun:
+                    if progress_path.exists():
                         st.info(f"[{q}] Skipping {brand} (already completed in this container).")
                         continue
-                    if force_rerun and progress_path.exists():
-                        try:
-                            progress_path.unlink()
-                        except Exception:
-                            pass
 
                     st.write(f"[{q}] {i}/{len(tokens)} — {brand} (search: {token})")
 
@@ -2275,11 +2210,11 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                                 for pdf in pdfs:
                                     out_dir = EX_DIR / q / _safe(brand) / _safe(pdf.stem)
                                     built = run_excerpt_and_build(
-                                        pdf_path=pdf_path,
-                                        out_dir=out_dir,
-                                        source_pdf_name=pdf_path.name,
+                                        pdf,
+                                        out_dir,
+                                        source_pdf_name=pdf.name,
                                         letter_date=h.letter_date or None,
-                                        source_url=h.fund_href, 
+                                        source_url=h.fund_href,
                                     )
 
                                     manifest_items.append(
@@ -2542,7 +2477,9 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
                         out_dir,
                         source_pdf_name=pdf.name,
                         letter_date=letter_date or None,
+                        source_url=href,
                     )
+
                     manifest_items.append(
                         {
                             "fund_family": brand,
@@ -2875,13 +2812,6 @@ def main():
         value=True,
     )
 
-    force_rerun = st.sidebar.checkbox(
-        "Force re-run (ignore resume markers)",
-        value=False,
-        help="If you previously ran a batch in this container and it was marked complete, this will re-run it "
-             "instead of skipping based on the local progress marker.",
-    )
-
     batch_names = list(RUNNABLE_BATCHES.keys())
 
     # --- Tabs (website-style nav) ---
@@ -2913,7 +2843,7 @@ def main():
                 )
                 if st.button("Run all 7 batches", use_container_width=True):
                     for bn in batch_names:
-                        run_batch(bn, quarters, use_first_word, subset=None, force_rerun=force_rerun)
+                        run_batch(bn, quarters, use_first_word, subset=None)
                     st.markdown("</div>", unsafe_allow_html=True)
                     st.stop()
             else:
@@ -2942,7 +2872,7 @@ def main():
                     if run_clicked:
                         # First time or explicit re-run: run_batch may scrape,
                         # build excerpts, compile, and update session cache.
-                        run_batch(selected_batch, quarters, use_first_word, subset=subset, force_rerun=force_rerun)
+                        run_batch(selected_batch, quarters, use_first_word, subset=subset)
                     else:
                         # No click this rerun (e.g. user just hit a download button),
                         # but if we have cached results for this batch+quarters,
@@ -2950,7 +2880,7 @@ def main():
                         cache_all = st.session_state.get("batch_cache", {})
                         cache_entry = cache_all.get(selected_batch)
                         if cache_entry and cache_entry.get("quarters") == quarters:
-                            run_batch(selected_batch, quarters, use_first_word, subset=subset, force_rerun=force_rerun)
+                            run_batch(selected_batch, quarters, use_first_word, subset=subset)
 
 
             st.markdown("</div>", unsafe_allow_html=True)
