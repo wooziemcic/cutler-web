@@ -376,6 +376,21 @@ def run_excerpt_and_build(
         # Run the excerption step
         excerpt_check.excerpt_pdf_for_tickers(str(pdf_path), debug=False)
 
+        raw_json = pdf_path.parent / "excerpts.json"
+        clean_json = pdf_path.parent / "excerpts_clean.json"
+
+        def _count_items(p: Path) -> int:
+            try:
+                obj = json.loads(p.read_text(encoding="utf-8"))
+                return sum(len(v) for v in obj.values()) if isinstance(obj, dict) else 0
+            except Exception:
+                return -1
+
+        print("DEBUG excerpt counts:",
+            "raw=", _count_items(raw_json),
+            "clean=", _count_items(clean_json),
+            "pdf=", str(pdf_path))
+
         # excerpt_check historically writes 'excerpts_clean.json' next to the PDF,
         # but in some environments the working dir can differ. We search a few likely places.
         candidates: List[Path] = []
