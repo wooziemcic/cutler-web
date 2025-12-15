@@ -409,22 +409,29 @@ def _overlay_single_page(w: float, h: float, left: str, mid: str, right: str) ->
     buf.seek(0)
     return buf
 
-def _stamp_pdf(in_pdf: Path, out_pdf: Path, stamp_pdf: Path) -> Path:
+def _stamp_pdf(in_pdf: Path, out_pdf: Path, *, left: str, mid: str, right: str) -> Path:
+    """Stamp a header onto every page while preserving link annotations."""
     r = PdfReader(str(in_pdf))
-    s = PdfReader(str(stamp_pdf))
     w = PdfWriter()
 
-    stamp_page = s.pages[0]
+    first = r.pages[0]
+    mb = first.mediabox
+    pw = float(mb.width)
+    ph = float(mb.height)
+
+    overlay_buf = _overlay_single_page(pw, ph, left, mid, right)
+    overlay_pdf = PdfReader(overlay_buf)
+    stamp_page = overlay_pdf.pages[0]
 
     for page in r.pages:
-        _merge_page_preserve_annots(page, stamp_page)  # <-- use helper
+        _merge_page_preserve_annots(page, stamp_page)
         w.add_page(page)
 
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
     with open(out_pdf, "wb") as f:
         w.write(f)
 
     return out_pdf
-
 
 def _build_compiled_filename(batch: str, *, incremental: bool = False, dt: Optional[datetime] = None) -> str:
     """Return a human-friendly compiled PDF name like Batch1_2025-12-04_Excerpt.pdf.
@@ -2990,7 +2997,7 @@ def main():
                             with open(delta_pdf, "rb") as f:
                                 st.download_button(
                                     "Download delta PDF",
-                                    data=f,
+                                    data=f.read(),
                                     file_name=delta_pdf.name,
                                     mime="application/pdf",
                                     key="checker_download",
