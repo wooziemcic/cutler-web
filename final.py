@@ -43,6 +43,7 @@ from tickers import tickers
 import math
 import subprocess
 from datetime import datetime, timedelta, timezone
+from pypdf.generic import NameObject, ArrayObject
 
 # pypdf compat
 try:
@@ -192,6 +193,22 @@ FILTERS = {
 }
 TABLE_ROW = "table tbody tr"
 COLMAP = {"quarter": 1, "letter_date": 2, "fund_name": 3}
+
+def _merge_page_preserve_annots(base_page, overlay_page):
+    """
+    Merge overlay onto base page but preserve existing link annotations.
+    Without this, ReportLab hyperlink annotations often disappear in compiled PDFs.
+    """
+    annots = base_page.get("/Annots")
+    base_page.merge_page(overlay_page)
+
+    if annots:
+        # Ensure annots remains an ArrayObject in the final page dict
+        try:
+            base_page[NameObject("/Annots")] = annots if isinstance(annots, ArrayObject) else ArrayObject(annots)
+        except Exception:
+            # fallback: try setting raw
+            base_page[NameObject("/Annots")] = annots
 
 @dataclass
 class Hit:
@@ -343,10 +360,8 @@ def run_excerpt_and_build(
 ) -> Optional[Path]:
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-
         tp = out_dir / "tickers.py"
         if not tp.exists():
-            # place a copy so make_pdf can import user tickers
             (HERE / "tickers.py").exists() and shutil.copy2(HERE / "tickers.py", tp)
 
         excerpt_check.excerpt_pdf_for_tickers(str(pdf_path), debug=False)
@@ -354,13 +369,11 @@ def run_excerpt_and_build(
         src_json = pdf_path.parent / "excerpts_clean.json"
         if not src_json.exists():
             return None
-
         dst_json = out_dir / "excerpts_clean.json"
         if src_json != dst_json:
             shutil.copy2(src_json, dst_json)
 
         out_pdf = out_dir / f"Excerpted_{_safe(pdf_path.stem)}.pdf"
-
         make_pdf.build_pdf(
             excerpts_json_path=str(dst_json),
             output_pdf_path=str(out_pdf),
@@ -368,11 +381,9 @@ def run_excerpt_and_build(
             source_pdf_name=source_pdf_name or pdf_path.name,
             format_style="legacy",
             letter_date=letter_date,
-            source_url=source_url, 
+            source_url=source_url,  
         )
-
         return out_pdf if out_pdf.exists() else None
-
     except Exception:
         traceback.print_exc()
         return None
@@ -398,25 +409,22 @@ def _overlay_single_page(w: float, h: float, left: str, mid: str, right: str) ->
     buf.seek(0)
     return buf
 
-def _stamp_pdf(src: Path, left: str, mid: str, right: str) -> Path:
-    try:
-        r = _PdfReader(str(src))
-    except Exception:
-        return src
-    w = _PdfWriter()
-    for pg in r.pages:
-        W = float(pg.mediabox.width)
-        H = float(pg.mediabox.height)
-        ov = _PdfReader(_overlay_single_page(W, H, left, mid, right)).pages[0]
-        try:
-            pg.merge_page(ov)
-        except Exception:
-            pass
-        w.add_page(pg)
-    tmp = src.with_suffix('.stamped.tmp.pdf')
-    with open(tmp, 'wb') as f:
+def _stamp_pdf(in_pdf: Path, out_pdf: Path, stamp_pdf: Path) -> Path:
+    r = PdfReader(str(in_pdf))
+    s = PdfReader(str(stamp_pdf))
+    w = PdfWriter()
+
+    stamp_page = s.pages[0]
+
+    for page in r.pages:
+        _merge_page_preserve_annots(page, stamp_page)  # <-- use helper
+        w.add_page(page)
+
+    with open(out_pdf, "wb") as f:
         w.write(f)
-    return tmp
+
+    return out_pdf
+
 
 def _build_compiled_filename(batch: str, *, incremental: bool = False, dt: Optional[datetime] = None) -> str:
     """Return a human-friendly compiled PDF name like Batch1_2025-12-04_Excerpt.pdf.
