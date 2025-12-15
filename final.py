@@ -2680,28 +2680,39 @@ def main():
             font-size: 0.9rem;
             color: #4b2142;
         }
-        # --- Website-style tabs (add inside your existing <style> block) ---
+
+        /* --- Website-style FULL-WIDTH tabs --- */
 
         /* Tabs container spacing */
         div[data-testid="stTabs"] {
+            width: 100%;
             margin-top: 0.75rem;
             margin-bottom: 1.25rem;
         }
 
         /* The tabs row */
         div[data-testid="stTabs"] [role="tablist"] {
-            gap: 0.6rem;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            gap: 0.75rem;
             padding: 0.35rem 0.45rem;
             border-bottom: 1px solid rgba(75,33,66,0.12);
         }
 
-        /* Each tab button */
+        /* Each tab button (equal width) */
         div[data-testid="stTabs"] [role="tab"] {
+            flex: 1 1 0;
+            width: 100%;
+            text-align: center;
+            justify-content: center;
+
             background: transparent;
             border: 1px solid rgba(75,33,66,0.18);
             border-bottom: 0;
             border-radius: 14px 14px 0 0;
-            padding: 0.55rem 0.95rem;
+            padding: 0.65rem 0.95rem;
+
             color: #4b2142;
             font-weight: 650;
             font-size: 0.95rem;
@@ -2726,8 +2737,8 @@ def main():
         div[data-testid="stTabs"] [role="tab"][aria-selected="true"]::after {
             content: "";
             position: absolute;
-            left: 10%;
-            right: 10%;
+            left: 12%;
+            right: 12%;
             bottom: -2px;
             height: 3px;
             border-radius: 999px;
@@ -2740,7 +2751,7 @@ def main():
             box-shadow: 0 0 0 3px rgba(75,33,66,0.18);
         }
 
-        /* Optional: add a clean content panel spacing */
+        /* Content panel spacing */
         div[data-testid="stTabs"] [data-testid="stTabContent"] {
             padding-top: 0.75rem;
         }
