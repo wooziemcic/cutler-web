@@ -334,33 +334,49 @@ def _download_quarter_pdf_from_fund(page, quarter: str, dest_dir: Path) -> List[
 
 # excerption + build
 
-def run_excerpt_and_build(pdf_path: Path, out_dir: Path, source_pdf_name: Optional[str] = None, letter_date: Optional[str] = None) -> Optional[Path]:
+def run_excerpt_and_build(
+    pdf_path: Path,
+    out_dir: Path,
+    source_pdf_name: Optional[str] = None,
+    letter_date: Optional[str] = None,
+    source_url: Optional[str] = None,
+) -> Optional[Path]:
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
+
         tp = out_dir / "tickers.py"
         if not tp.exists():
             # place a copy so make_pdf can import user tickers
             (HERE / "tickers.py").exists() and shutil.copy2(HERE / "tickers.py", tp)
+
         excerpt_check.excerpt_pdf_for_tickers(str(pdf_path), debug=False)
+
         src_json = pdf_path.parent / "excerpts_clean.json"
         if not src_json.exists():
             return None
+
         dst_json = out_dir / "excerpts_clean.json"
         if src_json != dst_json:
             shutil.copy2(src_json, dst_json)
+
         out_pdf = out_dir / f"Excerpted_{_safe(pdf_path.stem)}.pdf"
+
         make_pdf.build_pdf(
             excerpts_json_path=str(dst_json),
             output_pdf_path=str(out_pdf),
             report_title=f"Cutler Capital Excerpts – {pdf_path.stem}",
             source_pdf_name=source_pdf_name or pdf_path.name,
             format_style="legacy",
-            letter_date=letter_date
+            letter_date=letter_date,
+            source_url=source_url, 
         )
+
         return out_pdf if out_pdf.exists() else None
+
     except Exception:
         traceback.print_exc()
         return None
+
 
 # stamping + compile
 
@@ -2198,6 +2214,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                                         out_dir,
                                         source_pdf_name=pdf.name,
                                         letter_date=h.letter_date or None,
+                                        source_url=h.fund_href,
                                     )
 
                                     manifest_items.append(
