@@ -2680,6 +2680,71 @@ def main():
             font-size: 0.9rem;
             color: #4b2142;
         }
+        # --- Website-style tabs (add inside your existing <style> block) ---
+
+        /* Tabs container spacing */
+        div[data-testid="stTabs"] {
+            margin-top: 0.75rem;
+            margin-bottom: 1.25rem;
+        }
+
+        /* The tabs row */
+        div[data-testid="stTabs"] [role="tablist"] {
+            gap: 0.6rem;
+            padding: 0.35rem 0.45rem;
+            border-bottom: 1px solid rgba(75,33,66,0.12);
+        }
+
+        /* Each tab button */
+        div[data-testid="stTabs"] [role="tab"] {
+            background: transparent;
+            border: 1px solid rgba(75,33,66,0.18);
+            border-bottom: 0;
+            border-radius: 14px 14px 0 0;
+            padding: 0.55rem 0.95rem;
+            color: #4b2142;
+            font-weight: 650;
+            font-size: 0.95rem;
+            transition: all 120ms ease-in-out;
+        }
+
+        /* Hover state */
+        div[data-testid="stTabs"] [role="tab"]:hover {
+            background: rgba(75,33,66,0.06);
+            border-color: rgba(75,33,66,0.28);
+        }
+
+        /* Selected tab */
+        div[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+            background: #ffffff;
+            border-color: rgba(75,33,66,0.35);
+            box-shadow: 0 10px 20px rgba(75,33,66,0.05);
+            position: relative;
+        }
+
+        /* Selected underline accent */
+        div[data-testid="stTabs"] [role="tab"][aria-selected="true"]::after {
+            content: "";
+            position: absolute;
+            left: 10%;
+            right: 10%;
+            bottom: -2px;
+            height: 3px;
+            border-radius: 999px;
+            background: #4b2142;
+        }
+
+        /* Remove Streamlit's default focus outline and replace with subtle ring */
+        div[data-testid="stTabs"] [role="tab"]:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(75,33,66,0.18);
+        }
+
+        /* Optional: add a clean content panel spacing */
+        div[data-testid="stTabs"] [data-testid="stTabContent"] {
+            padding-top: 0.75rem;
+        }
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -2720,9 +2785,14 @@ def main():
 
     batch_names = list(RUNNABLE_BATCHES.keys())
 
+    # --- Tabs (website-style nav) ---
+    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
+
     tab_mf, tab_sa, tab_reddit, tab_podcast = st.tabs(
         ["Mutual Fund", "Seeking Alpha", "Reddit", "Podcast"]
     )
+
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
     with tab_mf:
         # Main controls in a card – full run
