@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
+from xml.sax.saxutils import escape
 
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
@@ -402,7 +403,9 @@ def build_pdf(
     source_pdf_name: Optional[str] = None,
     format_style: str = "legacy",
     letter_date: Optional[str] = None,
+    source_url: Optional[str] = None,
 ) -> Optional[str]:
+
     here = Path(".").resolve()
     data = _read_excerpts(Path(excerpts_json_path))
     raw_items = _flatten_raw_items(data)
@@ -447,10 +450,18 @@ def build_pdf(
     story.append(Spacer(1, 0.25 * 72))
     story.append(Paragraph(f"for {now:%B %d, %Y}", CoverSub))
     story.append(Spacer(1, 0.6 * 72))
-    story.append(Paragraph(commentary_title, CoverDocTitle))
+    safe_title = escape(commentary_title)
+    if source_url:
+        safe_url = escape(str(source_url))
+        story.append(Paragraph(f'<a href="{safe_url}">{safe_title}</a>', CoverDocTitle))
+    else:
+        story.append(Paragraph(safe_title, CoverDocTitle))
     story.append(Spacer(1, 0.35 * 72))
     story.append(Paragraph(f"Run: {now:%Y-%m-%d %H:%M:%S}", MetaX))
     story.append(Paragraph(f"Source: {source_pdf_name}", MetaX))
+    if source_url:
+        safe_url = escape(str(source_url))
+        story.append(Paragraph(f'Source link: <a href="{safe_url}">{safe_url}</a>', MetaX))
     if letter_date:
         story.append(Paragraph(f"Letter Date: {letter_date}", MetaX))
 
