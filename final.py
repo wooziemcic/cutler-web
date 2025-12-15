@@ -2275,11 +2275,11 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                                 for pdf in pdfs:
                                     out_dir = EX_DIR / q / _safe(brand) / _safe(pdf.stem)
                                     built = run_excerpt_and_build(
-                                        pdf,
-                                        out_dir,
-                                        source_pdf_name=pdf.name,
+                                        pdf_path=pdf_path,
+                                        out_dir=out_dir,
+                                        source_pdf_name=pdf_path.name,
                                         letter_date=h.letter_date or None,
-                                        source_url=h.fund_href,
+                                        source_url=h.fund_href, 
                                     )
 
                                     manifest_items.append(
@@ -2543,7 +2543,6 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
                         source_pdf_name=pdf.name,
                         letter_date=letter_date or None,
                     )
-
                     manifest_items.append(
                         {
                             "fund_family": brand,
