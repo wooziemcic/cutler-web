@@ -369,7 +369,10 @@ def run_excerpt_and_build(
             format_style="legacy",
             letter_date=letter_date,
             source_url=source_url, 
-        )
+        
+    ai_score=bool(st.session_state.get("ai_score_enabled", False)),
+    ai_model=str(st.session_state.get("ai_score_model", "gpt-4o-mini") or "gpt-4o-mini"),
+)
 
         return out_pdf if out_pdf.exists() else None
 
@@ -2812,6 +2815,21 @@ def main():
         value=True,
     )
 
+    # Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
+    ai_score_enabled = st.sidebar.checkbox(
+        "AI relevance scoring (1–5 highlights)",
+        value=False,
+        help="Uses OpenAI to rate how directly a paragraph discusses the company. "
+             "Adds a rating tag and background highlight for faster skimming.",
+        key="ai_score_enabled",
+    )
+    ai_score_model = st.sidebar.text_input(
+        "AI model (for relevance scoring)",
+        value="gpt-4o-mini",
+        help="Used only if AI relevance scoring is enabled.",
+        key="ai_score_model",
+    )
+
     batch_names = list(RUNNABLE_BATCHES.keys())
 
     # --- Tabs (website-style nav) ---
@@ -3196,4 +3214,3 @@ def main():
 
 # Streamlit needs main() to run on import.
 main()
-
