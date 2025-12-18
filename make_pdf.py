@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
+import hashlib
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 from xml.sax.saxutils import escape
@@ -22,9 +25,6 @@ from reportlab.platypus import (
     TableStyle,
     PageBreak,
 )
-
-from zoneinfo import ZoneInfo
-
 
 # ---------- Styles ----------
 
@@ -334,6 +334,99 @@ def _humanize_source_name(source_pdf_name: str) -> str:
     return " ".join(smart_title(w) for w in cleaned)
 
 
+# ---------- AI relevance scoring (optional) ----------
+
+# Rating scale:
+# 5 = directly about the company (thesis, actions, catalysts, performance, risks, outlook)
+# 4 = meaningful discussion but less direct/central
+# 3 = moderate relevance (some context, light commentary)
+# 2 = weak relevance (passing mention, minor context)
+# 1 = essentially irrelevant (lists/holdings/indices/tickers with no substance)
+
+_RATING_COLORS = {
+    5: colors.HexColor("#DFF3E3"),  # green-ish
+    4: colors.HexColor("#EAF7ED"),
+    3: colors.HexColor("#FFF7DB"),  # light yellow
+    2: colors.HexColor("#FFE7D6"),  # light orange
+    1: colors.HexColor("#FDE2E2"),  # light red
+}
+
+def _hash_key(*parts: str) -> str:
+    h = hashlib.sha256()
+    for p in parts:
+        h.update((p or "").encode("utf-8", errors="ignore"))
+        h.update(b"\x1f")
+    return h.hexdigest()
+
+def _openai_score_paragraph(
+    *,
+    company_label: str,
+    tickers: str,
+    paragraph: str,
+    model: str,
+    cache: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return dict: {rating:int, rationale:str}. Uses cache keyed by content hash."""
+    key = _hash_key(model, company_label, tickers, paragraph)
+    if key in cache:
+        return cache[key]
+
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_APIKEY")
+    if not api_key:
+        out = {"rating": 3, "rationale": "No OPENAI_API_KEY set; defaulted to 3."}
+        cache[key] = out
+        return out
+
+    try:
+        # OpenAI Python SDK v1.x
+        from openai import OpenAI  # type: ignore
+        client = OpenAI(api_key=api_key)
+
+        sys_prompt = (
+            "You are a strict equity-research analyst helping a buy-side firm. "
+            "Score how relevant a mutual-fund commentary paragraph is to the target company. "
+            "Output ONLY valid JSON."
+        )
+
+        user_prompt = f"""Target company: {company_label}
+Tickers: {tickers}
+
+Paragraph:
+{paragraph}
+
+Return JSON with:
+- rating: integer 1-5 (5 = directly about the company with meaningful discussion; 1 = basically irrelevant / only a list mention)
+- rationale: 1 short sentence explaining why.
+Rules:
+- If the paragraph discusses position sizing, buy/sell, thesis, catalysts, risks, fundamentals, management, macro impact on the company: rating 4-5.
+- If it's a passing mention, sector list, index/holdings list, or name-drop without analysis: rating 1-2.
+- Be conservative (prefer lower ratings unless clearly substantive).
+"""
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+        )
+
+        content = (resp.choices[0].message.content or "").strip()
+        # best-effort JSON parse (model should return JSON)
+        parsed = json.loads(content)
+        rating = int(parsed.get("rating", 3))
+        rating = 1 if rating < 1 else 5 if rating > 5 else rating
+        rationale = str(parsed.get("rationale", "")).strip()
+
+        out = {"rating": rating, "rationale": rationale}
+        cache[key] = out
+        return out
+    except Exception as e:
+        out = {"rating": 3, "rationale": f"AI scoring failed; defaulted to 3. ({e})"}
+        cache[key] = out
+        return out
+
 # ---------- Rendering ----------
 
 def _render_group_block_table(
@@ -399,6 +492,10 @@ def _render_group_block_compact(
     story: List[Any],
     group: Group,
     name_map: Dict[str, str],
+    *,
+    ai_score: bool,
+    ai_model: str,
+    ai_cache: Dict[str, Dict[str, Any]],
 ) -> None:
     """
     Compact renderer (default): full-width blocks with a single header line,
@@ -447,42 +544,104 @@ def _render_group_block_compact(
         firstLineIndent=-14,
     )
 
+    # Per-rating highlight styles (only used when ai_score=True)
+    rating_styles: Dict[int, ParagraphStyle] = {}
+    if ai_score:
+        for r in (1, 2, 3, 4, 5):
+            rating_styles[r] = ParagraphStyle(
+                f"NumStyleR{r}",
+                parent=num_style,
+                backColor=_RATING_COLORS.get(r),
+                borderPadding=(4, 6, 4, 6),
+                spaceAfter=6,
+            )
+
+    # Group header/meta
     display_names = [name_map.get(t, t) for t in group.tickers]
     title = ", ".join(display_names)
     tickers = ", ".join(group.tickers)
     pages = _pages_text(group.pages)
 
-    safe_title = escape(title)
-    safe_tickers = escape(tickers)
-
-    story.append(Paragraph(f"{safe_title}", header_style))
-    story.append(Paragraph(f"Tickers: {safe_tickers} &nbsp;&nbsp;|&nbsp;&nbsp; Pages: {pages}", meta_style))
+    story.append(Paragraph(escape(title), header_style))
+    story.append(
+        Paragraph(
+            f"Tickers: {escape(tickers)} &nbsp;&nbsp;|&nbsp;&nbsp; Pages: {pages}",
+            meta_style,
+        )
+    )
 
     # Numbered paragraphs
     n = 1
+    company_label = f"{title} ({tickers})"
     for it in group.items:
         txt = (it.get("text") or "").strip()
         if not txt:
             continue
+
         for chunk in _chunk_text(txt, max_words=140):
             safe_chunk = escape(chunk)
-            story.append(Paragraph(f"{n}. {safe_chunk}", num_style))
+
+            rating: Optional[int] = None
+            rationale = ""
+            if ai_score:
+                scored = _openai_score_paragraph(
+                    company_label=company_label,
+                    tickers=tickers,
+                    paragraph=chunk,
+                    model=ai_model,
+                    cache=ai_cache,
+                )
+                try:
+                    rating = int(scored.get("rating", 3) or 3)
+                except Exception:
+                    rating = 3
+                rating = 1 if rating < 1 else 5 if rating > 5 else rating
+                rationale = str(scored.get("rationale", "") or "").strip()
+
+            if rating is not None:
+                style = rating_styles.get(rating, num_style)
+                prefix = f"[{rating}] "
+                story.append(Paragraph(f"{n}. {prefix}{safe_chunk}", style))
+                if rationale:
+                    story.append(
+                        Paragraph(
+                            f"<font size='8' color='#6b4f7a'>Why: {escape(rationale)}</font>",
+                            meta_style,
+                        )
+                    )
+            else:
+                story.append(Paragraph(f"{n}. {safe_chunk}", num_style))
+
             n += 1
 
     story.append(Spacer(1, 8))
+
 
 
 def _render_group_block(
     story: List[Any],
     group: Group,
     name_map: Dict[str, str],
+    *,
     format_style: str = "legacy",
+    ai_score: bool = False,
+    ai_model: str = "gpt-4o-mini",
+    ai_cache: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """Dispatch between legacy table view and compact view."""
     if (format_style or "").lower() in {"table", "grid", "legacy_table"}:
         _render_group_block_table(story, group, name_map)
-    else:
-        _render_group_block_compact(story, group, name_map)
+        return
+
+    _render_group_block_compact(
+        story,
+        group,
+        name_map,
+        ai_score=ai_score,
+        ai_model=ai_model,
+        ai_cache=ai_cache or {},
+    )
+
 
 
 # ---------- Main builder ----------
@@ -496,6 +655,9 @@ def build_pdf(
     format_style: str = "legacy",
     letter_date: Optional[str] = None,
     source_url: Optional[str] = None,
+    *,
+    ai_score: bool = False,
+    ai_model: str = "gpt-4o-mini",
 ) -> Optional[str]:
 
     here = Path(".").resolve()
@@ -534,8 +696,8 @@ def build_pdf(
     )
 
     story: List[Any] = []
+    ai_cache: Dict[str, Dict[str, Any]] = {}
     now = datetime.now(ZoneInfo("America/New_York"))
-
 
     # --- Cover / header ---
     # (Compact by default to reduce page count. Use format_style='table' for the old look.)
@@ -562,7 +724,7 @@ def build_pdf(
 
     # --- Excerpt groups ---
     for grp in groups:
-        _render_group_block(story, grp, name_map, format_style=format_style)
+        _render_group_block(story, grp, name_map, format_style=format_style, ai_score=ai_score, ai_model=ai_model, ai_cache=ai_cache)
 
     doc.build(story)
     print(f"PDF created: {output_pdf_path}")
