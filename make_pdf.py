@@ -23,6 +23,9 @@ from reportlab.platypus import (
     PageBreak,
 )
 
+from zoneinfo import ZoneInfo
+
+
 # ---------- Styles ----------
 
 _base = getSampleStyleSheet()
@@ -531,7 +534,8 @@ def build_pdf(
     )
 
     story: List[Any] = []
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("America/New_York"))
+
 
     # --- Cover / header ---
     # (Compact by default to reduce page count. Use format_style='table' for the old look.)
