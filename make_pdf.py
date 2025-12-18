@@ -378,9 +378,11 @@ def _openai_score_paragraph(
         return out
 
     try:
-        # OpenAI Python SDK v1.x
-        from openai import OpenAI  # type: ignore
-        client = OpenAI(api_key=api_key)
+        # Legacy OpenAI Python SDK style (matches your existing environment)
+        import openai  # type: ignore
+
+        # Ensure key is set for legacy SDK
+        openai.api_key = api_key
 
         sys_prompt = (
             "You are a strict equity-research analyst helping a buy-side firm. "
@@ -403,7 +405,7 @@ Rules:
 - Be conservative (prefer lower ratings unless clearly substantive).
 """
 
-        resp = client.chat.completions.create(
+        resp = openai.ChatCompletion.create(
             model=model,
             messages=[
                 {"role": "system", "content": sys_prompt},
@@ -412,7 +414,7 @@ Rules:
             temperature=0.1,
         )
 
-        content = (resp.choices[0].message.content or "").strip()
+        content = (resp["choices"][0]["message"]["content"] or "").strip()
         # best-effort JSON parse (model should return JSON)
         parsed = json.loads(content)
         rating = int(parsed.get("rating", 3))
