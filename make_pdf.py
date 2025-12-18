@@ -272,7 +272,7 @@ def _pages_text(pages: List[int]) -> str:
     return ", ".join(str(p) for p in pages) if pages else "—"
 
 
-def _chunk_text(txt: str, max_words: int = 90) -> List[str]:
+def _chunk_text(txt: str, max_words: int = 140) -> List[str]:
     """
     Split long text into reasonably sized paragraphs.
     """
@@ -333,13 +333,13 @@ def _humanize_source_name(source_pdf_name: str) -> str:
 
 # ---------- Rendering ----------
 
-def _render_group_block(
+def _render_group_block_table(
     story: List[Any],
     group: Group,
     name_map: Dict[str, str],
 ) -> None:
     """
-    Render a single group as a two-column legacy-style table.
+    Legacy renderer: two-column table.
     Left: combined company name(s) + tickers.
     Right: Pages + paragraphs.
     """
@@ -363,11 +363,10 @@ def _render_group_block(
         txt = (it.get("text") or "").strip()
         if not txt:
             continue
-        # If specific pages differ from header, show them
         ipages = it.get("pages") or []
         if ipages and set(ipages) != set(group.pages):
             rows.append(["", Paragraph(f"Pages: {', '.join(map(str, ipages))}", PagesLegacy)])
-        for chunk in _chunk_text(txt, max_words=90):
+        for chunk in _chunk_text(txt, max_words=140):
             rows.append(["", Paragraph(chunk, BodyLegacy)])
 
     table = Table(
@@ -376,7 +375,7 @@ def _render_group_block(
         repeatRows=1,
         style=TableStyle(
             [
-                ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#4b2142")),  # Cutler purple
+                ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#4b2142")),
                 ("TEXTCOLOR", (0, 0), (0, 0), colors.white),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#e5e7eb")),
@@ -389,12 +388,102 @@ def _render_group_block(
         ),
     )
 
-    # Let the table flow naturally; no shrink-to-fit
     story.append(table)
-    story.append(Spacer(1, 14))
+    story.append(Spacer(1, 10))
+
+
+def _render_group_block_compact(
+    story: List[Any],
+    group: Group,
+    name_map: Dict[str, str],
+) -> None:
+    """
+    Compact renderer (default): full-width blocks with a single header line,
+    then numbered paragraphs below. This significantly reduces page count
+    versus nested tables.
+    """
+
+    # Styles created lazily so we don't mutate global stylesheet at import time
+    header_style = ParagraphStyle(
+        "GroupHeaderCompact",
+        parent=_base["Heading3"],
+        fontSize=10.5,
+        leading=13,
+        textColor=colors.white,
+        backColor=colors.HexColor("#4b2142"),
+        leftIndent=0,
+        rightIndent=0,
+        spaceBefore=6,
+        spaceAfter=6,
+        borderPadding=(6, 8, 6, 8),
+    )
+
+    meta_style = ParagraphStyle(
+        "GroupMetaCompact",
+        parent=_base["Normal"],
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#6b4f7a"),
+        spaceAfter=4,
+    )
+
+    body_style = ParagraphStyle(
+        "BodyCompact",
+        parent=_base["BodyText"],
+        fontSize=9.5,
+        leading=12.5,
+        spaceAfter=5,
+        splitLongWords=1,
+        wordWrap="CJK",
+    )
+
+    num_style = ParagraphStyle(
+        "BodyCompactNumber",
+        parent=body_style,
+        leftIndent=14,
+        firstLineIndent=-14,
+    )
+
+    display_names = [name_map.get(t, t) for t in group.tickers]
+    title = ", ".join(display_names)
+    tickers = ", ".join(group.tickers)
+    pages = _pages_text(group.pages)
+
+    safe_title = escape(title)
+    safe_tickers = escape(tickers)
+
+    story.append(Paragraph(f"{safe_title}", header_style))
+    story.append(Paragraph(f"Tickers: {safe_tickers} &nbsp;&nbsp;|&nbsp;&nbsp; Pages: {pages}", meta_style))
+
+    # Numbered paragraphs
+    n = 1
+    for it in group.items:
+        txt = (it.get("text") or "").strip()
+        if not txt:
+            continue
+        for chunk in _chunk_text(txt, max_words=140):
+            safe_chunk = escape(chunk)
+            story.append(Paragraph(f"{n}. {safe_chunk}", num_style))
+            n += 1
+
+    story.append(Spacer(1, 8))
+
+
+def _render_group_block(
+    story: List[Any],
+    group: Group,
+    name_map: Dict[str, str],
+    format_style: str = "legacy",
+) -> None:
+    """Dispatch between legacy table view and compact view."""
+    if (format_style or "").lower() in {"table", "grid", "legacy_table"}:
+        _render_group_block_table(story, group, name_map)
+    else:
+        _render_group_block_compact(story, group, name_map)
 
 
 # ---------- Main builder ----------
+
 
 def build_pdf(
     excerpts_json_path: str = "excerpts_clean.json",
@@ -444,19 +533,20 @@ def build_pdf(
     story: List[Any] = []
     now = datetime.now()
 
-    # --- Cover / title page ---
-    story.append(Spacer(1, 1.8 * 72))
-    story.append(Paragraph("Cutler Capital Excerption", CoverMain))
+    # --- Cover / header ---
+    # (Compact by default to reduce page count. Use format_style='table' for the old look.)
     story.append(Spacer(1, 0.25 * 72))
+    story.append(Paragraph("Cutler Capital Excerption", CoverMain))
+    story.append(Spacer(1, 0.1 * 72))
     story.append(Paragraph(f"for {now:%B %d, %Y}", CoverSub))
-    story.append(Spacer(1, 0.6 * 72))
+    story.append(Spacer(1, 0.2 * 72))
     safe_title = escape(commentary_title)
     if source_url:
         safe_url = escape(str(source_url))
         story.append(Paragraph(f'<a href="{safe_url}">{safe_title}</a>', CoverDocTitle))
     else:
         story.append(Paragraph(safe_title, CoverDocTitle))
-    story.append(Spacer(1, 0.35 * 72))
+    story.append(Spacer(1, 0.15 * 72))
     story.append(Paragraph(f"Run: {now:%Y-%m-%d %H:%M:%S}", MetaX))
     story.append(Paragraph(f"Source: {source_pdf_name}", MetaX))
     if source_url:
@@ -464,12 +554,11 @@ def build_pdf(
         story.append(Paragraph(f'Source link: <a href="{safe_url}">{safe_url}</a>', MetaX))
     if letter_date:
         story.append(Paragraph(f"Letter Date: {letter_date}", MetaX))
-
-    story.append(PageBreak())
+    story.append(Spacer(1, 0.25 * 72))
 
     # --- Excerpt groups ---
     for grp in groups:
-        _render_group_block(story, grp, name_map)
+        _render_group_block(story, grp, name_map, format_style=format_style)
 
     doc.build(story)
     print(f"PDF created: {output_pdf_path}")
