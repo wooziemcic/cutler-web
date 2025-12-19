@@ -1212,80 +1212,78 @@ def draw_seeking_alpha_news_section() -> None:
 
             st.write(cleaned_text)
 
+    # --- Download: combined Seeking Alpha digest for selected tickers (max 10) ---
+    tickers_for_export = selected_tickers[:] if selected_tickers else [ticker]
+    tickers_for_export = tickers_for_export[:10]
 
-            # --- Download: combined Seeking Alpha digest for selected tickers (max 10) ---
-            tickers_for_export = selected_tickers[:] if selected_tickers else [ticker]
-            tickers_for_export = tickers_for_export[:10]
+    # Build PDF on-demand and store in session so the download button persists on reruns
+    if st.button("Build downloadable Seeking Alpha PDF", key="sa_build_pdf_v2"):
+        from sa_analysis_api import fetch_analysis_list, fetch_analysis_details, build_sa_analysis_digest, AnalysisArticle
 
-            # Build PDF on-demand and store in session so the download button persists on reruns
-            if st.button("Build downloadable Seeking Alpha PDF", key="sa_build_pdf_v2"):
-                from sa_analysis_api import fetch_analysis_list, fetch_analysis_details, build_sa_analysis_digest, AnalysisArticle
+        sections: list[tuple[str, str]] = []
+        for sym in tickers_for_export:
+            # Try to reuse cache for this ticker+model if present
+            t_cache_key = f"{sym}|{model}"
+            cached = sa_cache.get(t_cache_key, {})
+            t_articles = cached.get("articles")
 
-                sections: list[tuple[str, str]] = []
-                for sym in tickers_for_export:
-                    # Try to reuse cache for this ticker+model if present
-                    t_cache_key = f"{sym}|{model}"
-                    cached = sa_cache.get(t_cache_key, {})
-                    t_articles = cached.get("articles")
+            # If no cached articles, fetch fresh
+            if not t_articles:
+                t_articles = fetch_analysis_list(sym, size=10)
 
-                    # If no cached articles, fetch fresh
-                    if not t_articles:
-                        t_articles = fetch_analysis_list(sym, size=10)
-
-                        # fill body_html for first few
-                        max_fill = 4
-                        for art in (t_articles or [])[:max_fill]:
-                            try:
-                                details = fetch_analysis_details(art.id)
-                                data = details.get("data") or {}
-                                attrs = data.get("attributes") or {}
-                                body_html = attrs.get("body_html") or attrs.get("content") or attrs.get("body") or ""
-                                art.body_html = body_html or None
-                            except Exception:
-                                continue
-
-                    # Build digest text (AI) for this ticker
+                # fill body_html for first few
+                max_fill = 4
+                for art in (t_articles or [])[:max_fill]:
                     try:
-                        digest = build_sa_analysis_digest(sym, t_articles or [], model=model, max_articles=4)
-                    except Exception as e:
-                        digest = f"Could not build AI digest for {sym}. ({e})"
+                        details = fetch_analysis_details(art.id)
+                        data = details.get("data") or {}
+                        attrs = data.get("attributes") or {}
+                        body_html = attrs.get("body_html") or attrs.get("content") or attrs.get("body") or ""
+                        art.body_html = body_html or None
+                    except Exception:
+                        continue
 
-                    sections.append((f"{sym} – Seeking Alpha AI Digest", digest))
+            # Build digest text (AI) for this ticker
+            try:
+                digest = build_sa_analysis_digest(sym, t_articles or [], model=model, max_articles=4)
+            except Exception as e:
+                digest = f"Could not build AI digest for {sym}. ({e})"
 
-                now_et = _now_et()
-                tickers_label = " ".join(tickers_for_export)
-                safe_tickers = _safe(tickers_label.replace(" ", "_"))
-                out_name = f"{now_et:%m.%d.%y} Seeking Alpha {safe_tickers}.pdf"
-                out_path = (BASE / "SeekingAlpha" / out_name)
+            sections.append((f"{sym} – Seeking Alpha AI Digest", digest))
 
-                subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} • Tickers: {tickers_label}"
-                try:
-                    pdf_path = _build_text_pdf(
-                        output_path=out_path,
-                        title="Cutler Capital – Seeking Alpha Digest",
-                        subtitle=subtitle,
-                        sections=sections,
-                    )
-                    st.session_state["sa_export_pdf_path"] = str(pdf_path)
-                    st.success("Seeking Alpha PDF is ready.")
-                except Exception as e:
-                    st.error(f"Could not build Seeking Alpha PDF: {e}")
+        now_et = _now_et()
+        tickers_label = " ".join(tickers_for_export)
+        safe_tickers = _safe(tickers_label.replace(" ", "_"))
+        out_name = f"{now_et:%m.%d.%y} Seeking Alpha {safe_tickers}.pdf"
+        out_path = (BASE / "SeekingAlpha" / out_name)
 
-            # Show download button if we have a built PDF
-            sa_pdf_path = st.session_state.get("sa_export_pdf_path")
-            if sa_pdf_path and Path(sa_pdf_path).exists():
-                try:
-                    with open(sa_pdf_path, "rb") as f:
-                        st.download_button(
-                            "Download Seeking Alpha PDF",
-                            data=f.read(),
-                            file_name=Path(sa_pdf_path).name,
-                            mime="application/pdf",
-                            key="sa_download_pdf_v2",
-                        )
-                except Exception:
-                    st.warning("PDF is built but could not be opened for download.")
+        subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} • Tickers: {tickers_label}"
+        try:
+            pdf_path = _build_text_pdf(
+                output_path=out_path,
+                title="Cutler Capital – Seeking Alpha Digest",
+                subtitle=subtitle,
+                sections=sections,
+            )
+            st.session_state["sa_export_pdf_path"] = str(pdf_path)
+            st.success("Seeking Alpha PDF is ready.")
+        except Exception as e:
+            st.error(f"Could not build Seeking Alpha PDF: {e}")
 
+    # Show download button if we have a built PDF
+    sa_pdf_path = st.session_state.get("sa_export_pdf_path")
+    if sa_pdf_path and Path(sa_pdf_path).exists():
+        try:
+            with open(sa_pdf_path, "rb") as f:
+                st.download_button(
+                    "Download Seeking Alpha PDF",
+                    data=f.read(),
+                    file_name=Path(sa_pdf_path).name,
+                    mime="application/pdf",
+                    key="sa_download_pdf_v2",
+                )
+        except Exception:
+            st.warning("PDF is built but could not be opened for download.")
 
 # --- Reddit snapshot section (uses reddit34 via reddit_excerpts) ---
 
