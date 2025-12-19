@@ -517,17 +517,17 @@ def _stamp_pdf(src: Path, left: str, mid: str, right: str) -> Path:
     return tmp
 
 def _build_compiled_filename(batch: str, *, incremental: bool = False, dt: Optional[datetime] = None) -> str:
-    """Return a human-friendly compiled PDF name like Batch1_2025-12-04_Excerpt.pdf.
+    """Return a human-friendly compiled PDF name like '12.08.25 Batch 1 Excerpt.pdf'.
 
-    We keep the actual quarter inside the PDF body/header; the file name is what
-    interns will see and archive in their 2025/Dec folders.
+    - Uses America/New_York time (EST/EDT) so file names match your local day.
+    - Keeps the quarter inside the PDF body/header; the file name is what interns archive.
     """
     if dt is None:
-        dt = datetime.now()
-    batch_token = batch.replace(" ", "")  # "Batch 1" -> "Batch1"
-    date_str = dt.strftime("%Y-%m-%d")
-    suffix = "Incremental_Excerpt" if incremental else "Excerpt"
-    return f"{batch_token}_{date_str}_{suffix}.pdf"
+        dt = _now_et()
+    # Desired format: 12.8.25 Batch 1 Excerpt.pdf (no leading zeros on month/day)
+    date_str = f"{dt.month}.{dt.day}.{dt.strftime('%y')}"
+    suffix = "Incremental Excerpt" if incremental else "Excerpt"
+    return f"{date_str} {batch} {suffix}.pdf"
 
 
 def compile_merged(batch: str, quarter: str, collected: List[Path], *, incremental: bool = False) -> Optional[Path]:
@@ -549,7 +549,7 @@ def compile_merged(batch: str, quarter: str, collected: List[Path], *, increment
                 p,
                 left=batch,
                 mid=title,
-                right=f"Run {datetime.now():%Y-%m-%d %H:%M}",
+                right=f"Run {_now_et():%Y-%m-%d %H:%M} ET",
             )
             m.append(str(stamped))
             added += 1
@@ -1218,7 +1218,7 @@ def draw_seeking_alpha_news_section() -> None:
             tickers_for_export = tickers_for_export[:10]
 
             # Build PDF on-demand and store in session so the download button persists on reruns
-            if st.button("Build downloadable Seeking Alpha PDF", key="sa_build_pdf"):
+            if st.button("Build downloadable Seeking Alpha PDF", key="sa_build_pdf_v2"):
                 from sa_analysis_api import fetch_analysis_list, fetch_analysis_details, build_sa_analysis_digest, AnalysisArticle
 
                 sections: list[tuple[str, str]] = []
@@ -1281,7 +1281,7 @@ def draw_seeking_alpha_news_section() -> None:
                             data=f.read(),
                             file_name=Path(sa_pdf_path).name,
                             mime="application/pdf",
-                            key="sa_download_pdf",
+                            key="sa_download_pdf_v2",
                         )
                 except Exception:
                     st.warning("PDF is built but could not be opened for download.")
