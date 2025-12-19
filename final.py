@@ -209,6 +209,101 @@ def _first_word(name: str) -> str:
 def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "file"
 
+
+def _now_et() -> datetime:
+    """Return current time in America/New_York (handles EST/EDT)."""
+    try:
+        from zoneinfo import ZoneInfo  # py3.9+
+        return datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return datetime.now()
+
+
+def _build_text_pdf(
+    *,
+    output_path: Path,
+    title: str,
+    subtitle: str | None = None,
+    sections: list[tuple[str, str]] | None = None,
+) -> Path:
+    """Build a simple, clean, text-first PDF (used for SA/Podcast downloads)."""
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    base = getSampleStyleSheet()
+    Title = ParagraphStyle(
+        "DLTitle",
+        parent=base["Title"],
+        fontSize=18,
+        leading=22,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#4b2142"),
+        spaceAfter=6,
+    )
+    Sub = ParagraphStyle(
+        "DLSub",
+        parent=base["Normal"],
+        fontSize=10,
+        leading=13,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#6b4f7a"),
+        spaceAfter=12,
+    )
+    H = ParagraphStyle(
+        "DLH",
+        parent=base["Heading2"],
+        fontSize=12,
+        leading=15,
+        alignment=TA_LEFT,
+        textColor=colors.HexColor("#111827"),
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+    Body = ParagraphStyle(
+        "DLBody",
+        parent=base["BodyText"],
+        fontSize=10,
+        leading=13,
+        alignment=TA_LEFT,
+        spaceAfter=8,
+    )
+
+    doc = SimpleDocTemplate(
+        str(output_path),
+        pagesize=LETTER,
+        leftMargin=0.75 * 72,
+        rightMargin=0.75 * 72,
+        topMargin=0.75 * 72,
+        bottomMargin=0.75 * 72,
+        title=title,
+    )
+
+    story: list = []
+    story.append(Paragraph(title, Title))
+    if subtitle:
+        story.append(Paragraph(subtitle, Sub))
+    else:
+        story.append(Spacer(1, 8))
+
+    if sections:
+        for i, (h, b) in enumerate(sections):
+            if i and i % 6 == 0:
+                story.append(PageBreak())
+            if h:
+                story.append(Paragraph(h, H))
+            if b:
+                # Convert newlines to <br/> for ReportLab Paragraph
+                safe_b = b.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                safe_b = safe_b.replace("\n", "<br/>")
+                story.append(Paragraph(safe_b, Body))
+    doc.build(story)
+    return output_path
+
 def _set_quarter(page, wanted: str) -> bool:
     """
     Try to select the requested quarter in the site's <select>.
@@ -1118,6 +1213,80 @@ def draw_seeking_alpha_news_section() -> None:
             st.write(cleaned_text)
 
 
+            # --- Download: combined Seeking Alpha digest for selected tickers (max 10) ---
+            tickers_for_export = selected_tickers[:] if selected_tickers else [ticker]
+            tickers_for_export = tickers_for_export[:10]
+
+            # Build PDF on-demand and store in session so the download button persists on reruns
+            if st.button("Build downloadable Seeking Alpha PDF", key="sa_build_pdf"):
+                from sa_analysis_api import fetch_analysis_list, fetch_analysis_details, build_sa_analysis_digest, AnalysisArticle
+
+                sections: list[tuple[str, str]] = []
+                for sym in tickers_for_export:
+                    # Try to reuse cache for this ticker+model if present
+                    t_cache_key = f"{sym}|{model}"
+                    cached = sa_cache.get(t_cache_key, {})
+                    t_articles = cached.get("articles")
+
+                    # If no cached articles, fetch fresh
+                    if not t_articles:
+                        t_articles = fetch_analysis_list(sym, size=10)
+
+                        # fill body_html for first few
+                        max_fill = 4
+                        for art in (t_articles or [])[:max_fill]:
+                            try:
+                                details = fetch_analysis_details(art.id)
+                                data = details.get("data") or {}
+                                attrs = data.get("attributes") or {}
+                                body_html = attrs.get("body_html") or attrs.get("content") or attrs.get("body") or ""
+                                art.body_html = body_html or None
+                            except Exception:
+                                continue
+
+                    # Build digest text (AI) for this ticker
+                    try:
+                        digest = build_sa_analysis_digest(sym, t_articles or [], model=model, max_articles=4)
+                    except Exception as e:
+                        digest = f"Could not build AI digest for {sym}. ({e})"
+
+                    sections.append((f"{sym} – Seeking Alpha AI Digest", digest))
+
+                now_et = _now_et()
+                tickers_label = " ".join(tickers_for_export)
+                safe_tickers = _safe(tickers_label.replace(" ", "_"))
+                out_name = f"{now_et:%m.%d.%y} Seeking Alpha {safe_tickers}.pdf"
+                out_path = (BASE / "SeekingAlpha" / out_name)
+
+                subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} • Tickers: {tickers_label}"
+                try:
+                    pdf_path = _build_text_pdf(
+                        output_path=out_path,
+                        title="Cutler Capital – Seeking Alpha Digest",
+                        subtitle=subtitle,
+                        sections=sections,
+                    )
+                    st.session_state["sa_export_pdf_path"] = str(pdf_path)
+                    st.success("Seeking Alpha PDF is ready.")
+                except Exception as e:
+                    st.error(f"Could not build Seeking Alpha PDF: {e}")
+
+            # Show download button if we have a built PDF
+            sa_pdf_path = st.session_state.get("sa_export_pdf_path")
+            if sa_pdf_path and Path(sa_pdf_path).exists():
+                try:
+                    with open(sa_pdf_path, "rb") as f:
+                        st.download_button(
+                            "Download Seeking Alpha PDF",
+                            data=f.read(),
+                            file_name=Path(sa_pdf_path).name,
+                            mime="application/pdf",
+                            key="sa_download_pdf",
+                        )
+                except Exception:
+                    st.warning("PDF is built but could not be opened for download.")
+
+
 # --- Reddit snapshot section (uses reddit34 via reddit_excerpts) ---
 
 def _get_available_tickers_for_reddit():
@@ -1658,6 +1827,56 @@ def draw_podcast_intelligence_section():
             with col2:
                 st.markdown("**Summary across recent podcast mentions**")
                 st.write(stance_summary)
+
+
+            # --- Download: Podcast report PDF for current selection ---
+            if st.button("Build downloadable Podcast PDF", key="pod_build_pdf"):
+                now_et = _now_et()
+                tkr = (insight_for_ticker.get("ticker") or selected_label or "Podcast").strip()
+                safe_tkr = _safe(tkr)
+                out_name = f"{now_et:%m.%d.%y} Podcast {safe_tkr}.pdf"
+                out_path = (BASE / "Podcasts" / out_name)
+
+                # Build sections: stance summary + up to 25 evidence snippets
+                sections: list[tuple[str, str]] = []
+                sections.append((f"{tkr} – AI Podcast Stance", f"{stance_label}\n\n{stance_summary}"))
+
+                # Snippet evidence
+                ev_lines: list[str] = []
+                for i, sn in enumerate(filtered_snippets[:25], 1):
+                    ep_title = sn.get("episode_title") or sn.get("episode") or ""
+                    ep_date = sn.get("published_date") or sn.get("date") or ""
+                    txt = sn.get("text") or sn.get("snippet") or ""
+                    line = f"{i}. {ep_title} ({ep_date})\n{txt}"
+                    ev_lines.append(line.strip())
+                sections.append(("Episode snippets (evidence)", "\n\n".join(ev_lines) if ev_lines else "No snippets available in this window."))
+
+                subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} • Podcasts: {selected_group_label} • Window: {date_from} → {date_to}"
+                try:
+                    pdf_path = _build_text_pdf(
+                        output_path=out_path,
+                        title="Cutler Capital – Podcast Intelligence",
+                        subtitle=subtitle,
+                        sections=sections,
+                    )
+                    st.session_state["pod_export_pdf_path"] = str(pdf_path)
+                    st.success("Podcast PDF is ready.")
+                except Exception as e:
+                    st.error(f"Could not build Podcast PDF: {e}")
+
+            pod_pdf_path = st.session_state.get("pod_export_pdf_path")
+            if pod_pdf_path and Path(pod_pdf_path).exists():
+                try:
+                    with open(pod_pdf_path, "rb") as f:
+                        st.download_button(
+                            "Download Podcast PDF",
+                            data=f.read(),
+                            file_name=Path(pod_pdf_path).name,
+                            mime="application/pdf",
+                            key="pod_download_pdf",
+                        )
+                except Exception:
+                    st.warning("PDF is built but could not be opened for download.")
 
             st.markdown("### Episode snippets (evidence)")
 
