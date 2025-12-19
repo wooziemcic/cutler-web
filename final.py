@@ -1211,49 +1211,114 @@ def draw_seeking_alpha_news_section() -> None:
                 cleaned_text = _re.sub(r"\n{3,}", "\n\n", tmp).strip()
 
             st.write(cleaned_text)
-
-    # --- Download: combined Seeking Alpha digest for selected tickers (max 10) ---
+            
+    # --- Download: combined Seeking Alpha digest + full cleaned article bodies (per ticker) ---
     tickers_for_export = selected_tickers[:] if selected_tickers else [ticker]
     tickers_for_export = tickers_for_export[:10]
 
     # Build PDF on-demand and store in session so the download button persists on reruns
     if st.button("Build downloadable Seeking Alpha PDF", key="sa_build_pdf_v2"):
-        from sa_analysis_api import fetch_analysis_list, fetch_analysis_details, build_sa_analysis_digest, AnalysisArticle
+        from sa_analysis_api import fetch_analysis_list, fetch_analysis_details, build_sa_analysis_digest
+
+        def _normalize_html(part) -> str:
+            if part is None:
+                return ""
+            if isinstance(part, list):
+                return "\n".join(str(x) for x in part if x is not None)
+            return str(part)
 
         sections: list[tuple[str, str]] = []
+
+        # Controls for export verbosity (keep conservative to avoid huge PDFs)
+        MAX_ARTICLES_PER_TICKER = 10          # list/fetch size
+        MAX_BODIES_PER_TICKER = 5             # how many full bodies to include in the PDF
+        MAX_WORDS_PER_BODY = 900              # cap each body so export stays compact
+
         for sym in tickers_for_export:
-            # Try to reuse cache for this ticker+model if present
-            t_cache_key = f"{sym}|{model}"
-            cached = sa_cache.get(t_cache_key, {})
-            t_articles = cached.get("articles")
-
-            # If no cached articles, fetch fresh
-            if not t_articles:
-                t_articles = fetch_analysis_list(sym, size=10)
-
-                # fill body_html for first few
-                max_fill = 4
-                for art in (t_articles or [])[:max_fill]:
-                    try:
-                        details = fetch_analysis_details(art.id)
-                        data = details.get("data") or {}
-                        attrs = data.get("attributes") or {}
-                        body_html = attrs.get("body_html") or attrs.get("content") or attrs.get("body") or ""
-                        art.body_html = body_html or None
-                    except Exception:
-                        continue
+            # Always fetch fresh for export (export should be reproducible and complete)
+            try:
+                t_articles = fetch_analysis_list(sym, size=MAX_ARTICLES_PER_TICKER) or []
+            except Exception as e:
+                sections.append((f"{sym} – Seeking Alpha Export", f"Could not fetch analysis list. ({e})"))
+                continue
 
             # Build digest text (AI) for this ticker
             try:
-                digest = build_sa_analysis_digest(sym, t_articles or [], model=model, max_articles=4)
+                digest = build_sa_analysis_digest(sym, t_articles, model=model, max_articles=4)
             except Exception as e:
                 digest = f"Could not build AI digest for {sym}. ({e})"
 
-            sections.append((f"{sym} – Seeking Alpha AI Digest", digest))
+            # ---- Build “full bodies” section text (cleaned) ----
+            bodies_lines: list[str] = []
+            bodies_lines.append("### Full article bodies (cleaned)")
+            bodies_lines.append(
+                f"Including up to {MAX_BODIES_PER_TICKER} most recent analysis articles for {sym}.\n"
+            )
+
+            # Only include first N bodies to keep PDF reasonable
+            for i, art in enumerate(t_articles[:MAX_BODIES_PER_TICKER], start=1):
+                art_title = getattr(art, "title", "") or "Untitled"
+                art_url = getattr(art, "url", "") or ""
+                art_id = getattr(art, "id", None)
+
+                bodies_lines.append(f"#### {i}. {art_title}")
+                if art_url:
+                    bodies_lines.append(f"Source: {art_url}")
+
+                if not art_id:
+                    bodies_lines.append("Body: (No article ID returned.)\n")
+                    continue
+
+                try:
+                    details = fetch_analysis_details(str(art_id)) or {}
+                except Exception as e:
+                    bodies_lines.append(f"Body: (Could not fetch details: {e})\n")
+                    continue
+
+                # Support both shapes (raw RapidAPI vs your helper dict)
+                if isinstance(details, dict) and "data" in details:
+                    data = details.get("data") or {}
+                    attrs = data.get("attributes") or {}
+                    summary_html = attrs.get("summary_html") or attrs.get("summary") or ""
+                    body_html = attrs.get("body_html") or attrs.get("content") or attrs.get("body") or ""
+                else:
+                    summary_html = (details.get("summary_html") or details.get("summary") or "") if isinstance(details, dict) else ""
+                    body_html = (details.get("body_html") or details.get("content") or details.get("body") or "") if isinstance(details, dict) else ""
+
+                combined_html = _normalize_html(summary_html) + "\n\n" + _normalize_html(body_html)
+
+                if not combined_html.strip():
+                    bodies_lines.append("Body: (No body text returned.)\n")
+                    continue
+
+                # Clean HTML -> markdown-ish plain text
+                try:
+                    cleaned = clean_sa_html_to_markdown(combined_html)
+                except NameError:
+                    import re as _re
+                    tmp = _re.sub(r"<(br|p|div|li)[^>]*>", "\n", combined_html, flags=_re.I)
+                    tmp = _re.sub(r"<[^>]+>", "", tmp)
+                    tmp = tmp.replace("\xa0", " ")
+                    cleaned = _re.sub(r"\n{3,}", "\n\n", tmp).strip()
+
+                # Cap length per body to keep export compact
+                words = cleaned.split()
+                if len(words) > MAX_WORDS_PER_BODY:
+                    cleaned = " ".join(words[:MAX_WORDS_PER_BODY]) + "\n\n[Truncated for export.]"
+
+                bodies_lines.append(cleaned)
+                bodies_lines.append("")  # spacer line
+
+            # Combine digest + bodies into one section per ticker
+            combined_section_text = (
+                f"### AI Digest\n{digest}\n\n---\n\n" + "\n".join(bodies_lines)
+            )
+            sections.append((f"{sym} – Seeking Alpha (Digest + Bodies)", combined_section_text))
 
         now_et = _now_et()
         tickers_label = " ".join(tickers_for_export)
         safe_tickers = _safe(tickers_label.replace(" ", "_"))
+
         out_name = f"{now_et:%m.%d.%y} Seeking Alpha {safe_tickers}.pdf"
         out_path = (BASE / "SeekingAlpha" / out_name)
 
@@ -1261,12 +1326,12 @@ def draw_seeking_alpha_news_section() -> None:
         try:
             pdf_path = _build_text_pdf(
                 output_path=out_path,
-                title="Cutler Capital – Seeking Alpha Digest",
+                title="Cutler Capital – Seeking Alpha Digest + Article Bodies",
                 subtitle=subtitle,
                 sections=sections,
             )
             st.session_state["sa_export_pdf_path"] = str(pdf_path)
-            st.success("Seeking Alpha PDF is ready.")
+            st.success("Seeking Alpha PDF is ready (includes cleaned article bodies).")
         except Exception as e:
             st.error(f"Could not build Seeking Alpha PDF: {e}")
 
