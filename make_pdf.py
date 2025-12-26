@@ -452,7 +452,7 @@ def _render_group_block_table(
     rows.append(
         [
             Paragraph(left_html, LeftHeader),
-            Paragraph(f"Pages: {header_pages_text}", PagesLegacy),
+            Paragraph(f"Page/s: {header_pages_text}", PagesLegacy),
         ]
     )
 
@@ -463,7 +463,7 @@ def _render_group_block_table(
             continue
         ipages = it.get("pages") or []
         if ipages and set(ipages) != set(group.pages):
-            rows.append(["", Paragraph(f"Pages: {', '.join(map(str, ipages))}", PagesLegacy)])
+            rows.append(["", Paragraph(f"Page/s: {', '.join(map(str, ipages))}", PagesLegacy)])
         for chunk in _chunk_text(txt, max_words=140):
             rows.append(["", Paragraph(chunk, BodyLegacy)])
 
@@ -604,13 +604,6 @@ def _render_group_block_compact(
                 style = rating_styles.get(rating, num_style)
                 prefix = f"[{rating}] "
                 story.append(Paragraph(f"{n}. {prefix}{safe_chunk}", style))
-                if rationale:
-                    story.append(
-                        Paragraph(
-                            f"<font size='8' color='#6b4f7a'>Why: {escape(rationale)}</font>",
-                            meta_style,
-                        )
-                    )
             else:
                 story.append(Paragraph(f"{n}. {safe_chunk}", num_style))
 
