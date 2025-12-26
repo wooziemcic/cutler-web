@@ -1211,7 +1211,7 @@ def draw_seeking_alpha_news_section() -> None:
                 cleaned_text = _re.sub(r"\n{3,}", "\n\n", tmp).strip()
 
             st.write(cleaned_text)
-            
+
     # --- Download: combined Seeking Alpha digest + full cleaned article bodies (per ticker) ---
     tickers_for_export = selected_tickers[:] if selected_tickers else [ticker]
     tickers_for_export = tickers_for_export[:10]
@@ -3074,11 +3074,6 @@ def main():
             st.image(str(logo_path), width=260)
 
         st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
-        st.markdown(
-            "<div class='app-subtitle'>Scrape, excerpt, and compile fund letters by fund family and quarter.</div>",
-            unsafe_allow_html=True,
-        )
-
 
     # Sidebar: run settings
     st.sidebar.header("Run settings")
@@ -3118,7 +3113,7 @@ def main():
     st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
     tab_mf, tab_sa, tab_reddit, tab_podcast = st.tabs(
-        ["Mutual Fund", "Seeking Alpha", "Reddit", "Podcast"]
+        ["Fund Families", "Seeking Alpha", "Reddit", "Podcast"]
     )
 
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
