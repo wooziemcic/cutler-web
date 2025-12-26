@@ -3485,14 +3485,13 @@ def main():
 
     # Output path
     st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    WINDOWS_OUTPUT_PATH = Path(r"V:\CCM-AI\2025")
-    st.write("Output root folder (on this machine):")
-    if WINDOWS_OUTPUT_PATH.exists():
-        if st.button("📂 Open output folder (V:\\CCM-AI\\2025)"):
-            os.startfile(WINDOWS_OUTPUT_PATH)
-    else:
-        st.warning(f"Folder not found: {WINDOWS_OUTPUT_PATH}")
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.write("Output folder (local reference):")
+    st.code(r"V:\CCM-AI\2025")
+    st.caption(
+        "This path is on your local machine. "
+        "Copy and paste it into Windows Explorer to open."
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # Streamlit needs main() to run on import.
 main()
