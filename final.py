@@ -65,6 +65,8 @@ import sa_news_ai as sa_news
 import seekingalpha_excerpts as sa_scraper
 import sys
 
+st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
+
 def ensure_playwright_chromium_installed() -> bool:
     """
     Ensure Chromium exists in the default Playwright cache directory.
@@ -3045,7 +3047,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
-    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
+    #st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
