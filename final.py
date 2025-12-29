@@ -1,5 +1,5 @@
 """
-Cutler Capital — Scraper
+Cutler Capital — Hedge Fund Letter Scraper
 ------------------------------------------
 Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
 by fund family and quarter. Uses an external hedge-fund letter database as the
@@ -30,6 +30,10 @@ from typing import List, Dict, Optional, Tuple, Any
 import re as _re
 import html as html_lib
 import streamlit as st
+
+# IMPORTANT: Streamlit requires set_page_config() to be the first Streamlit command
+# executed in the script. Do this once at import-time and do NOT call it again later.
+st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 import requests
 try:
     import sa_analysis_api as sa_api
@@ -64,8 +68,6 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 import sa_news_ai as sa_news
 import seekingalpha_excerpts as sa_scraper
 import sys
-
-st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 
 def ensure_playwright_chromium_installed() -> bool:
     """
@@ -949,92 +951,56 @@ def draw_seeking_alpha_news_section() -> None:
 
     st.markdown("### Seeking Alpha – Analysis digest by ticker")
 
-    
-# ---------- Ticker selection ----------
-# Two modes:
-#   (A) Batch mode (10 tickers per batch) so you can run the watchlist in fixed chunks
-#   (B) Manual mode (pick up to 10 tickers ad-hoc)
+    # ---------- Ticker selection: up to 10, show one at a time ----------
+    try:
+        from tickers import tickers as CUTLER_TICKERS
+        universe = sorted(list(CUTLER_TICKERS.keys()))
+    except Exception:
+        universe = []
 
-try:
-    from tickers import tickers as CUTLER_TICKERS
-    universe = sorted(list(CUTLER_TICKERS.keys()))
-except Exception:
-    CUTLER_TICKERS = {}
-    universe = []
+    default_universe = ["AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA", "JPM", "V", "MA", "BRK.B"]
 
-default_universe = ["AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA", "JPM", "V", "MA", "BRK.B"]
-
-use_batch_mode = st.toggle(
-    "Batch mode (10 tickers per batch)",
-    value=True,
-    help="When enabled, Seeking Alpha runs on fixed 10-ticker batches from your Cutler ticker universe.",
-    key="sa_use_batch_mode",
-)
-
-batch_size = 10
-if use_batch_mode:
-    base_list = universe or default_universe
-    batches = [base_list[i:i + batch_size] for i in range(0, len(base_list), batch_size)]
-    if not batches:
-        batches = [default_universe]
-
-    batch_labels = [f"Batch {i+1} ({len(bt)} tickers)" for i, bt in enumerate(batches)]
-    batch_idx = st.selectbox(
-        "Seeking Alpha batch",
-        options=list(range(len(batches))),
-        format_func=lambda i: batch_labels[i],
-        index=0,
-        key="sa_batch_idx",
-    )
-    selected_tickers = batches[batch_idx]
-    st.caption("Tickers in this batch: " + ", ".join(selected_tickers))
-else:
+    # Multiselect behaves like a dropdown that can hold up to 10 names
     selected_tickers = st.multiselect(
         "Select up to 10 tickers for Seeking Alpha",
         options=universe or default_universe,
         default=(universe[:3] if universe else default_universe[:3]),
         help="Choose a small set of names you want to quickly flip through.",
+        max_selections=10 if hasattr(st.multiselect, "__call__") else None,  # Streamlit ignores unknown args, so safe
     )
+
+    # Enforce max 10 tickers manually in case Streamlit version does not support max_selections
     if len(selected_tickers) > 10:
         st.warning("Please select at most 10 tickers. Only the first 10 will be used.")
         selected_tickers = selected_tickers[:10]
 
-# Track navigation index in session_state
-if "sa_selected_tickers_prev" not in st.session_state:
-    st.session_state["sa_selected_tickers_prev"] = []
-if "sa_current_index" not in st.session_state:
-    st.session_state["sa_current_index"] = 0
-
-# If the selection changed since last run, reset index to 0
-if st.session_state["sa_selected_tickers_prev"] != selected_tickers:
-    st.session_state["sa_current_index"] = 0
-st.session_state["sa_selected_tickers_prev"] = selected_tickers
-
-if selected_tickers:
-    idx = st.session_state["sa_current_index"]
-    if idx >= len(selected_tickers):
-        idx = 0
+    # Track navigation index in session_state
+    if "sa_selected_tickers_prev" not in st.session_state:
+        st.session_state["sa_selected_tickers_prev"] = []
+    if "sa_current_index" not in st.session_state:
         st.session_state["sa_current_index"] = 0
-    ticker = selected_tickers[idx]
 
-    # Use a company label only if present; otherwise show just the ticker.
-    company_label = ""
-    try:
-        company_label = (CUTLER_TICKERS or {}).get(ticker, "") or ""
-    except Exception:
-        company_label = ""
+    # If the selection changed since last run, reset index to 0
+    if st.session_state["sa_selected_tickers_prev"] != selected_tickers:
+        st.session_state["sa_current_index"] = 0
+    st.session_state["sa_selected_tickers_prev"] = selected_tickers
 
-    if company_label:
-        st.markdown(f"**Currently viewing:** `{ticker}` — {company_label}")
-    else:
+    if selected_tickers:
+        idx = st.session_state["sa_current_index"]
+        # Safety: clamp index if list shrank
+        if idx >= len(selected_tickers):
+            idx = 0
+            st.session_state["sa_current_index"] = 0
+        ticker = selected_tickers[idx]
         st.markdown(f"**Currently viewing:** `{ticker}`")
-else:
-    ticker = st.selectbox(
-        "Ticker",
-        universe or default_universe,
-        index=0,
-    )
-    st.info("No watchlist selected above. Using single-ticker mode.")
+    else:
+        # Fallback: single-ticker dropdown if nothing selected
+        ticker = st.selectbox(
+            "Ticker",
+            universe or default_universe,
+            index=0,
+        )
+        st.info("No watchlist selected above. Using single-ticker mode.")
 
     # Control how many recent articles to use
     max_articles = st.slider(
@@ -1063,45 +1029,61 @@ else:
     # Case 1: we have cached data for this combo and user did NOT click refresh
     if cache_key in sa_cache and not fetch_clicked:
         cached = sa_cache[cache_key]
-        articles = cached.get("articles") or []
+        articles = cached.get("articles")
+        digest_text = cached.get("digest_text")
         if articles:
-            st.info(f"Showing cached Seeking Alpha analysis for `{ticker}`.")
+            st.info(f"Showing cached Seeking Alpha analysis for `{ticker}` (model: {model}).")
         else:
             st.info("Cached entry exists but no articles stored; please refresh.")
-
     # Case 2: user explicitly clicked button → fetch fresh data and overwrite cache
     elif fetch_clicked:
         if not ticker:
             st.warning("Please choose a ticker first.")
-            st.stop()
+            return
 
-        # ---------- Fetch list of analysis articles ----------
+        # ---------- 1) Fetch list of analysis articles ----------
         try:
             with st.spinner(f"Pulling Seeking Alpha analysis for {ticker} via RapidAPI..."):
                 articles = sa_api.fetch_analysis_list(ticker, size=max_articles)
         except Exception as e:
             st.error(f"Error while fetching Seeking Alpha analysis: {e}")
-            st.stop()
+            return
 
         if not articles:
             st.info(f"No Seeking Alpha analysis articles returned for {ticker}.")
             # store empty so we don't keep trying silently
-            sa_cache[cache_key] = {"articles": []}
-            st.stop()
+            sa_cache[cache_key] = {"articles": [], "digest_text": None}
+            return
 
-        # store in cache (NO AI DIGEST)
-        sa_cache[cache_key] = {"articles": articles}
+        # ---------- 3) AI digest (delegates to sa_analysis_api) ----------
+        st.markdown("#### AI Analysis Digest")
+        try:
+            with st.spinner("Asking OpenAI for a short analysis digest..."):
+                # IMPORTANT: use the implementation from sa_analysis_api.py
+                digest_text = sa_api.build_sa_analysis_digest(
+                    symbol=ticker,
+                    articles=articles,
+                    model=model,
+                )
+        except Exception as e:
+            st.error(f"Error while calling OpenAI: {e}")
+            digest_text = None
+
+        # store in cache
+        sa_cache[cache_key] = {
+            "articles": articles,
+            "digest_text": digest_text,
+        }
 
     # Case 3: no cache and user hasn't clicked yet → nothing to show
     else:
         st.info("Click the button above to fetch Seeking Alpha analysis for this ticker.")
-        st.stop()
+        return
 
-    # At this point, we expect to have `articles` (possibly from cache)
+    # At this point, we expect to have `articles` (possibly from cache) and maybe `digest_text`
     if not articles:
         st.info("No articles available for this ticker / configuration.")
-        st.stop()
-
+        return
 
     # ---------- 2) Show table of articles ----------
     rows = []
@@ -1115,7 +1097,7 @@ else:
                 "URL": getattr(art, "url", ""),
             }
         )
-    import pandas as pd
+
     df = pd.DataFrame(rows)
     st.markdown("#### Recent Seeking Alpha analysis articles")
     st.dataframe(df, use_container_width=True)
@@ -1234,358 +1216,161 @@ else:
 
             st.write(cleaned_text)
             
-    
-# --- Download: Seeking Alpha (batched) — excerpt-style PDF (no AI digest) ---
-# This export is meant to look/feel similar to the Fund Family excerpt PDFs:
-#   - Company blocks per ticker
-#   - Clean numbered paragraphs
-#   - Highlighting via a lightweight heuristic (no OpenAI calls)
+    # --- Download: combined Seeking Alpha digest + full cleaned article bodies (per ticker) ---
+    tickers_for_export = selected_tickers[:] if selected_tickers else [ticker]
+    tickers_for_export = tickers_for_export[:10]
 
-def _sa_paragraph_score(par: str, sym: str, company: str) -> int:
-    """Heuristic 1–5 scoring (cheap, deterministic)."""
-    t = (par or "").strip().lower()
-    if not t:
-        return 3
+    # Build PDF on-demand and store in session so the download button persists on reruns
+    if st.button("Build downloadable Seeking Alpha PDF", key="sa_build_pdf_v2"):
+        from sa_analysis_api import fetch_analysis_list, fetch_analysis_details, build_sa_analysis_digest
 
-    # Down-rank list-like / boilerplate lines
-    if len(t) < 80:
-        return 2
-    if t.count("\n") > 10:
-        return 2
+        def _normalize_html(part) -> str:
+            if part is None:
+                return ""
+            if isinstance(part, list):
+                return "\n".join(str(x) for x in part if x is not None)
+            return str(part)
 
-    strong = [
-        "we rate", "rating", "buy", "sell", "strong buy", "strong sell",
-        "initiate", "upgrade", "downgrade", "price target", "pt ",
-        "valuation", "multiple", "ev/ebitda", "dcf", "margin", "guidance",
-        "earnings", "q1", "q2", "q3", "q4", "fiscal", "free cash flow", "fcf",
-        "balance sheet", "debt", "leverage", "risk", "catalyst", "thesis",
-    ]
-    medium = [
-        "outlook", "growth", "decline", "headwind", "tailwind",
-        "competition", "market share", "profit", "revenue", "eps",
-        "capex", "opex", "dividend", "buyback", "macro",
-    ]
+        sections: list[tuple[str, str]] = []
 
-    hit_strong = any(k in t for k in strong)
-    hit_medium = any(k in t for k in medium)
+        # Controls for export verbosity (keep conservative to avoid huge PDFs)
+        MAX_ARTICLES_PER_TICKER = 10          # list/fetch size
+        MAX_BODIES_PER_TICKER = 5             # how many full bodies to include in the PDF
+        MAX_WORDS_PER_BODY = 900              # cap each body so export stays compact
 
-    # Ticker/company mention increases relevance
-    sym_l = sym.lower()
-    company_l = (company or "").lower()
-    mentions = 0
-    if sym_l and sym_l in t:
-        mentions += 1
-    if company_l and company_l in t:
-        mentions += 1
-
-    if hit_strong and mentions:
-        return 5
-    if hit_strong or (hit_medium and mentions):
-        return 4
-    if hit_medium or mentions:
-        return 3
-    return 2
-
-def _build_seeking_alpha_excerpt_pdf(
-    out_path: Path,
-    sections: list[dict],
-    title: str,
-    subtitle: str,
-) -> None:
-    """Build a single PDF, using the same visual language as the Fund Family excerpt PDFs."""
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-    from xml.sax.saxutils import escape
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.lib.enums import TA_LEFT
-    from reportlab.lib import colors
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    doc = SimpleDocTemplate(
-        str(out_path),
-        pagesize=letter,
-        rightMargin=0.65 * inch,
-        leftMargin=0.65 * inch,
-        topMargin=0.6 * inch,
-        bottomMargin=0.55 * inch,
-        title=title,
-    )
-
-    styles = getSampleStyleSheet()
-    h1 = ParagraphStyle(
-        "sa_h1",
-        parent=styles["Heading1"],
-        fontName="Helvetica-Bold",
-        fontSize=16,
-        leading=19,
-        textColor=colors.HexColor("#3b0a57"),
-        spaceAfter=10,
-    )
-    meta = ParagraphStyle(
-        "sa_meta",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=9,
-        leading=11,
-        textColor=colors.HexColor("#4b5563"),
-        spaceAfter=8,
-    )
-    company_hdr = ParagraphStyle(
-        "sa_company_hdr",
-        parent=styles["Heading2"],
-        fontName="Helvetica-Bold",
-        fontSize=12,
-        leading=14,
-        textColor=colors.HexColor("#111827"),
-        spaceBefore=12,
-        spaceAfter=6,
-    )
-    num_style = ParagraphStyle(
-        "sa_num",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=10,
-        leading=13,
-        alignment=TA_LEFT,
-        spaceAfter=6,
-    )
-
-    # Reuse the same color semantics as Fund Family AI scoring:
-    rating_bg = {
-        5: colors.HexColor("#d7f2dd"),  # green
-        4: colors.HexColor("#e7f6e7"),  # light green
-        3: colors.HexColor("#f3f4f6"),  # neutral
-        2: colors.HexColor("#fff4d6"),  # light orange
-        1: colors.HexColor("#ffe3e3"),  # light red
-    }
-
-    story = []
-    story.append(Paragraph(title, h1))
-    story.append(Paragraph(subtitle, meta))
-    story.append(Spacer(1, 6))
-
-    for i, sec in enumerate(sections):
-        if i > 0:
-            story.append(PageBreak())
-
-        sym = sec.get("ticker", "")
-        company = sec.get("company", "")
-        author_map = sec.get("authors_by_article", {}) or {}
-
-        header = f"{sym} — {company}" if company else sym
-        story.append(Paragraph(header, company_hdr))
-
-        # Article list first (title / date / author / url)
-        for art in sec.get("articles_meta", []):
-            t = art.get("title", "") or "Untitled"
-            d = art.get("date", "") or ""
-            u = art.get("url", "") or ""
-            a = art.get("author", "") or ""
-            line = f"<b>{d}</b> — {t}"
-            if a:
-                line += f" <font color='#6b7280'>(by {a})</font>"
-            if u:
-                line += f"<br/><font size='8' color='#3b0a57'>{u}</font>"
-            story.append(Paragraph(line, meta))
-        story.append(Spacer(1, 6))
-
-        # Then excerpted paragraphs with highlights
-        n = 1
-        for item in sec.get("paragraphs", []):
-            rating = int(item.get("rating", 3))
-            text = (item.get("text", "") or "").strip()
-
-            # background highlight via inline <para backColor=...> isn't supported reliably;
-            # instead, we use a lightly colored font marker + a shaded look by wrapping in a table-like paragraph.
-            # To stay simple and robust, we just set a colored left marker and keep paragraph clean.
-            bg = rating_bg.get(rating, rating_bg[3])
-            marker = f"<font color='#111827'><b>[{rating}]</b></font> "
-            # Use a very small shaded block by adding a background rectangle is too heavy;
-            # so we approximate with a soft highlight using backColor on the paragraph tag.
-            safe = escape(text)
-            story.append(
-                Paragraph(
-                    f"<para backColor='{bg.hexval()}' leftIndent='6'>{n}. {marker}{safe}</para>",
-                    num_style,
-                )
-            )
-            n += 1
-
-    doc.build(story)
-
-# Build PDF on-demand and persist the path in session_state so the download button does not disappear
-tickers_for_export = selected_tickers[:] if selected_tickers else [ticker]
-tickers_for_export = tickers_for_export[:10]
-
-if "sa_pdf_path" not in st.session_state:
-    st.session_state["sa_pdf_path"] = None
-
-build_clicked = st.button("Build downloadable Seeking Alpha PDF", key="sa_build_pdf_excerpt_style")
-
-if build_clicked:
-    from sa_analysis_api import fetch_analysis_list, fetch_analysis_details
-
-    MAX_ARTICLES_PER_TICKER = 10
-    MAX_BODIES_PER_TICKER = 5
-    MAX_PARAS_PER_TICKER = 18
-    MIN_PARA_CHARS = 120
-
-    sections = []
-    for sym in tickers_for_export:
-        company = ""
-        try:
-            company = (CUTLER_TICKERS or {}).get(sym, "") or ""
-        except Exception:
-            company = ""
-
-        # Fetch analysis list
-        try:
-            t_articles = fetch_analysis_list(sym, size=MAX_ARTICLES_PER_TICKER) or []
-        except Exception as e:
-            sections.append(
-                {
-                    "ticker": sym,
-                    "company": company,
-                    "articles_meta": [{"title": "Error", "date": "", "url": "", "author": ""}],
-                    "paragraphs": [{"rating": 3, "text": f"Could not fetch analysis list. ({e})"}],
-                }
-            )
-            continue
-
-        articles_meta = []
-        all_paras = []
-
-        for art in t_articles[:MAX_BODIES_PER_TICKER]:
-            art_id = getattr(art, "id", None)
-            art_title = getattr(art, "title", "") or "Untitled"
-            art_url = getattr(art, "url", "") or ""
-            art_date = ""
+        for sym in tickers_for_export:
+            # Always fetch fresh for export (export should be reproducible and complete)
             try:
-                art_date = (getattr(art, "published", "") or "").split("T", 1)[0]
-            except Exception:
-                art_date = ""
-
-            author_name = ""
-
-            # Pull article body
-            details = {}
-            if art_id:
-                try:
-                    details = fetch_analysis_details(str(art_id)) or {}
-                except Exception:
-                    details = {}
-
-            # Try to find author in multiple possible shapes
-            if isinstance(details, dict):
-                if "author" in details and isinstance(details.get("author"), str):
-                    author_name = details.get("author") or ""
-                if not author_name:
-                    author_name = details.get("author_name") or details.get("authorName") or ""
-                if not author_name and "data" in details:
-                    try:
-                        attrs = (details.get("data") or {}).get("attributes") or {}
-                        author_name = attrs.get("author_name") or attrs.get("authorName") or ""
-                    except Exception:
-                        pass
-                if not author_name and "included" in details and isinstance(details.get("included"), list):
-                    # Attempt to locate an included author object
-                    for inc in details["included"]:
-                        if not isinstance(inc, dict):
-                            continue
-                        if inc.get("type") in ("author", "authors", "people"):
-                            a_attrs = inc.get("attributes") or {}
-                            author_name = a_attrs.get("name") or a_attrs.get("display_name") or ""
-                            if author_name:
-                                break
-
-            articles_meta.append(
-                {"title": art_title, "date": art_date, "url": art_url, "author": author_name}
-            )
-
-            # Extract cleaned text (summary + body)
-            summary_html = ""
-            body_html = ""
-            if isinstance(details, dict) and "data" in details:
-                data = details.get("data") or {}
-                attrs = data.get("attributes") or {}
-                summary_html = attrs.get("summary_html") or attrs.get("summary") or ""
-                body_html = attrs.get("body_html") or attrs.get("content") or attrs.get("body") or ""
-            elif isinstance(details, dict):
-                summary_html = details.get("summary_html") or details.get("summary") or ""
-                body_html = details.get("body_html") or details.get("content") or details.get("body") or ""
-
-            combined_html = _normalize_html(summary_html) + "\n\n" + _normalize_html(body_html)
-            if not combined_html.strip():
+                t_articles = fetch_analysis_list(sym, size=MAX_ARTICLES_PER_TICKER) or []
+            except Exception as e:
+                sections.append((f"{sym} – Seeking Alpha Export", f"Could not fetch analysis list. ({e})"))
                 continue
 
+            # Build digest text (AI) for this ticker
             try:
-                cleaned = clean_sa_html_to_markdown(combined_html)
-            except Exception:
-                # fallback
-                import re as _re
-                tmp = _re.sub(r"<(br|p|div|li)[^>]*>", "\n", combined_html, flags=_re.I)
-                tmp = _re.sub(r"<[^>]+>", "", tmp)
-                tmp = tmp.replace("\xa0", " ")
-                cleaned = _re.sub(r"\n{3,}", "\n\n", tmp).strip()
+                digest = build_sa_analysis_digest(sym, t_articles, model=model, max_articles=4)
+            except Exception as e:
+                digest = f"Could not build AI digest for {sym}. ({e})"
 
-            # Split into paragraphs and keep only meaningful ones
-            paras = [p.strip() for p in cleaned.split("\n\n") if p and len(p.strip()) >= MIN_PARA_CHARS]
-            for p in paras:
-                rating = _sa_paragraph_score(p, sym, company)
-                all_paras.append({"rating": rating, "text": p})
+            # ---- Build “full bodies” section text (cleaned) ----
+            bodies_lines: list[str] = []
+            bodies_lines.append("### Full article bodies (cleaned)")
+            bodies_lines.append(
+                f"Including up to {MAX_BODIES_PER_TICKER} most recent analysis articles for {sym}.\n"
+            )
 
-        # Keep best paragraphs first (higher rating), then by length
-        all_paras.sort(key=lambda x: (-int(x.get("rating", 3)), -len(x.get("text", ""))))
-        all_paras = all_paras[:MAX_PARAS_PER_TICKER]
+            # Only include first N bodies to keep PDF reasonable
+            for i, art in enumerate(t_articles[:MAX_BODIES_PER_TICKER], start=1):
+                art_title = getattr(art, "title", "") or "Untitled"
+                art_url = getattr(art, "url", "") or ""
+                art_id = getattr(art, "id", None)
 
-        if not all_paras:
-            all_paras = [{"rating": 3, "text": "No article body paragraphs available for export."}]
+                bodies_lines.append(f"#### {i}. {art_title}")
+                if art_url:
+                    bodies_lines.append(f"Source: {art_url}")
 
-        sections.append(
-            {
-                "ticker": sym,
-                "company": company,
-                "articles_meta": articles_meta,
-                "paragraphs": all_paras,
-            }
-        )
+                if not art_id:
+                    bodies_lines.append("Body: (No article ID returned.)\n")
+                    continue
 
-    now_et = _now_et()
-    date_prefix = now_et.strftime("%m.%d.%y")
+                try:
+                    details = fetch_analysis_details(str(art_id)) or {}
+                except Exception as e:
+                    bodies_lines.append(f"Body: (Could not fetch details: {e})\n")
+                    continue
 
-    # Batch label (if batch mode enabled)
-    batch_suffix = ""
-    if st.session_state.get("sa_use_batch_mode", False):
-        batch_no = int(st.session_state.get("sa_batch_idx", 0)) + 1
-        batch_suffix = f" Batch {batch_no}"
+                # Support both shapes (raw RapidAPI vs your helper dict)
+                if isinstance(details, dict) and "data" in details:
+                    data = details.get("data") or {}
+                    attrs = data.get("attributes") or {}
+                    summary_html = attrs.get("summary_html") or attrs.get("summary") or ""
+                    body_html = attrs.get("body_html") or attrs.get("content") or attrs.get("body") or ""
+                else:
+                    summary_html = (details.get("summary_html") or details.get("summary") or "") if isinstance(details, dict) else ""
+                    body_html = (details.get("body_html") or details.get("content") or details.get("body") or "") if isinstance(details, dict) else ""
 
-    filename = f"{date_prefix} Seeking Alpha{batch_suffix}.pdf"
-    out_path = BASE / "seeking_alpha" / filename
+                combined_html = _normalize_html(summary_html) + "\n\n" + _normalize_html(body_html)
 
-    title = f"Seeking Alpha — Excerpts ({date_prefix})"
-    subtitle = f"Tickers: {', '.join(tickers_for_export)}"
+                if not combined_html.strip():
+                    bodies_lines.append("Body: (No body text returned.)\n")
+                    continue
 
+                # Clean HTML -> markdown-ish plain text
+                try:
+                    cleaned = clean_sa_html_to_markdown(combined_html)
+                except NameError:
+                    import re as _re
+                    tmp = _re.sub(r"<(br|p|div|li)[^>]*>", "\n", combined_html, flags=_re.I)
+                    tmp = _re.sub(r"<[^>]+>", "", tmp)
+                    tmp = tmp.replace("\xa0", " ")
+                    cleaned = _re.sub(r"\n{3,}", "\n\n", tmp).strip()
+
+                # Cap length per body to keep export compact
+                words = cleaned.split()
+                if len(words) > MAX_WORDS_PER_BODY:
+                    cleaned = " ".join(words[:MAX_WORDS_PER_BODY]) + "\n\n[Truncated for export.]"
+
+                bodies_lines.append(cleaned)
+                bodies_lines.append("")  # spacer line
+
+            # Combine digest + bodies into one section per ticker
+            combined_section_text = (
+                f"### AI Digest\n{digest}\n\n---\n\n" + "\n".join(bodies_lines)
+            )
+            sections.append((f"{sym} – Seeking Alpha (Digest + Bodies)", combined_section_text))
+
+        now_et = _now_et()
+        tickers_label = " ".join(tickers_for_export)
+        safe_tickers = _safe(tickers_label.replace(" ", "_"))
+
+        out_name = f"{now_et:%m.%d.%y} Seeking Alpha {safe_tickers}.pdf"
+        out_path = (BASE / "SeekingAlpha" / out_name)
+
+        subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} • Tickers: {tickers_label}"
+        try:
+            pdf_path = _build_text_pdf(
+                output_path=out_path,
+                title="Cutler Capital – Seeking Alpha Digest + Article Bodies",
+                subtitle=subtitle,
+                sections=sections,
+            )
+            st.session_state["sa_export_pdf_path"] = str(pdf_path)
+            st.success("Seeking Alpha PDF is ready (includes cleaned article bodies).")
+        except Exception as e:
+            st.error(f"Could not build Seeking Alpha PDF: {e}")
+
+    # Show download button if we have a built PDF
+    sa_pdf_path = st.session_state.get("sa_export_pdf_path")
+    if sa_pdf_path and Path(sa_pdf_path).exists():
+        try:
+            with open(sa_pdf_path, "rb") as f:
+                st.download_button(
+                    "Download Seeking Alpha PDF",
+                    data=f.read(),
+                    file_name=Path(sa_pdf_path).name,
+                    mime="application/pdf",
+                    key="sa_download_pdf_v2",
+                )
+        except Exception:
+            st.warning("PDF is built but could not be opened for download.")
+
+# --- Reddit snapshot section (uses reddit34 via reddit_excerpts) ---
+
+def _get_available_tickers_for_reddit():
+    """
+    Build the Reddit ticker universe from your tickers.py file.
+    """
     try:
-        _build_seeking_alpha_excerpt_pdf(out_path=out_path, sections=sections, title=title, subtitle=subtitle)
-        st.session_state["sa_pdf_path"] = str(out_path)
-        st.success(f"Built PDF: {out_path.name}")
-    except Exception as e:
-        st.error(f"Could not build Seeking Alpha PDF: {e}")
-        st.session_state["sa_pdf_path"] = None
+        if isinstance(tickers, dict):
+            return sorted(str(sym).upper() for sym in tickers.keys())
+        elif isinstance(tickers, (list, tuple, set)):
+            return sorted(str(sym).upper() for sym in tickers)
+    except Exception:
+        pass
 
-# Persistent download button (appears after build, and stays across reruns)
-sa_pdf_path = st.session_state.get("sa_pdf_path")
-if sa_pdf_path and os.path.exists(sa_pdf_path):
-    with open(sa_pdf_path, "rb") as f:
-        st.download_button(
-            "Download Seeking Alpha PDF",
-            data=f.read(),
-            file_name=Path(sa_pdf_path).name,
-            mime="application/pdf",
-            key="sa_download_pdf_excerpt_style",
-        )
+    # Fallback so the UI doesn’t break if something changes
+    return ["AAPL", "AMZN", "MSFT", "GOOG"]
+
 
 def draw_reddit_pulse_section():
     st.markdown("### Reddit pulse – weekly sentiment snapshot")
@@ -1594,17 +1379,13 @@ def draw_reddit_pulse_section():
         "the last week in key finance subs, filtered by ticker, to keep API usage under control."
     )
 
-    # 1) Ticker selection from your real universe (tickers.py)
+    # 1) Ticker selection from your real universe
+    # NOTE: We avoid relying on an external helper so this section is self-contained.
     try:
-        from tickers import tickers as TICKERS_MAP  # dict: { "AAPL": [...], ... }
-        available_tickers = sorted(
-            [str(k).strip().upper() for k in (TICKERS_MAP or {}).keys() if str(k).strip()]
-        )
+        from tickers import tickers as CUTLER_TICKERS
+        available_tickers = sorted(list(CUTLER_TICKERS.keys()))
     except Exception:
-        available_tickers = ["AAPL", "MSFT", "AMZN"]
-
-    if not available_tickers:
-        available_tickers = ["AAPL"]
+        available_tickers = ["AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA"]
 
     default_index = available_tickers.index("AMZN") if "AMZN" in available_tickers else 0
 
@@ -3047,8 +2828,6 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
-    #st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
-
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
         """
@@ -3302,7 +3081,7 @@ def main():
         if logo_path.exists():
             st.image(str(logo_path), width=260)
 
-        st.markdown("<div class='app-title'>Cutler Capital Scraper</div>", unsafe_allow_html=True)
+        st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
         st.markdown(
             "<div class='app-subtitle'>Scrape, excerpt, and compile fund letters by fund family and quarter.</div>",
             unsafe_allow_html=True,
