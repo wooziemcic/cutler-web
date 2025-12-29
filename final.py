@@ -206,6 +206,24 @@ def _first_word(name: str) -> str:
     m = _DEF_WORD_RE.search(name)
     return m.group(0) if m else (name.split()[0] if name.split() else name)
 
+
+def _clear_session_keys(*, exact=None, prefixes=None) -> None:
+    """
+    Delete selected st.session_state keys without wiping unrelated tab state.
+    - exact: list of exact keys to remove
+    - prefixes: list of prefixes; any key starting with one of these is removed
+    """
+    import streamlit as st
+
+    exact = list(exact or [])
+    prefixes = list(prefixes or [])
+    for k in list(st.session_state.keys()):
+        if k in exact or any(k.startswith(p) for p in prefixes):
+            try:
+                del st.session_state[k]
+            except Exception:
+                pass
+
 def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "file"
 
@@ -982,11 +1000,33 @@ def draw_seeking_alpha_news_section() -> None:
         return None
 
     def _sa_article_as_dict(a) -> dict:
-        # Normalize any article row into a dict so downstream code doesn't crash.
+        """Normalize any article row into a dict so downstream UI/PDF works."""
         if isinstance(a, dict):
             return a
-        aid = _sa_article_id(a)
-        return {"id": aid} if aid else {}
+
+        # Dataclass / object with attributes
+        d: dict = {}
+        try:
+            # Common attribute names used by sa_analysis_api.AnalysisArticle
+            d["id"] = getattr(a, "id", None) or getattr(a, "article_id", None)
+            d["title"] = getattr(a, "title", None)
+            d["url"] = getattr(a, "url", None)
+            # published may be datetime
+            pub = getattr(a, "published", None) or getattr(a, "published_at", None)
+            if pub is not None:
+                d["published_at"] = pub
+            # optional author fields (best-effort)
+            d["author"] = getattr(a, "author", None) or getattr(a, "author_name", None)
+            d["author_slug"] = getattr(a, "author_slug", None)
+            d["primary_tickers"] = getattr(a, "primary_tickers", None)
+        except Exception:
+            d = {}
+
+        # Fallback to ID-only
+        if not d or not d.get("id"):
+            aid = _sa_article_id(a)
+            return {"id": aid} if aid else {}
+        return d
 
     def _now_et() -> datetime:
         return datetime.now(ZoneInfo("America/New_York"))
@@ -1106,6 +1146,11 @@ def draw_seeking_alpha_news_section() -> None:
         try:
             with st.spinner(f"Pulling Seeking Alpha analysis for {ticker} via RapidAPI..."):
                 raw_articles = sa_api.fetch_analysis_list(ticker, size=max_articles)
+
+            # Defensive: some versions may return a payload dict instead of a list
+            if isinstance(raw_articles, dict):
+                raw_articles = raw_articles.get("data") or []
+
         except Exception as e:
             st.error(f"Error while fetching Seeking Alpha analysis: {e}")
             st.stop()
@@ -3053,6 +3098,13 @@ def main():
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
     with tab_mf:
+        if st.button("Clean current tab cache", key="clean_mf_cache", use_container_width=True):
+            _clear_session_keys(
+                exact=["batch_cache"],
+                prefixes=["mf_","fund_","funds_","batch_"],
+            )
+            st.rerun()
+
         # Main controls in a card – full run
         with st.container():
             st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
@@ -3386,6 +3438,13 @@ def main():
 
 
     with tab_sa:
+        if st.button("Clean current tab cache", key="clean_sa_cache", use_container_width=True):
+            _clear_session_keys(
+                exact=["sa_cache","sa_pdf_bytes","sa_pdf_name","sa_nav_idx","sa_batch_select_idx","sa_ticker_select","sa_manual_tickers"],
+                prefixes=["sa_"],
+            )
+            st.rerun()
+
         # ---------- Seeking Alpha news + AI digest ----------
         draw_seeking_alpha_news_section()
 
@@ -3408,11 +3467,25 @@ def main():
     
 
     with tab_reddit:
+        if st.button("Clean current tab cache", key="clean_reddit_cache", use_container_width=True):
+            _clear_session_keys(
+                exact=["reddit_pulse_cache"],
+                prefixes=["reddit_"],
+            )
+            st.rerun()
+
         # ---------- Reddit pulse (retail sentiment) ----------
         draw_reddit_pulse_section()
 
 
     with tab_podcast:
+        if st.button("Clean current tab cache", key="clean_podcast_cache", use_container_width=True):
+            _clear_session_keys(
+                exact=["podcast_cache","podcast_last_cache_key","pod_export_pdf_path","podcast_pdf_bytes","podcast_pdf_name"],
+                prefixes=["pod_","podcast_"],
+            )
+            st.rerun()
+
         # ---------- Podcast intelligence (ticker mentions across podcasts) ----------
         draw_podcast_intelligence_section()
 
