@@ -30,10 +30,6 @@ from typing import List, Dict, Optional, Tuple, Any
 import re as _re
 import html as html_lib
 import streamlit as st
-
-# IMPORTANT: Streamlit requires set_page_config() to be the first Streamlit command
-# executed in the script. Do this once at import-time and do NOT call it again later.
-st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 import requests
 try:
     import sa_analysis_api as sa_api
@@ -933,115 +929,146 @@ def clean_sa_html_to_markdown(raw_html: str) -> str:
 
     return text.strip()
 
+
 def draw_seeking_alpha_news_section() -> None:
     """
-    Seeking Alpha – Analysis digest by ticker.
+    Seeking Alpha – Analysis articles by ticker (RapidAPI).
 
-    Uses:
-      - sa_analysis_api.fetch_analysis_list
-      - sa_analysis_api.fetch_analysis_details
-      - sa_analysis_api.build_sa_analysis_digest (which calls OpenAI)
+    - Supports Batch mode (10 tickers per batch) and Manual mode (pick up to 10 tickers)
+    - Caches fetched articles + optional AI digest in-session to avoid repeated API calls
+    - Builds a simple export PDF with article bodies (download persists via session_state)
     """
-    import pandas as pd
     import streamlit as st
+    import pandas as pd
+    from pathlib import Path
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import io
 
-    # Simple in-session cache for SA results: {cache_key: {"articles": ..., "digest_text": ...}}
+    import sa_analysis_api as sa_api  # existing working module in this repo
+
+    # ---------------- Session caches ----------------
     if "sa_cache" not in st.session_state:
-        st.session_state["sa_cache"] = {}
+        st.session_state["sa_cache"] = {}  # {cache_key: {"articles": [...], "digest_text": str|None}}
+    sa_cache = st.session_state["sa_cache"]
 
-    st.markdown("### Seeking Alpha – Analysis digest by ticker")
-
-    # ---------- Ticker selection: up to 10, show one at a time ----------
+    # ---------------- Universe (from tickers.py if available) ----------------
+    CUTLER_TICKERS = {}
+    universe = []
     try:
-        from tickers import tickers as CUTLER_TICKERS
-        universe = sorted(list(CUTLER_TICKERS.keys()))
+        from tickers import tickers as CUTLER_TICKERS  # type: ignore
+        if isinstance(CUTLER_TICKERS, dict):
+            universe = sorted([str(k).strip().upper() for k in CUTLER_TICKERS.keys() if str(k).strip()])
     except Exception:
         universe = []
 
-    default_universe = ["AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA", "JPM", "V", "MA", "BRK.B"]
+    if not universe:
+        st.warning("Ticker universe not found (tickers.py). Seeking Alpha section needs a ticker list.")
+        return
 
-    # Multiselect behaves like a dropdown that can hold up to 10 names
-    selected_tickers = st.multiselect(
-        "Select up to 10 tickers for Seeking Alpha",
-        options=universe or default_universe,
-        default=(universe[:3] if universe else default_universe[:3]),
-        help="Choose a small set of names you want to quickly flip through.",
-        max_selections=10 if hasattr(st.multiselect, "__call__") else None,  # Streamlit ignores unknown args, so safe
-    )
+    st.markdown("### Seeking Alpha")
+    st.caption("Pull recent Seeking Alpha *Analysis* articles by ticker. Use Batch mode to run 10 tickers at a time.")
 
-    # Enforce max 10 tickers manually in case Streamlit version does not support max_selections
-    if len(selected_tickers) > 10:
-        st.warning("Please select at most 10 tickers. Only the first 10 will be used.")
-        selected_tickers = selected_tickers[:10]
+    # ---------------- Mode: batch vs manual ----------------
+    batch_mode = st.toggle("Batch mode (10 tickers per batch)", value=True, key="sa_batch_mode_toggle")
 
-    # Track navigation index in session_state
-    if "sa_selected_tickers_prev" not in st.session_state:
-        st.session_state["sa_selected_tickers_prev"] = []
-    if "sa_current_index" not in st.session_state:
-        st.session_state["sa_current_index"] = 0
+    def _make_batches(items: list[str], size: int = 10) -> list[list[str]]:
+        return [items[i : i + size] for i in range(0, len(items), size)]
 
-    # If the selection changed since last run, reset index to 0
-    if st.session_state["sa_selected_tickers_prev"] != selected_tickers:
-        st.session_state["sa_current_index"] = 0
-    st.session_state["sa_selected_tickers_prev"] = selected_tickers
+    selected_tickers: list[str] = []
+    batch_label = None
 
-    if selected_tickers:
-        idx = st.session_state["sa_current_index"]
-        # Safety: clamp index if list shrank
-        if idx >= len(selected_tickers):
-            idx = 0
-            st.session_state["sa_current_index"] = 0
-        ticker = selected_tickers[idx]
-        st.markdown(f"**Currently viewing:** `{ticker}`")
-    else:
-        # Fallback: single-ticker dropdown if nothing selected
-        ticker = st.selectbox(
-            "Ticker",
-            universe or default_universe,
-            index=0,
+    if batch_mode:
+        batches = _make_batches(universe, 10)
+        batch_options = [f"Batch {i+1} ({len(b)} tickers)" for i, b in enumerate(batches)]
+        batch_idx = st.selectbox(
+            "Seeking Alpha batch",
+            options=list(range(len(batch_options))),
+            format_func=lambda i: batch_options[i],
+            key="sa_batch_select_idx",
         )
-        st.info("No watchlist selected above. Using single-ticker mode.")
+        selected_tickers = batches[int(batch_idx)]
+        batch_label = batch_options[int(batch_idx)].split(" (")[0]  # "Batch 1"
+        st.caption("Tickers in this batch: " + ", ".join(selected_tickers))
+    else:
+        selected_tickers = st.multiselect(
+            "Select up to 10 tickers for Seeking Alpha",
+            options=universe,
+            default=universe[: min(3, len(universe))],
+            max_selections=10,
+            key="sa_manual_multiselect",
+        )
 
-    # Control how many recent articles to use
+    if not selected_tickers:
+        st.info("Select tickers to begin.")
+        return
+
+    # ---------------- Navigation within chosen tickers ----------------
+    nav_key = "sa_nav_idx_batch" if batch_mode else "sa_nav_idx_manual"
+    if nav_key not in st.session_state:
+        st.session_state[nav_key] = 0
+    st.session_state[nav_key] = max(0, min(st.session_state[nav_key], len(selected_tickers) - 1))
+
+    col_prev, col_mid, col_next = st.columns([1, 6, 1])
+    with col_prev:
+        if st.button("◀ Previous", key=f"sa_prev_{nav_key}", disabled=st.session_state[nav_key] == 0):
+            st.session_state[nav_key] -= 1
+            st.rerun()
+    with col_next:
+        if st.button("Next ticker ▶", key=f"sa_next_{nav_key}", disabled=st.session_state[nav_key] >= len(selected_tickers) - 1):
+            st.session_state[nav_key] += 1
+            st.rerun()
+
+    ticker = selected_tickers[st.session_state[nav_key]]
+    ticker_name = None
+    try:
+        ticker_name = CUTLER_TICKERS.get(ticker)
+    except Exception:
+        ticker_name = None
+
+    st.markdown(f"**Currently viewing:** `{ticker}`" + (f" — {ticker_name}" if ticker_name else ""))
+
+    # ---------------- Controls ----------------
     max_articles = st.slider(
         "Number of recent analysis articles to use",
         min_value=3,
         max_value=10,
         value=5,
-        help="How many recent Seeking Alpha *analysis* articles to use.",
+        step=1,
+        key="sa_max_articles_slider",
     )
-
     model = st.selectbox(
         "OpenAI model for digest",
-        ["gpt-4o-mini", "gpt-4o"],
+        options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
         index=0,
+        key="sa_digest_model_select",
+    )
+    include_ai_digest = st.checkbox("Include AI digest (optional)", value=True, key="sa_include_digest")
+
+    fetch_clicked = st.button(
+        "Fetch / refresh Seeking Alpha analysis",
+        key=f"sa_fetch_refresh_{ticker}_{max_articles}_{model}_{int(include_ai_digest)}",
+        use_container_width=True,
     )
 
-    sa_cache = st.session_state["sa_cache"]
-    cache_key = f"{ticker}|{max_articles}|{model}"
+    # ---------------- Cache key ----------------
+    cache_key = f"{ticker}|{max_articles}|{model}|digest={int(include_ai_digest)}"
 
-    # Button now means "fetch / refresh"; cached results will show even if you don't click again
-    fetch_clicked = st.button("Fetch / refresh Seeking Alpha analysis & build AI digest")
+    articles: list[dict] = []
+    digest_text: str | None = None
 
-    articles = None
-    digest_text = None
-
-    # Case 1: we have cached data for this combo and user did NOT click refresh
+    # Case 1: cached and not clicked
     if cache_key in sa_cache and not fetch_clicked:
         cached = sa_cache[cache_key]
-        articles = cached.get("articles")
+        articles = cached.get("articles") or []
         digest_text = cached.get("digest_text")
         if articles:
-            st.info(f"Showing cached Seeking Alpha analysis for `{ticker}` (model: {model}).")
+            st.info(f"Showing cached Seeking Alpha results for `{ticker}`.")
         else:
             st.info("Cached entry exists but no articles stored; please refresh.")
-    # Case 2: user explicitly clicked button → fetch fresh data and overwrite cache
-    elif fetch_clicked:
-        if not ticker:
-            st.warning("Please choose a ticker first.")
-            return
 
-        # ---------- 1) Fetch list of analysis articles ----------
+    # Case 2: clicked fetch
+    elif fetch_clicked:
         try:
             with st.spinner(f"Pulling Seeking Alpha analysis for {ticker} via RapidAPI..."):
                 articles = sa_api.fetch_analysis_list(ticker, size=max_articles)
@@ -1051,308 +1078,144 @@ def draw_seeking_alpha_news_section() -> None:
 
         if not articles:
             st.info(f"No Seeking Alpha analysis articles returned for {ticker}.")
-            # store empty so we don't keep trying silently
             sa_cache[cache_key] = {"articles": [], "digest_text": None}
             return
 
-        # ---------- 3) AI digest (delegates to sa_analysis_api) ----------
-        st.markdown("#### AI Analysis Digest")
-        try:
-            with st.spinner("Asking OpenAI for a short analysis digest..."):
-                # IMPORTANT: use the implementation from sa_analysis_api.py
-                digest_text = sa_api.build_sa_analysis_digest(
-                    symbol=ticker,
-                    articles=articles,
-                    model=model,
-                )
-        except Exception as e:
-            st.error(f"Error while calling OpenAI: {e}")
-            digest_text = None
+        # Fill in bodies (details endpoint) so export works
+        with st.spinner("Fetching full article details..."):
+            for a in articles:
+                article_id = a.get("id") or a.get("article_id")
+                if not article_id:
+                    continue
+                if a.get("body_clean") or a.get("body"):
+                    continue
+                try:
+                    details = sa_api.fetch_analysis_details(article_id)
+                    a["body_clean"] = details.get("body_clean") or details.get("body") or ""
+                    if details.get("author"):
+                        a["author"] = details.get("author")
+                    if details.get("title") and not a.get("title"):
+                        a["title"] = details.get("title")
+                    if details.get("url") and not a.get("url"):
+                        a["url"] = details.get("url")
+                except Exception:
+                    pass
 
-        # store in cache
-        sa_cache[cache_key] = {
-            "articles": articles,
-            "digest_text": digest_text,
-        }
+        # Optional digest
+        digest_text = None
+        if include_ai_digest:
+            st.markdown("#### AI Analysis Digest")
+            try:
+                with st.spinner("Asking OpenAI for a short analysis digest..."):
+                    digest_text = sa_api.build_sa_analysis_digest(symbol=ticker, articles=articles, model=model)
+            except Exception as e:
+                st.error(f"Error while calling OpenAI: {e}")
+                digest_text = None
 
-    # Case 3: no cache and user hasn't clicked yet → nothing to show
+        sa_cache[cache_key] = {"articles": articles, "digest_text": digest_text}
+
+    # Case 3: no cache and not clicked
     else:
         st.info("Click the button above to fetch Seeking Alpha analysis for this ticker.")
         return
 
-    # At this point, we expect to have `articles` (possibly from cache) and maybe `digest_text`
     if not articles:
         st.info("No articles available for this ticker / configuration.")
         return
 
-    # ---------- 2) Show table of articles ----------
+    # ---------------- Articles table ----------------
     rows = []
-    for art in articles:
-        date_str = art.published.split("T", 1)[0] if getattr(art, "published", "") else ""
+    for a in articles:
         rows.append(
             {
-                "Date": date_str,
-                "Title": getattr(art, "title", ""),
-                "Source": "Seeking Alpha (Analysis)",
-                "URL": getattr(art, "url", ""),
+                "date": a.get("published_at") or a.get("date") or "",
+                "title": a.get("title") or "",
+                "author": a.get("author") or a.get("author_name") or "",
+                "url": a.get("url") or a.get("link") or "",
             }
         )
-
     df = pd.DataFrame(rows)
-    st.markdown("#### Recent Seeking Alpha analysis articles")
-    st.dataframe(df, use_container_width=True)
+    if not df.empty:
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # ---------- 3) Render AI digest (using cached or fresh text) ----------
-    st.markdown("#### AI Analysis Digest")
-    if digest_text:
-        st.markdown(digest_text)
-    else:
-        st.info("No AI digest available for this ticker. Try refreshing if needed.")
-
-    # -----------------------------------------------------------
-    # 4) Pull and display full article bodies (cleaned)
-    # -----------------------------------------------------------
-    st.markdown("#### Article bodies (full, cleaned)")
-
-    # Helper: normalise any HTML-ish field to a single string
-    def _normalize_html(part) -> str:
-        if part is None:
-            return ""
-        if isinstance(part, list):
-            return "\n".join(str(x) for x in part if x is not None)
-        return str(part)
-
-    # Only fetch bodies for a few articles to avoid hammering the API
-    articles_for_bodies = articles[:5]
-
-    for art in articles_for_bodies:
-        art_id = art.id
-        title = art.title or "Untitled article"
-
-        with st.expander(title):
-            st.caption("Full article (cleaned)")
-
-            try:
-                # This returns a *flat* dict:
-                # {title, summary_html, body_html, images, url}
-                details = sa_api.fetch_analysis_details(str(art_id))
-            except Exception as e:
-                st.write(f"Could not fetch article body: {e}")
-                continue
-
-            if not isinstance(details, dict) or not details:
-                st.write("No article body text returned.")
-                continue
-
-            # In case you ever switch back to raw API JSON, support both shapes:
-            if "data" in details:
-                # raw RapidAPI payload
-                data = details.get("data") or {}
-                attrs = data.get("attributes") or {}
-                summary_html = attrs.get("summary_html") or attrs.get("summary") or ""
-                body_html = (
-                    attrs.get("body_html")
-                    or attrs.get("content")
-                    or attrs.get("body")
-                    or ""
-                )
-                images = attrs.get("images") or []
+    # ---------------- Full bodies ----------------
+    st.markdown("#### Full article bodies (cleaned)")
+    for i, a in enumerate(articles, start=1):
+        title = a.get("title") or f"Article {i}"
+        url = a.get("url") or a.get("link") or ""
+        author = a.get("author") or a.get("author_name") or ""
+        body = a.get("body_clean") or a.get("body") or ""
+        with st.expander(f"{i}. {title}" + (f" — {author}" if author else ""), expanded=False):
+            if url:
+                st.markdown(f"Source: {url}")
+            if body:
+                st.write(body)
             else:
-                # current helper output from sa_analysis_api.fetch_analysis_details
-                summary_html = details.get("summary_html") or details.get("summary") or ""
-                body_html = (
-                    details.get("body_html")
-                    or details.get("content")
-                    or details.get("body")
-                    or ""
-                )
-                images = details.get("images") or []
+                st.caption("No body returned for this article.")
 
-            # -------- Image (if present) --------
-            image_url = None
-            if isinstance(images, list):
-                for img in images:
-                    if not isinstance(img, dict):
-                        continue
-                    image_url = (
-                        img.get("url")
-                        or img.get("imageUrl")
-                        or img.get("src")
-                    )
-                    if image_url:
-                        break
+    # ---------------- Export PDF (simple) ----------------
+    def _build_simple_pdf_bytes(ticker: str, articles: list[dict], digest_text: str | None) -> bytes:
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+        from reportlab.lib.units import inch
+        from xml.sax.saxutils import escape
 
-            if not image_url:
-                # Fallback if API ever sends a direct field
-                image_url = details.get("gettyImageUrl") or details.get("imageUrl")
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=LETTER, leftMargin=0.75*inch, rightMargin=0.75*inch, topMargin=0.75*inch, bottomMargin=0.75*inch)
+        styles = getSampleStyleSheet()
+        story = []
 
-            if image_url:
-                try:
-                    st.image(image_url, use_column_width=True)
-                except Exception:
-                    # If Streamlit can't load it, just skip the image
-                    pass
+        story.append(Paragraph(f"Cutler Capital – Seeking Alpha Export", styles["Title"]))
+        ts = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %I:%M %p %Z")
+        story.append(Paragraph(f"Generated {escape(ts)} • Ticker: {escape(ticker)}", styles["Normal"]))
+        story.append(Spacer(1, 0.2*inch))
 
-            # -------- Clean and render text --------
-            combined_html = (
-                _normalize_html(summary_html)
-                + "\n\n"
-                + _normalize_html(body_html)
-            )
+        if digest_text:
+            story.append(Paragraph("AI Digest", styles["Heading2"]))
+            story.append(Paragraph(escape(digest_text).replace("", "<br/>"), styles["BodyText"]))
+            story.append(Spacer(1, 0.2*inch))
 
-            if not combined_html.strip():
-                st.write("No article body text returned.")
-                continue
+        story.append(Paragraph("Articles", styles["Heading2"]))
+        for i, a in enumerate(articles, start=1):
+            title = a.get("title") or f"Article {i}"
+            author = a.get("author") or a.get("author_name") or ""
+            url = a.get("url") or a.get("link") or ""
+            body = a.get("body_clean") or a.get("body") or ""
+            story.append(Paragraph(f"{i}. {escape(title)}" + (f" — {escape(author)}" if author else ""), styles["Heading3"]))
+            if url:
+                story.append(Paragraph(f"Source: {escape(url)}", styles["Normal"]))
+            if body:
+                story.append(Paragraph(escape(body).replace("", "<br/>"), styles["BodyText"]))
+            story.append(Spacer(1, 0.15*inch))
+        doc.build(story)
+        return buf.getvalue()
 
-            try:
-                cleaned_text = clean_sa_html_to_markdown(combined_html)
-            except NameError:
-                # Very simple fallback if helper is missing
-                import re as _re
-                tmp = _re.sub(r"<(br|p|div|li)[^>]*>", "\n", combined_html, flags=_re.I)
-                tmp = _re.sub(r"<[^>]+>", "", tmp)
-                tmp = tmp.replace("\xa0", " ")
-                cleaned_text = _re.sub(r"\n{3,}", "\n\n", tmp).strip()
+    st.divider()
+    if "sa_pdf_bytes" not in st.session_state:
+        st.session_state["sa_pdf_bytes"] = None
+        st.session_state["sa_pdf_name"] = None
 
-            st.write(cleaned_text)
-            
-    # --- Download: combined Seeking Alpha digest + full cleaned article bodies (per ticker) ---
-    tickers_for_export = selected_tickers[:] if selected_tickers else [ticker]
-    tickers_for_export = tickers_for_export[:10]
+    if st.button("Build downloadable Seeking Alpha PDF", key=f"sa_build_pdf_{cache_key}"):
+        with st.spinner("Building PDF..."):
+            pdf_bytes = _build_simple_pdf_bytes(ticker, articles, digest_text if include_ai_digest else None)
+        mmddyy = datetime.now(ZoneInfo("America/New_York")).strftime("%m.%d.%y")
+        tick_part = ticker
+        name = f"{mmddyy} Seeking Alpha {tick_part}.pdf"
+        st.session_state["sa_pdf_bytes"] = pdf_bytes
+        st.session_state["sa_pdf_name"] = name
+        st.success("PDF built. Use the download button below.")
 
-    # Build PDF on-demand and store in session so the download button persists on reruns
-    if st.button("Build downloadable Seeking Alpha PDF", key="sa_build_pdf_v2"):
-        from sa_analysis_api import fetch_analysis_list, fetch_analysis_details, build_sa_analysis_digest
+    if st.session_state.get("sa_pdf_bytes") and st.session_state.get("sa_pdf_name"):
+        st.download_button(
+            "Download Seeking Alpha PDF",
+            data=st.session_state["sa_pdf_bytes"],
+            file_name=st.session_state["sa_pdf_name"],
+            mime="application/pdf",
+            key=f"sa_download_{cache_key}",
+            use_container_width=True,
+        )
 
-        def _normalize_html(part) -> str:
-            if part is None:
-                return ""
-            if isinstance(part, list):
-                return "\n".join(str(x) for x in part if x is not None)
-            return str(part)
-
-        sections: list[tuple[str, str]] = []
-
-        # Controls for export verbosity (keep conservative to avoid huge PDFs)
-        MAX_ARTICLES_PER_TICKER = 10          # list/fetch size
-        MAX_BODIES_PER_TICKER = 5             # how many full bodies to include in the PDF
-        MAX_WORDS_PER_BODY = 900              # cap each body so export stays compact
-
-        for sym in tickers_for_export:
-            # Always fetch fresh for export (export should be reproducible and complete)
-            try:
-                t_articles = fetch_analysis_list(sym, size=MAX_ARTICLES_PER_TICKER) or []
-            except Exception as e:
-                sections.append((f"{sym} – Seeking Alpha Export", f"Could not fetch analysis list. ({e})"))
-                continue
-
-            # Build digest text (AI) for this ticker
-            try:
-                digest = build_sa_analysis_digest(sym, t_articles, model=model, max_articles=4)
-            except Exception as e:
-                digest = f"Could not build AI digest for {sym}. ({e})"
-
-            # ---- Build “full bodies” section text (cleaned) ----
-            bodies_lines: list[str] = []
-            bodies_lines.append("### Full article bodies (cleaned)")
-            bodies_lines.append(
-                f"Including up to {MAX_BODIES_PER_TICKER} most recent analysis articles for {sym}.\n"
-            )
-
-            # Only include first N bodies to keep PDF reasonable
-            for i, art in enumerate(t_articles[:MAX_BODIES_PER_TICKER], start=1):
-                art_title = getattr(art, "title", "") or "Untitled"
-                art_url = getattr(art, "url", "") or ""
-                art_id = getattr(art, "id", None)
-
-                bodies_lines.append(f"#### {i}. {art_title}")
-                if art_url:
-                    bodies_lines.append(f"Source: {art_url}")
-
-                if not art_id:
-                    bodies_lines.append("Body: (No article ID returned.)\n")
-                    continue
-
-                try:
-                    details = fetch_analysis_details(str(art_id)) or {}
-                except Exception as e:
-                    bodies_lines.append(f"Body: (Could not fetch details: {e})\n")
-                    continue
-
-                # Support both shapes (raw RapidAPI vs your helper dict)
-                if isinstance(details, dict) and "data" in details:
-                    data = details.get("data") or {}
-                    attrs = data.get("attributes") or {}
-                    summary_html = attrs.get("summary_html") or attrs.get("summary") or ""
-                    body_html = attrs.get("body_html") or attrs.get("content") or attrs.get("body") or ""
-                else:
-                    summary_html = (details.get("summary_html") or details.get("summary") or "") if isinstance(details, dict) else ""
-                    body_html = (details.get("body_html") or details.get("content") or details.get("body") or "") if isinstance(details, dict) else ""
-
-                combined_html = _normalize_html(summary_html) + "\n\n" + _normalize_html(body_html)
-
-                if not combined_html.strip():
-                    bodies_lines.append("Body: (No body text returned.)\n")
-                    continue
-
-                # Clean HTML -> markdown-ish plain text
-                try:
-                    cleaned = clean_sa_html_to_markdown(combined_html)
-                except NameError:
-                    import re as _re
-                    tmp = _re.sub(r"<(br|p|div|li)[^>]*>", "\n", combined_html, flags=_re.I)
-                    tmp = _re.sub(r"<[^>]+>", "", tmp)
-                    tmp = tmp.replace("\xa0", " ")
-                    cleaned = _re.sub(r"\n{3,}", "\n\n", tmp).strip()
-
-                # Cap length per body to keep export compact
-                words = cleaned.split()
-                if len(words) > MAX_WORDS_PER_BODY:
-                    cleaned = " ".join(words[:MAX_WORDS_PER_BODY]) + "\n\n[Truncated for export.]"
-
-                bodies_lines.append(cleaned)
-                bodies_lines.append("")  # spacer line
-
-            # Combine digest + bodies into one section per ticker
-            combined_section_text = (
-                f"### AI Digest\n{digest}\n\n---\n\n" + "\n".join(bodies_lines)
-            )
-            sections.append((f"{sym} – Seeking Alpha (Digest + Bodies)", combined_section_text))
-
-        now_et = _now_et()
-        tickers_label = " ".join(tickers_for_export)
-        safe_tickers = _safe(tickers_label.replace(" ", "_"))
-
-        out_name = f"{now_et:%m.%d.%y} Seeking Alpha {safe_tickers}.pdf"
-        out_path = (BASE / "SeekingAlpha" / out_name)
-
-        subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} • Tickers: {tickers_label}"
-        try:
-            pdf_path = _build_text_pdf(
-                output_path=out_path,
-                title="Cutler Capital – Seeking Alpha Digest + Article Bodies",
-                subtitle=subtitle,
-                sections=sections,
-            )
-            st.session_state["sa_export_pdf_path"] = str(pdf_path)
-            st.success("Seeking Alpha PDF is ready (includes cleaned article bodies).")
-        except Exception as e:
-            st.error(f"Could not build Seeking Alpha PDF: {e}")
-
-    # Show download button if we have a built PDF
-    sa_pdf_path = st.session_state.get("sa_export_pdf_path")
-    if sa_pdf_path and Path(sa_pdf_path).exists():
-        try:
-            with open(sa_pdf_path, "rb") as f:
-                st.download_button(
-                    "Download Seeking Alpha PDF",
-                    data=f.read(),
-                    file_name=Path(sa_pdf_path).name,
-                    mime="application/pdf",
-                    key="sa_download_pdf_v2",
-                )
-        except Exception:
-            st.warning("PDF is built but could not be opened for download.")
 
 # --- Reddit snapshot section (uses reddit34 via reddit_excerpts) ---
 
@@ -1380,13 +1243,7 @@ def draw_reddit_pulse_section():
     )
 
     # 1) Ticker selection from your real universe
-    # NOTE: We avoid relying on an external helper so this section is self-contained.
-    try:
-        from tickers import tickers as CUTLER_TICKERS
-        available_tickers = sorted(list(CUTLER_TICKERS.keys()))
-    except Exception:
-        available_tickers = ["AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA"]
-
+    available_tickers = _get_available_tickers_for_reddit()
     default_index = available_tickers.index("AMZN") if "AMZN" in available_tickers else 0
 
     selected_ticker = st.selectbox(
@@ -2828,6 +2685,8 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
+    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
+
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
         """
@@ -3082,11 +2941,6 @@ def main():
             st.image(str(logo_path), width=260)
 
         st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
-        st.markdown(
-            "<div class='app-subtitle'>Scrape, excerpt, and compile fund letters by fund family and quarter.</div>",
-            unsafe_allow_html=True,
-        )
-
 
     # Sidebar: run settings
     st.sidebar.header("Run settings")
@@ -3126,7 +2980,7 @@ def main():
     st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
     tab_mf, tab_sa, tab_reddit, tab_podcast = st.tabs(
-        ["Mutual Fund", "Seeking Alpha", "Reddit", "Podcast"]
+        ["Fund Families", "Seeking Alpha", "Reddit", "Podcast"]
     )
 
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
@@ -3498,8 +3352,12 @@ def main():
 
     # Output path
     st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.write("**Output root folder (on this machine):**")
-    st.code(str(BASE))
+    st.write("Output folder (local reference):")
+    st.code(r"V:\CCM-AI\2025")
+    st.caption(
+        "This path is on your local machine. "
+        "Copy and paste it into Windows Explorer to open."
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
 # Streamlit needs main() to run on import.
