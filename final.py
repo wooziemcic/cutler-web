@@ -935,15 +935,15 @@ def draw_seeking_alpha_news_section() -> None:
     Seeking Alpha – Analysis articles by ticker (RapidAPI).
 
     - Supports Batch mode (10 tickers per batch) and Manual mode (pick up to 10 tickers)
-    - Caches fetched articles + optional AI digest in-session to avoid repeated API calls
-    - Builds a simple export PDF with article bodies (download persists via session_state)
+    - Caches fetched articles (+ optional AI digest) in-session to avoid repeated API calls
+    - Robust to RapidAPI returning article rows as dicts OR raw IDs (strings/ints)
+    - In batch mode: if a ticker returns no articles, auto-skips to the next ticker
     """
     import streamlit as st
     import pandas as pd
     from pathlib import Path
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    import io
 
     import sa_analysis_api as sa_api  # existing working module in this repo
 
@@ -952,9 +952,48 @@ def draw_seeking_alpha_news_section() -> None:
         st.session_state["sa_cache"] = {}  # {cache_key: {"articles": [...], "digest_text": str|None}}
     sa_cache = st.session_state["sa_cache"]
 
+    # ---------------- Helpers ----------------
+    def _is_probable_ticker(x: str) -> bool:
+        x = (x or "").strip().upper()
+        # keep it simple: Seeking Alpha tickers are almost always alphabetic 1–5 chars
+        return x.isalpha() and 1 <= len(x) <= 5
+
+    def _make_batches(items: list[str], size: int = 10) -> list[list[str]]:
+        return [items[i : i + size] for i in range(0, len(items), size)]
+
+    def _pretty_company_name(v) -> str | None:
+        # tickers.py sometimes stores: {"AAPL": ["Apple Inc"]} or {"AAPL": "Apple Inc"}
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v.strip() or None
+        if isinstance(v, (list, tuple)) and v:
+            s = str(v[0]).strip()
+            return s or None
+        return None
+
+    def _sa_article_id(a):
+        # Supports dict rows or raw string/int IDs
+        if isinstance(a, dict):
+            return a.get("id") or a.get("article_id") or a.get("articleId")
+        if isinstance(a, (str, int)):
+            s = str(a).strip()
+            return s if s else None
+        return None
+
+    def _sa_article_as_dict(a) -> dict:
+        # Normalize any article row into a dict so downstream code doesn't crash.
+        if isinstance(a, dict):
+            return a
+        aid = _sa_article_id(a)
+        return {"id": aid} if aid else {}
+
+    def _now_et() -> datetime:
+        return datetime.now(ZoneInfo("America/New_York"))
+
     # ---------------- Universe (from tickers.py if available) ----------------
     CUTLER_TICKERS = {}
-    universe = []
+    universe: list[str] = []
     try:
         from tickers import tickers as CUTLER_TICKERS  # type: ignore
         if isinstance(CUTLER_TICKERS, dict):
@@ -962,9 +1001,12 @@ def draw_seeking_alpha_news_section() -> None:
     except Exception:
         universe = []
 
+    # Filter universe to likely SA tickers (prevents numeric IDs like 4100810 from breaking UX)
+    universe = [t for t in universe if _is_probable_ticker(t)]
+
     if not universe:
-        st.warning("Ticker universe not found (tickers.py). Seeking Alpha section needs a ticker list.")
-        return
+        st.warning("Ticker universe not found / empty (tickers.py). Seeking Alpha section needs a ticker list.")
+        st.stop()
 
     st.markdown("### Seeking Alpha")
     st.caption("Pull recent Seeking Alpha *Analysis* articles by ticker. Use Batch mode to run 10 tickers at a time.")
@@ -972,12 +1014,7 @@ def draw_seeking_alpha_news_section() -> None:
     # ---------------- Mode: batch vs manual ----------------
     batch_mode = st.toggle("Batch mode (10 tickers per batch)", value=True, key="sa_batch_mode_toggle")
 
-    def _make_batches(items: list[str], size: int = 10) -> list[list[str]]:
-        return [items[i : i + size] for i in range(0, len(items), size)]
-
     selected_tickers: list[str] = []
-    batch_label = None
-
     if batch_mode:
         batches = _make_batches(universe, 10)
         batch_options = [f"Batch {i+1} ({len(b)} tickers)" for i, b in enumerate(batches)]
@@ -988,7 +1025,6 @@ def draw_seeking_alpha_news_section() -> None:
             key="sa_batch_select_idx",
         )
         selected_tickers = batches[int(batch_idx)]
-        batch_label = batch_options[int(batch_idx)].split(" (")[0]  # "Batch 1"
         st.caption("Tickers in this batch: " + ", ".join(selected_tickers))
     else:
         selected_tickers = st.multiselect(
@@ -1001,31 +1037,26 @@ def draw_seeking_alpha_news_section() -> None:
 
     if not selected_tickers:
         st.info("Select tickers to begin.")
-        return
+        st.stop()
 
     # ---------------- Navigation within chosen tickers ----------------
     nav_key = "sa_nav_idx_batch" if batch_mode else "sa_nav_idx_manual"
     if nav_key not in st.session_state:
         st.session_state[nav_key] = 0
-    st.session_state[nav_key] = max(0, min(st.session_state[nav_key], len(selected_tickers) - 1))
+    st.session_state[nav_key] = max(0, min(int(st.session_state[nav_key]), len(selected_tickers) - 1))
 
-    col_prev, col_mid, col_next = st.columns([1, 6, 1])
-    with col_prev:
-        if st.button("◀ Previous", key=f"sa_prev_{nav_key}", disabled=st.session_state[nav_key] == 0):
+    nav_l, nav_mid, nav_r = st.columns([1, 6, 1])
+    with nav_l:
+        if st.button("Previous", key=f"sa_prev_{nav_key}", disabled=st.session_state[nav_key] == 0, use_container_width=True):
             st.session_state[nav_key] -= 1
             st.rerun()
-    with col_next:
-        if st.button("Next ticker ▶", key=f"sa_next_{nav_key}", disabled=st.session_state[nav_key] >= len(selected_tickers) - 1):
+    with nav_r:
+        if st.button("Next", key=f"sa_next_{nav_key}", disabled=st.session_state[nav_key] >= len(selected_tickers) - 1, use_container_width=True):
             st.session_state[nav_key] += 1
             st.rerun()
 
     ticker = selected_tickers[st.session_state[nav_key]]
-    ticker_name = None
-    try:
-        ticker_name = CUTLER_TICKERS.get(ticker)
-    except Exception:
-        ticker_name = None
-
+    ticker_name = _pretty_company_name(CUTLER_TICKERS.get(ticker))
     st.markdown(f"**Currently viewing:** `{ticker}`" + (f" — {ticker_name}" if ticker_name else ""))
 
     # ---------------- Controls ----------------
@@ -1037,13 +1068,16 @@ def draw_seeking_alpha_news_section() -> None:
         step=1,
         key="sa_max_articles_slider",
     )
+
     model = st.selectbox(
         "OpenAI model for digest",
         options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
         index=0,
         key="sa_digest_model_select",
     )
-    include_ai_digest = st.checkbox("Include AI digest (optional)", value=True, key="sa_include_digest")
+
+    # Keep optional digest toggle (but default to False to avoid accidental cost)
+    include_ai_digest = st.checkbox("Include AI digest (optional)", value=False, key="sa_include_digest")
 
     fetch_clicked = st.button(
         "Fetch / refresh Seeking Alpha analysis",
@@ -1071,37 +1105,69 @@ def draw_seeking_alpha_news_section() -> None:
     elif fetch_clicked:
         try:
             with st.spinner(f"Pulling Seeking Alpha analysis for {ticker} via RapidAPI..."):
-                articles = sa_api.fetch_analysis_list(ticker, size=max_articles)
+                raw_articles = sa_api.fetch_analysis_list(ticker, size=max_articles)
         except Exception as e:
             st.error(f"Error while fetching Seeking Alpha analysis: {e}")
-            return
+            st.stop()
+
+        if not raw_articles:
+            st.info(f"No Seeking Alpha analysis articles returned for {ticker}. Skipping to next ticker in this batch.")
+            sa_cache[cache_key] = {"articles": [], "digest_text": None}
+
+            # Auto-advance in batch mode
+            if batch_mode and len(selected_tickers) > 1 and st.session_state[nav_key] < len(selected_tickers) - 1:
+                st.session_state[nav_key] += 1
+                st.rerun()
+
+            st.stop()
+
+        # Normalize articles -> list[dict]
+        articles = []
+        for a in raw_articles:
+            d = _sa_article_as_dict(a)
+            if d:
+                articles.append(d)
 
         if not articles:
-            st.info(f"No Seeking Alpha analysis articles returned for {ticker}.")
+            st.info(f"No usable Seeking Alpha articles returned for {ticker}. Skipping to next ticker in this batch.")
             sa_cache[cache_key] = {"articles": [], "digest_text": None}
-            return
 
-        # Fill in bodies (details endpoint) so export works
+            if batch_mode and len(selected_tickers) > 1 and st.session_state[nav_key] < len(selected_tickers) - 1:
+                st.session_state[nav_key] += 1
+                st.rerun()
+
+            st.stop()
+
+        # Fill in bodies (details endpoint) so export/UI works
         with st.spinner("Fetching full article details..."):
             for a in articles:
-                article_id = a.get("id") or a.get("article_id")
+                article_id = _sa_article_id(a)
                 if not article_id:
                     continue
+
+                # If already has body, skip
                 if a.get("body_clean") or a.get("body"):
                     continue
+
                 try:
-                    details = sa_api.fetch_analysis_details(article_id)
-                    a["body_clean"] = details.get("body_clean") or details.get("body") or ""
+                    details = sa_api.fetch_analysis_details(article_id) or {}
+                    # be defensive: details may not include these keys
+                    a["body_clean"] = details.get("body_clean") or details.get("body") or details.get("content") or ""
                     if details.get("author"):
                         a["author"] = details.get("author")
+                    if details.get("author_name") and not a.get("author"):
+                        a["author"] = details.get("author_name")
                     if details.get("title") and not a.get("title"):
                         a["title"] = details.get("title")
                     if details.get("url") and not a.get("url"):
                         a["url"] = details.get("url")
+                    if details.get("published_at") and not a.get("published_at"):
+                        a["published_at"] = details.get("published_at")
                 except Exception:
+                    # keep going; partial data is acceptable
                     pass
 
-        # Optional digest
+        # Optional digest (UI only; you can remove later if you never want it)
         digest_text = None
         if include_ai_digest:
             st.markdown("#### AI Analysis Digest")
@@ -1117,11 +1183,11 @@ def draw_seeking_alpha_news_section() -> None:
     # Case 3: no cache and not clicked
     else:
         st.info("Click the button above to fetch Seeking Alpha analysis for this ticker.")
-        return
+        st.stop()
 
     if not articles:
         st.info("No articles available for this ticker / configuration.")
-        return
+        st.stop()
 
     # ---------------- Articles table ----------------
     rows = []
@@ -1160,6 +1226,7 @@ def draw_seeking_alpha_news_section() -> None:
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
         from reportlab.lib.units import inch
         from xml.sax.saxutils import escape
+        import io
 
         buf = io.BytesIO()
         doc = SimpleDocTemplate(buf, pagesize=LETTER, leftMargin=0.75*inch, rightMargin=0.75*inch, topMargin=0.75*inch, bottomMargin=0.75*inch)
