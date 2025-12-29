@@ -1000,33 +1000,33 @@ def draw_seeking_alpha_news_section() -> None:
         return None
 
     def _sa_article_as_dict(a) -> dict:
-        """Normalize any article row into a dict so downstream UI/PDF works."""
+        # Normalize any article row into a dict so downstream code doesn't crash.
         if isinstance(a, dict):
             return a
 
-        # Dataclass / object with attributes
-        d: dict = {}
+        # dataclass / object style (e.g., AnalysisArticle)
         try:
-            # Common attribute names used by sa_analysis_api.AnalysisArticle
-            d["id"] = getattr(a, "id", None) or getattr(a, "article_id", None)
-            d["title"] = getattr(a, "title", None)
-            d["url"] = getattr(a, "url", None)
-            # published may be datetime
-            pub = getattr(a, "published", None) or getattr(a, "published_at", None)
-            if pub is not None:
-                d["published_at"] = pub
-            # optional author fields (best-effort)
-            d["author"] = getattr(a, "author", None) or getattr(a, "author_name", None)
-            d["author_slug"] = getattr(a, "author_slug", None)
-            d["primary_tickers"] = getattr(a, "primary_tickers", None)
-        except Exception:
-            d = {}
+            aid = getattr(a, "id", None) or getattr(a, "article_id", None) or getattr(a, "articleId", None)
+            if not aid:
+                return {}
 
-        # Fallback to ID-only
-        if not d or not d.get("id"):
-            aid = _sa_article_id(a)
-            return {"id": aid} if aid else {}
-        return d
+            d = {
+                "id": str(aid),
+                "title": getattr(a, "title", "") or "",
+                "url": getattr(a, "url", "") or "",
+                "published_at": getattr(a, "published", "") or getattr(a, "published_at", "") or "",
+                # support both naming conventions
+                "author": getattr(a, "author_name", None) or getattr(a, "author", None) or "",
+                "author_slug": getattr(a, "author_slug", None) or "",
+            }
+            return d
+        except Exception:
+            pass
+
+        # raw ID fallback
+        aid = _sa_article_id(a)
+        return {"id": aid} if aid else {}
+
 
     def _now_et() -> datetime:
         return datetime.now(ZoneInfo("America/New_York"))
@@ -1197,11 +1197,19 @@ def draw_seeking_alpha_news_section() -> None:
                 try:
                     details = sa_api.fetch_analysis_details(article_id) or {}
                     # be defensive: details may not include these keys
-                    a["body_clean"] = details.get("body_clean") or details.get("body") or details.get("content") or ""
+                    a["body_clean"] = (
+                        details.get("body_clean")
+                        or details.get("body_html")
+                        or details.get("content")
+                        or details.get("body")
+                        or ""
+                    )
                     if details.get("author"):
                         a["author"] = details.get("author")
                     if details.get("author_name") and not a.get("author"):
                         a["author"] = details.get("author_name")
+                    if details.get("authorName") and not a.get("author"):
+                        a["author"] = details.get("authorName")
                     if details.get("title") and not a.get("title"):
                         a["title"] = details.get("title")
                     if details.get("url") and not a.get("url"):
