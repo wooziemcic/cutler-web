@@ -567,7 +567,7 @@ def _render_group_block_compact(
     story.append(Paragraph(escape(title), header_style))
     story.append(
         Paragraph(
-            f"Tickers: {escape(tickers)} &nbsp;&nbsp;|&nbsp;&nbsp; Pages: {pages}",
+            f"Tickers: {escape(tickers)} &nbsp;&nbsp;|&nbsp;&nbsp; Page/s: {pages}",
             meta_style,
         )
     )
