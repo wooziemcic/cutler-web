@@ -1112,7 +1112,7 @@ def draw_seeking_alpha_news_section() -> None:
     st.session_state[nav_key] = max(0, min(int(st.session_state[nav_key]), len(selected_tickers) - 1))
     ticker = selected_tickers[int(st.session_state[nav_key])]
 
-    nav_l, nav_mid, nav_r = st.columns([1, 6, 1], vertical_alignment="center")
+    nav_l, nav_mid, nav_r = st.columns([1, 6, 1])
     with nav_l:
         if st.button("Previous", key=f"sa_prev_{nav_key}", disabled=st.session_state[nav_key] == 0, use_container_width=True):
             st.session_state[nav_key] -= 1
