@@ -1363,13 +1363,116 @@ def draw_seeking_alpha_news_section() -> None:
 
     # Build once, persist bytes + filename
     if st.button("Build downloadable Seeking Alpha PDF", key=f"sa_build_pdf_{ck_current}", use_container_width=True):
-        with st.spinner("Building PDF..."):
+        with st.spinner("Building PDF (Fund Families style)..."):
             try:
-                pdf_bytes = _build_sa_pdf_bytes(ticker, articles, digest_text)
-                name = f"{datetime.now(ZoneInfo('America/New_York')).strftime('%m.%d.%y')} Seeking Alpha {ticker}.pdf"
-                st.session_state["sa_pdf_bytes"] = pdf_bytes
-                st.session_state["sa_pdf_name"] = name
-                st.success("Seeking Alpha PDF built.")
+                import tempfile
+                import json as _json
+
+                tickers_for_pdf = list(selected_tickers) if selected_tickers else [ticker]
+                combined: dict[str, list[dict]] = {}
+
+                # Ensure we have cached results for each ticker, even if user didn't click through Next/Prev
+                for sym in tickers_for_pdf:
+                    ck_sym = _cache_key(sym, max_articles, model, include_ai_digest)
+                    if ck_sym not in cache:
+                        try:
+                            raw_list = sa_api.fetch_analysis_list(sym, size=max_articles)
+                            rows = [_sa_article_row(x) for x in (raw_list or [])]
+                            rows = [r for r in rows if r.get("id")]
+
+                            # Fetch article details to get bodies/authors/titles/urls
+                            for r in rows:
+                                aid = r.get("id") or ""
+                                if not aid:
+                                    continue
+                                details = {}
+                                try:
+                                    if hasattr(sa_api, "fetch_analysis_details"):
+                                        details = sa_api.fetch_analysis_details(aid) or {}
+                                except Exception:
+                                    details = {}
+
+                                body_raw, author_d, title_d = _extract_from_details(details)
+
+                                if "<" in (body_raw or "") and ">" in (body_raw or ""):
+                                    r["body_clean"] = clean_sa_html(body_raw)
+                                else:
+                                    r["body_clean"] = (body_raw or "").strip()
+
+                                if author_d and not r.get("author"):
+                                    r["author"] = author_d
+                                if title_d and not r.get("title"):
+                                    r["title"] = title_d
+                                if isinstance(details, dict) and details.get("url") and not r.get("url"):
+                                    r["url"] = details.get("url")
+
+                        except Exception as e:
+                            rows = []
+                            cache[ck_sym] = {"articles": [], "digest_text": None, "error": str(e)}
+                        else:
+                            cache[ck_sym] = {"articles": rows, "digest_text": None}
+
+                    payload_sym = cache.get(ck_sym) or {}
+                    arts_sym = payload_sym.get("articles") or []
+
+                    items: list[dict] = []
+                    for a in arts_sym:
+                        body = (a.get("body_clean") or "").strip()
+                        if not body:
+                            continue
+
+                        title = (a.get("title") or "").strip()
+                        author = (a.get("author") or a.get("author_name") or "").strip()
+                        url = (a.get("url") or a.get("link") or "").strip()
+
+                        header_bits = []
+                        if title:
+                            header_bits.append(title)
+                        if author:
+                            header_bits.append(f"— {author}")
+                        header = " ".join(header_bits).strip()
+                        if url:
+                            header = f"{header}\nSource: {url}" if header else f"Source: {url}"
+
+                        if header:
+                            items.append({"text": header, "pages": []})
+
+                        # Split into paragraphs; filter tiny fragments
+                        paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+                        for p in paras:
+                            if len(p) < 60:
+                                continue
+                            items.append({"text": p, "pages": []})
+
+                    if items:
+                        combined[sym] = items
+
+                if not combined:
+                    raise RuntimeError("No article bodies available to export for the selected tickers.")
+
+                # Build one compiled PDF (same visual language as Fund Families)
+                pdf_name = f"{datetime.now(ZoneInfo('America/New_York')).strftime('%m.%d.%y')} Seeking Alpha {'_'.join(tickers_for_pdf)}.pdf"
+
+                from pathlib import Path
+                with tempfile.TemporaryDirectory() as td:
+                    td_path = Path(td)
+                    excerpts_path = td_path / "sa_excerpts.json"
+                    excerpts_path.write_text(_json.dumps(combined, indent=2), encoding="utf-8")
+
+                    out_pdf = td_path / "sa_compiled.pdf"
+                    make_pdf.build_pdf(
+                        excerpts_json_path=str(excerpts_path),
+                        output_pdf_path=str(out_pdf),
+                        report_title="Seeking Alpha Analysis",
+                        source_pdf_name=pdf_name,
+                        format_style="compact",
+                        ai_score=True,
+                        ai_model=model,
+                    )
+                    st.session_state["sa_pdf_bytes"] = out_pdf.read_bytes()
+                    st.session_state["sa_pdf_name"] = pdf_name
+
+                st.success("Seeking Alpha PDF built successfully.")
             except Exception as e:
                 st.session_state["sa_pdf_bytes"] = None
                 st.session_state["sa_pdf_name"] = None
