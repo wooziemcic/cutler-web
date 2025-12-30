@@ -103,11 +103,11 @@ ArticleHeader = ParagraphStyle(
     spaceAfter=4,
 )
 
-# NEW (minimal): article header boxed style (used only when is_header=True)
+# Article header boxed style (used only when is_header=True)
 ArticleHeaderBox = ParagraphStyle(
     "ArticleHeaderBox",
     parent=ArticleHeader,
-    backColor=colors.HexColor("#F2EAF3"),  # light purple tint
+    backColor=colors.HexColor("#F2EAF3"),
     borderPadding=(4, 6, 4, 6),
     spaceBefore=6,
     spaceAfter=6,
@@ -167,13 +167,41 @@ def _normalize_pages(raw) -> List[int]:
     return sorted(out)
 
 
+def _format_article_header_html(raw_txt: str) -> str:
+    """Format a multi-line Seeking Alpha header item into a clean, boxed header.
+
+    Expected raw_txt format (built in final.py):
+      Line 1: "<Title> — <Author>"  (author may be missing)
+      Line 2: "Source: <URL>"      (may be missing)
+
+    We render:
+      - bold Line 1
+      - smaller Line 2 (if present)
+    """
+    s = (raw_txt or "").strip()
+    if not s:
+        return ""
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    first = escape(lines[0])
+    rest = []
+    for ln in lines[1:]:
+        rest.append(escape(ln))
+    if rest:
+        rest_html = "<br/>".join(f"<font size='8' color='#4b5563'>{ln}</font>" for ln in rest)
+        return f"<b>{first}</b><br/>{rest_html}"
+    return f"<b>{first}</b>"
+
+
 @dataclass
 class RawItem:
     ticker: str
     text: str
     pages: List[int]
     order_hint: Tuple[int, int]  # (min_page_or_big, seq)
-    # NEW: carry is_header through the pipeline so per-article headers render in the PDF.
+    # True when this item is an inserted per-article header (e.g., "Title — Author\nSource: URL")
+    # that should render as a heading and should not be AI-scored or chunked.
     is_header: bool = False
 
 
@@ -239,7 +267,6 @@ class ParagraphAgg:
     pages: Set[int]
     tickers: Set[str]
     order_hint: Tuple[int, int]
-    # NEW: preserve header markers through aggregation/grouping.
     is_header: bool = False
 
 
@@ -263,9 +290,9 @@ def _aggregate_paragraphs(raw_items: List[RawItem]) -> Dict[str, ParagraphAgg]:
         if not txt:
             continue
 
-        # NEW: headers must not be de-duplicated or merged across tickers.
+        # Headers must not be de-duplicated or merged across tickers.
         # Give each header its own unique aggregation key so it survives grouping.
-        if it.is_header:
+        if getattr(it, "is_header", False):
             k = f"__hdr__{it.ticker}__{it.order_hint[1]}"
             agg[k] = ParagraphAgg(
                 text=txt,
@@ -306,8 +333,7 @@ def _groups_from_agg(agg: Dict[str, ParagraphAgg]) -> List[Group]:
             "pages": sorted(para.pages),
             "order_hint": para.order_hint,
         }
-        # NEW: carry header marker into render payload.
-        if para.is_header:
+        if getattr(para, "is_header", False):
             item["is_header"] = True
 
         by_tickerset.setdefault(key, []).append(item)
@@ -548,9 +574,11 @@ def _render_group_block_table(
         if not txt:
             continue
 
-        # Article headers: render as a boxed header and do not score/number
+        # Article headers: render in boxed style and do not score/number
         if it.get("is_header"):
-            story.append(Paragraph(escape(txt).replace("\n", "<br/>"), ArticleHeaderBox))
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(_format_article_header_html(txt), ArticleHeaderBox))
+            story.append(Spacer(1, 4))
             continue
 
         ipages = it.get("pages") or []
@@ -561,7 +589,7 @@ def _render_group_block_table(
 
     table = Table(
         rows,
-        colWidths=[2.3 * 72, None],
+        colWidths=[2.3 * 72, None],  # 2.3" left, rest right
         repeatRows=1,
         style=TableStyle(
             [
@@ -593,14 +621,15 @@ def _render_group_block_compact(
 ) -> None:
     """
     Compact renderer (default): full-width blocks with a single header line,
-    then paragraphs below.
+    then numbered paragraphs below. This significantly reduces page count
+    versus nested tables.
     """
 
-    # Detect Seeking Alpha style: any per-article headers exist in this group.
+    # Seeking Alpha groups include per-article header items (is_header=True).
+    # We use this as a safe signal to apply SA-specific formatting only.
     has_article_headers = any(bool(it.get("is_header")) for it in (group.items or []))
 
     # Styles created lazily so we don't mutate global stylesheet at import time
-    # PATCH: make ticker header box larger only when SA-style headers exist.
     header_style = ParagraphStyle(
         "GroupHeaderCompact",
         parent=_base["Heading3"],
@@ -659,26 +688,37 @@ def _render_group_block_compact(
     tickers = ", ".join(group.tickers)
     pages = _pages_text(group.pages)
 
-    story.append(Paragraph(escape(title), header_style))
-    story.append(
-        Paragraph(
-            f"Tickers: {escape(tickers)} &nbsp;&nbsp;|&nbsp;&nbsp; Page/s: {pages}",
-            meta_style,
+    def _emit_ticker_header() -> None:
+        story.append(Paragraph(escape(title), header_style))
+        story.append(
+            Paragraph(
+                f"Tickers: {escape(tickers)} &nbsp;&nbsp;|&nbsp;&nbsp; Page/s: {pages}",
+                meta_style,
+            )
         )
-    )
 
-    # PATCH: remove numbering entirely for SA-style groups (groups that contain per-article headers).
-    # Fund Families groups will keep existing behavior since they typically have no is_header items.
-    n = 1
+    _emit_ticker_header()
+
+    # Paragraphs
     company_label = f"{title} ({tickers})"
+
+    n = 1
+
+    first_article_seen = False
     for it in group.items:
         txt = (it.get("text") or "").strip()
         if not txt:
             continue
 
-        # Article headers: render in boxed style and do not score/number
+        # Article headers: start each article on a new page with the ticker header repeated.
         if it.get("is_header"):
-            story.append(Paragraph(escape(txt).replace("\n", "<br/>"), ArticleHeaderBox))
+            if first_article_seen:
+                story.append(PageBreak())
+                _emit_ticker_header()
+            first_article_seen = True
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(_format_article_header_html(txt), ArticleHeaderBox))
+            story.append(Spacer(1, 4))
             continue
 
         for chunk in _chunk_text(txt, max_words=140):
@@ -703,17 +743,17 @@ def _render_group_block_compact(
                 style = rating_styles.get(rating, num_style)
                 prefix = f"[{rating}] "
                 if has_article_headers:
-                    story.append(Paragraph(f"{prefix}{safe_chunk}", style))
+                    # Seeking Alpha: no numbering and hide rating prefix for cleaner skimmability.
+                    story.append(Paragraph(f"{safe_chunk}", style))
                 else:
                     story.append(Paragraph(f"{n}. {prefix}{safe_chunk}", style))
+                    n += 1
             else:
                 if has_article_headers:
                     story.append(Paragraph(f"{safe_chunk}", num_style))
                 else:
                     story.append(Paragraph(f"{n}. {safe_chunk}", num_style))
-
-            if not has_article_headers:
-                n += 1
+                    n += 1
 
     story.append(Spacer(1, 8))
 
@@ -728,6 +768,7 @@ def _render_group_block(
     ai_model: str = "gpt-4o-mini",
     ai_cache: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
+    """Dispatch between legacy table view and compact view."""
     if (format_style or "").lower() in {"table", "grid", "legacy_table"}:
         _render_group_block_table(story, group, name_map)
         return
