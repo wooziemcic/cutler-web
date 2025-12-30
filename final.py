@@ -625,9 +625,8 @@ class AnalysisArticle:
     title: str
     published: str
     url: str
-    # you already have these fields in your version, keep them if present
-    # summary_html: Optional[str] = None
-    # body_html: Optional[str] = None
+    author: str = ""
+    author_slug: str = ""
 
 
 def _call_sa(endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -653,11 +652,34 @@ def fetch_analysis_list(symbol: str, size: int = 5) -> List[AnalysisArticle]:
         published = attrs.get("publishOn", "")
         link = "https://seekingalpha.com" + item.get("links", {}).get("self", "")
 
+        # Author fields are inconsistently present; try attributes first, then relationships.
+        author = (
+            attrs.get("authorName")
+            or attrs.get("author")
+            or attrs.get("author_name")
+            or ""
+        )
+        author_slug = (
+            attrs.get("authorSlug")
+            or attrs.get("author_slug")
+            or ""
+        )
+        if not author_slug:
+            try:
+                rel_author = (item.get("relationships") or {}).get("author") or {}
+                rel_data = rel_author.get("data") or {}
+                if isinstance(rel_data, dict):
+                    author_slug = str(rel_data.get("id") or "") or author_slug
+            except Exception:
+                pass
+
         out.append(AnalysisArticle(
             id=art_id,
             title=title,
             published=published,
             url=link,
+            author=author,
+            author_slug=author_slug,
         ))
 
     return out
@@ -689,11 +711,25 @@ def fetch_analysis_details(article_id: str) -> Dict[str, Any]:
     )
     image_url = attrs.get("gettyImageUrl") or ""
 
+    author = (
+        attrs.get("authorName")
+        or attrs.get("author")
+        or attrs.get("author_name")
+        or ""
+    )
+    author_slug = (
+        attrs.get("authorSlug")
+        or attrs.get("author_slug")
+        or ""
+    )
+
     return {
         "title": attrs.get("title", ""),
         "body_html": body_html,
         "summary_html": summary_html,
         "image_url": image_url,
+        "author": author,
+        "author_slug": author_slug,
     }
 
 def fetch_sa_analysis_list(symbol: str, size: int = 10) -> list[dict]:
@@ -1257,20 +1293,35 @@ def draw_seeking_alpha_news_section() -> None:
 
     # Bodies (highlight must-read paragraphs)
     st.markdown("#### Full article bodies (cleaned)")
-    KEYWORDS = [
-        "strong buy", "buy", "sell", "hold",
-        "valuation", "p/e", "pe ratio", "eps", "revenue", "guidance",
+    # Must-read highlighting (heuristic, tuned to reduce false positives)
+    MUST_PHRASES = [
+        "strong buy", "strong sell", "buy rating", "sell rating", "hold rating",
+        "initiated", "downgrade", "upgrade", "price target", "target price",
+        "raised guidance", "cut guidance",
+    ]
+    SCORE_KEYWORDS = [
+        "valuation", "p/e", "pe ratio", "multiple", "eps", "earnings", "revenue", "guidance",
         "dividend", "free cash flow", "fcf", "margin", "risk", "catalyst",
-        "upside", "downside", "target price",
+        "upside", "downside", "bear case", "bull case",
+        "pipeline", "patent", "competition", "regulatory",
     ]
 
     def _must_read_para(p: str) -> bool:
-        pl = (p or "").lower()
+        pl = (p or "").lower().strip()
         if not pl:
             return False
+
+        # Always highlight if the paragraph explicitly references the ticker.
         if re.search(rf"\b{re.escape(ticker.lower())}\b", pl):
             return True
-        return any(k in pl for k in KEYWORDS)
+
+        # Hard triggers
+        if any(ph in pl for ph in MUST_PHRASES):
+            return True
+
+        # Soft scoring: require at least 2 "finance-relevant" terms to avoid highlighting generic prose.
+        score = sum(1 for k in SCORE_KEYWORDS if k in pl)
+        return score >= 2
 
     for i, a in enumerate(articles, start=1):
         title = a.get("title") or f"Article {i}"
@@ -1423,6 +1474,13 @@ def draw_seeking_alpha_news_section() -> None:
                                     details = {}
 
                                 body_raw, author_d, title_d = _extract_from_details(details)
+
+                                # pick up author/slug if available in details
+                                if isinstance(details, dict):
+                                    if details.get("author") and not r.get("author"):
+                                        r["author"] = details.get("author")
+                                    if details.get("author_slug") and not r.get("author_slug"):
+                                        r["author_slug"] = details.get("author_slug")
 
                                 if "<" in (body_raw or "") and ">" in (body_raw or ""):
                                     r["body_clean"] = clean_sa_html(body_raw)
