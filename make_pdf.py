@@ -358,6 +358,83 @@ def _hash_key(*parts: str) -> str:
         h.update(b"\x1f")
     return h.hexdigest()
 
+
+def _heuristic_score_paragraph(*, company_label: str, tickers: str, paragraph: str) -> Dict[str, Any]:
+    """Fast, local scoring (1-5) without OpenAI.
+
+    Heuristic goal: approximate 'what to read vs skip' for investment research.
+    Returns {rating:int, rationale:str}.
+    """
+    text = (paragraph or "").strip()
+    if not text:
+        return {"rating": 1, "rationale": "Empty."}
+
+    t = text.lower()
+
+    # Junk / widget / boilerplate detection
+    junk_markers = [
+        "seeking alpha premium", "subscription", "sign in", "click here",
+        "photo by", "via getty images", "inline_ad_placeholder",
+        "sa-widget", "ycharts", "table of contents", "related analysis",
+    ]
+    if any(j in t for j in junk_markers):
+        return {"rating": 1, "rationale": "Boilerplate/widget content."}
+
+    # Count signal terms
+    strong_terms = [
+        "valuation", "pe ", "p/e", "ev/ebitda", "multiple", "discount", "intrinsic",
+        "guidance", "raised guidance", "lowered guidance", "outlook",
+        "free cash flow", "fcf", "cash flow", "operating cash",
+        "margin", "gross margin", "operating margin", "ebit", "ebitda",
+        "earnings", "eps", "revenue", "sales", "q1", "q2", "q3", "q4",
+        "catalyst", "catalysts", "upside", "downside",
+        "risk", "risks", "bear case", "bull case",
+        "dividend", "yield", "buyback", "repurchase",
+        "debt", "leverage", "balance sheet", "net debt",
+        "patent", "pipeline", "fda", "trial", "approval",
+        "competition", "competitive", "market share",
+    ]
+    medium_terms = [
+        "management", "strategy", "execution", "segment", "portfolio",
+        "guiding", "expected", "estimate", "forecast",
+        "growth", "decline", "headwind", "tailwind", "demand",
+        "pricing", "volume", "mix",
+    ]
+
+    score = 0
+    score += sum(3 for w in strong_terms if w in t)
+    score += sum(1 for w in medium_terms if w in t)
+
+    # Ticker / company mention boost
+    tick_list = [x.strip().lower() for x in (tickers or "").split(",") if x.strip()]
+    if any(f" {tk} " in f" {t} " for tk in tick_list):
+        score += 4
+    if company_label and company_label.lower() in t:
+        score += 2
+
+    # Numeric density boost (often financial substance)
+    if re.search(r"\b\d{1,3}(?:\.\d+)?%\b", t) or re.search(r"\$\s?\d", t) or re.search(r"\b\d{4}\b", t):
+        score += 2
+
+    # Length normalization
+    if len(text) < 120:
+        score -= 1
+
+    # Map score to 1-5
+    if score >= 14:
+        rating = 5
+    elif score >= 9:
+        rating = 4
+    elif score >= 5:
+        rating = 3
+    elif score >= 2:
+        rating = 2
+    else:
+        rating = 1
+
+    return {"rating": rating, "rationale": f"Heuristic score={score}."}
+
+
 def _openai_score_paragraph(
     *,
     company_label: str,
@@ -370,6 +447,12 @@ def _openai_score_paragraph(
     key = _hash_key(model, company_label, tickers, paragraph)
     if key in cache:
         return cache[key]
+
+    # Heuristic mode: avoid OpenAI calls entirely
+    if (model or '').lower().startswith('heuristic'):
+        out = _heuristic_score_paragraph(company_label=company_label, tickers=tickers, paragraph=paragraph)
+        cache[key] = out
+        return out
 
     api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_APIKEY")
     if not api_key:
