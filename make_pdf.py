@@ -103,6 +103,15 @@ ArticleHeader = ParagraphStyle(
     spaceAfter=4,
 )
 
+# NEW (minimal): article header boxed style (used only when is_header=True)
+ArticleHeaderBox = ParagraphStyle(
+    "ArticleHeaderBox",
+    parent=ArticleHeader,
+    backColor=colors.HexColor("#F2EAF3"),  # light purple tint
+    borderPadding=(4, 6, 4, 6),
+    spaceBefore=6,
+    spaceAfter=6,
+)
 
 BodyLegacy = ParagraphStyle(
     "BodyLegacy",
@@ -386,13 +395,6 @@ def _humanize_source_name(source_pdf_name: str) -> str:
 
 # ---------- AI relevance scoring (optional) ----------
 
-# Rating scale:
-# 5 = directly about the company (thesis, actions, catalysts, performance, risks, outlook)
-# 4 = meaningful discussion but less direct/central
-# 3 = moderate relevance (some context, light commentary)
-# 2 = weak relevance (passing mention, minor context)
-# 1 = essentially irrelevant (lists/holdings/indices/tickers with no substance)
-
 _RATING_COLORS = {
     5: colors.HexColor("#DFF3E3"),  # green-ish
     4: colors.HexColor("#EAF7ED"),
@@ -410,32 +412,24 @@ def _hash_key(*parts: str) -> str:
 
 
 def _heuristic_score_paragraph(paragraph: str) -> Dict[str, Any]:
-    """Fast local scoring used when ai_model == 'heuristic'.
-    Returns {rating:int (1-5), rationale:str}.
-    5 = must read (green), 3 = neutral, 1 = skip (red).
-    """
     p = (paragraph or "").strip().lower()
     if not p:
         return {"rating": 3, "rationale": "empty"}
 
-    # Strong signals: numbers, guidance, valuation, catalysts
     score = 3
     rationale_bits: List[str] = []
     if any(k in p for k in ["guidance", "raised", "lowered", "outlook", "q", "fy", "eps", "revenue", "margin", "free cash", "fcf", "dividend", "buyback", "valuation", "p/e", "multiple", "catalyst", "pipeline", "fda", "approval", "merger", "acquisition", "deal", "tariff", "regulatory"]):
         score = max(score, 4)
         rationale_bits.append("fundamentals/catalyst")
 
-    # Numeric density tends to be actionable
     if re.search(r"\b\d{1,3}(?:\.\d+)?%\b", p) or re.search(r"\$\s*\d", p) or re.search(r"\b\d{1,3}(?:\.\d+)?x\b", p):
         score = max(score, 4)
         rationale_bits.append("numbers")
 
-    # Soft de-prioritizers
     if any(k in p for k in ["disclaimer", "past performance", "seeking alpha", "subscription", "author's note", "i am/we are long", "not investment advice"]):
         score = min(score, 2)
         rationale_bits.append("boilerplate")
 
-    # Very short fragments rarely help
     if len(p) < 80 and score >= 3:
         score = 2
         rationale_bits.append("short")
@@ -450,7 +444,6 @@ def _score_paragraph(
     model: str,
     cache: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Select scoring method based on model name."""
     if (model or "").strip().lower() == "heuristic":
         return _heuristic_score_paragraph(paragraph)
     return _openai_score_paragraph(
@@ -460,6 +453,7 @@ def _score_paragraph(
         model=model,
         cache=cache,
     )
+
 def _openai_score_paragraph(
     *,
     company_label: str,
@@ -468,7 +462,6 @@ def _openai_score_paragraph(
     model: str,
     cache: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Return dict: {rating:int, rationale:str}. Uses cache keyed by content hash."""
     key = _hash_key(model, company_label, tickers, paragraph)
     if key in cache:
         return cache[key]
@@ -480,10 +473,7 @@ def _openai_score_paragraph(
         return out
 
     try:
-        # Legacy OpenAI Python SDK style (matches your existing environment)
         import openai  # type: ignore
-
-        # Ensure key is set for legacy SDK
         openai.api_key = api_key
 
         sys_prompt = (
@@ -517,7 +507,6 @@ Rules:
         )
 
         content = (resp["choices"][0]["message"]["content"] or "").strip()
-        # best-effort JSON parse (model should return JSON)
         parsed = json.loads(content)
         rating = int(parsed.get("rating", 3))
         rating = 1 if rating < 1 else 5 if rating > 5 else rating
@@ -538,11 +527,6 @@ def _render_group_block_table(
     group: Group,
     name_map: Dict[str, str],
 ) -> None:
-    """
-    Legacy renderer: two-column table.
-    Left: combined company name(s) + tickers.
-    Right: Pages + paragraphs.
-    """
     display_names = [name_map.get(t, t) for t in group.tickers]
     left_title = ", ".join(display_names)
     left_tickers = ", ".join(group.tickers)
@@ -564,10 +548,11 @@ def _render_group_block_table(
         if not txt:
             continue
 
-        # Article headers: render as a distinct line and do not score/number
+        # Article headers: render as a boxed header and do not score/number
         if it.get("is_header"):
-            story.append(Paragraph(escape(txt).replace("\n", "<br/>") , ArticleHeader))
+            story.append(Paragraph(escape(txt).replace("\n", "<br/>"), ArticleHeaderBox))
             continue
+
         ipages = it.get("pages") or []
         if ipages and set(ipages) != set(group.pages):
             rows.append(["", Paragraph(f"Page/s: {', '.join(map(str, ipages))}", PagesLegacy)])
@@ -576,7 +561,7 @@ def _render_group_block_table(
 
     table = Table(
         rows,
-        colWidths=[2.3 * 72, None],  # 2.3" left, rest right
+        colWidths=[2.3 * 72, None],
         repeatRows=1,
         style=TableStyle(
             [
@@ -608,23 +593,26 @@ def _render_group_block_compact(
 ) -> None:
     """
     Compact renderer (default): full-width blocks with a single header line,
-    then numbered paragraphs below. This significantly reduces page count
-    versus nested tables.
+    then paragraphs below.
     """
 
+    # Detect Seeking Alpha style: any per-article headers exist in this group.
+    has_article_headers = any(bool(it.get("is_header")) for it in (group.items or []))
+
     # Styles created lazily so we don't mutate global stylesheet at import time
+    # PATCH: make ticker header box larger only when SA-style headers exist.
     header_style = ParagraphStyle(
         "GroupHeaderCompact",
         parent=_base["Heading3"],
-        fontSize=10.5,
-        leading=13,
+        fontSize=(12.5 if has_article_headers else 10.5),
+        leading=(15 if has_article_headers else 13),
         textColor=colors.white,
         backColor=colors.HexColor("#4b2142"),
         leftIndent=0,
         rightIndent=0,
         spaceBefore=6,
         spaceAfter=6,
-        borderPadding=(6, 8, 6, 8),
+        borderPadding=((8, 10, 8, 10) if has_article_headers else (6, 8, 6, 8)),
     )
 
     meta_style = ParagraphStyle(
@@ -665,7 +653,6 @@ def _render_group_block_compact(
                 spaceAfter=6,
             )
 
-
     # Group header/meta
     display_names = [name_map.get(t, t) for t in group.tickers]
     title = ", ".join(display_names)
@@ -680,7 +667,8 @@ def _render_group_block_compact(
         )
     )
 
-    # Numbered paragraphs
+    # PATCH: remove numbering entirely for SA-style groups (groups that contain per-article headers).
+    # Fund Families groups will keep existing behavior since they typically have no is_header items.
     n = 1
     company_label = f"{title} ({tickers})"
     for it in group.items:
@@ -688,16 +676,15 @@ def _render_group_block_compact(
         if not txt:
             continue
 
-        # Article headers: render as a distinct line and do not score/number
+        # Article headers: render in boxed style and do not score/number
         if it.get("is_header"):
-            story.append(Paragraph(escape(txt).replace("\n", "<br/>") , ArticleHeader))
+            story.append(Paragraph(escape(txt).replace("\n", "<br/>"), ArticleHeaderBox))
             continue
 
         for chunk in _chunk_text(txt, max_words=140):
             safe_chunk = escape(chunk)
 
             rating: Optional[int] = None
-            rationale = ""
             if ai_score:
                 scored = _score_paragraph(
                     company_label=company_label,
@@ -711,19 +698,24 @@ def _render_group_block_compact(
                 except Exception:
                     rating = 3
                 rating = 1 if rating < 1 else 5 if rating > 5 else rating
-                rationale = str(scored.get("rationale", "") or "").strip()
 
             if rating is not None:
                 style = rating_styles.get(rating, num_style)
                 prefix = f"[{rating}] "
-                story.append(Paragraph(f"{n}. {prefix}{safe_chunk}", style))
+                if has_article_headers:
+                    story.append(Paragraph(f"{prefix}{safe_chunk}", style))
+                else:
+                    story.append(Paragraph(f"{n}. {prefix}{safe_chunk}", style))
             else:
-                story.append(Paragraph(f"{n}. {safe_chunk}", num_style))
+                if has_article_headers:
+                    story.append(Paragraph(f"{safe_chunk}", num_style))
+                else:
+                    story.append(Paragraph(f"{n}. {safe_chunk}", num_style))
 
-            n += 1
+            if not has_article_headers:
+                n += 1
 
     story.append(Spacer(1, 8))
-
 
 
 def _render_group_block(
@@ -736,7 +728,6 @@ def _render_group_block(
     ai_model: str = "gpt-4o-mini",
     ai_cache: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
-    """Dispatch between legacy table view and compact view."""
     if (format_style or "").lower() in {"table", "grid", "legacy_table"}:
         _render_group_block_table(story, group, name_map)
         return
@@ -751,9 +742,7 @@ def _render_group_block(
     )
 
 
-
 # ---------- Main builder ----------
-
 
 def build_pdf(
     excerpts_json_path: str = "excerpts_clean.json",
@@ -808,7 +797,6 @@ def build_pdf(
     now = datetime.now(ZoneInfo("America/New_York"))
 
     # --- Cover / header ---
-    # (Compact by default to reduce page count. Use format_style='table' for the old look.)
     story.append(Spacer(1, 0.25 * 72))
     story.append(Paragraph("Cutler Capital Excerption", CoverMain))
     story.append(Spacer(1, 0.1 * 72))
@@ -832,7 +820,15 @@ def build_pdf(
 
     # --- Excerpt groups ---
     for grp in groups:
-        _render_group_block(story, grp, name_map, format_style=format_style, ai_score=ai_score, ai_model=ai_model, ai_cache=ai_cache)
+        _render_group_block(
+            story,
+            grp,
+            name_map,
+            format_style=format_style,
+            ai_score=ai_score,
+            ai_model=ai_model,
+            ai_cache=ai_cache,
+        )
 
     doc.build(story)
     print(f"PDF created: {output_pdf_path}")
