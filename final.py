@@ -474,6 +474,7 @@ def run_excerpt_and_build(
 
         out_pdf = out_dir / f"Excerpted_{_safe(pdf_path.stem)}.pdf"
 
+        # Build compiled excerpt PDF (Fund Families style)
         make_pdf.build_pdf(
             excerpts_json_path=str(dst_json),
             output_pdf_path=str(out_pdf),
@@ -481,11 +482,10 @@ def run_excerpt_and_build(
             source_pdf_name=source_pdf_name or pdf_path.name,
             format_style="legacy",
             letter_date=letter_date,
-            source_url=source_url, 
-        
-    ai_score=bool(st.session_state.get("ai_score_enabled", False)),
-    ai_model=str(st.session_state.get("ai_score_model", "gpt-4o-mini") or "gpt-4o-mini"),
-)
+            source_url=source_url,
+            ai_score=bool(st.session_state.get("ai_score_enabled", False)),
+            ai_model=str(st.session_state.get("ai_score_model", "gpt-4o-mini") or "gpt-4o-mini"),
+        )
 
         return out_pdf if out_pdf.exists() else None
 
@@ -1362,6 +1362,25 @@ def draw_seeking_alpha_news_section() -> None:
         return buf.getvalue()
 
     # Build once, persist bytes + filename
+    with st.expander("PDF build settings (performance)", expanded=False):
+        st.caption("Optional limits. Set high values to include full article bodies; lower values can speed up PDF builds on Streamlit Cloud.")
+        st.number_input(
+            "Max body paragraphs per ticker (export)",
+            min_value=5,
+            max_value=5000,
+            value=int(st.session_state.get("sa_pdf_max_paras_per_ticker", 5000)),
+            step=5,
+            key="sa_pdf_max_paras_per_ticker",
+        )
+        st.number_input(
+            "Max body paragraphs per article (export)",
+            min_value=2,
+            max_value=500,
+            value=int(st.session_state.get("sa_pdf_max_paras_per_article", 500)),
+            step=1,
+            key="sa_pdf_max_paras_per_article",
+        )
+
     if st.button("Build downloadable Seeking Alpha PDF", key=f"sa_build_pdf_{ck_current}", use_container_width=True):
         with st.spinner("Building PDF (Fund Families style)..."):
             try:
@@ -1371,8 +1390,19 @@ def draw_seeking_alpha_news_section() -> None:
                 tickers_for_pdf = list(selected_tickers) if selected_tickers else [ticker]
                 combined: dict[str, list[dict]] = {}
 
+                # Performance guardrails: scoring every paragraph across 10 tickers can be slow.
+                # We cap paragraphs exported per ticker to keep build time reasonable on Streamlit Cloud.
+                max_paras_per_ticker = int(st.session_state.get("sa_pdf_max_paras_per_ticker", 5000))
+                max_paras_per_article = int(st.session_state.get("sa_pdf_max_paras_per_article", 500))
+
+                progress = st.progress(0.0)
+                status = st.empty()
+
+
                 # Ensure we have cached results for each ticker, even if user didn't click through Next/Prev
-                for sym in tickers_for_pdf:
+                for i_sym, sym in enumerate(tickers_for_pdf):
+                    status.info(f"Preparing {sym} ({i_sym+1}/{len(tickers_for_pdf)}) for PDF…")
+                    progress.progress((i_sym)/max(1,len(tickers_for_pdf)))
                     ck_sym = _cache_key(sym, max_articles, model, include_ai_digest)
                     if ck_sym not in cache:
                         try:
@@ -1439,13 +1469,31 @@ def draw_seeking_alpha_news_section() -> None:
 
                         # Split into paragraphs; filter tiny fragments
                         paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+                        # Limit paragraphs per article to avoid huge OpenAI scoring cost.
+                        kept_in_article = 0
                         for p in paras:
+                            if kept_in_article >= max_paras_per_article:
+                                break
                             if len(p) < 60:
                                 continue
                             items.append({"text": p, "pages": []})
+                            kept_in_article += 1
 
                     if items:
-                        combined[sym] = items
+                        # Keep only up to max_paras_per_ticker body paragraphs per ticker (headers excluded).
+                        trimmed: list[dict] = []
+                        body_count = 0
+                        for it in items:
+                            txt = (it.get("text") or "")
+                            # treat short lines / headers as non-body
+                            if txt.startswith("Source:") or ("\nSource:" in txt) or len(txt) < 120:
+                                trimmed.append(it)
+                                continue
+                            if body_count >= max_paras_per_ticker:
+                                break
+                            trimmed.append(it)
+                            body_count += 1
+                        combined[sym] = trimmed
 
                 if not combined:
                     raise RuntimeError("No article bodies available to export for the selected tickers.")
@@ -1460,6 +1508,8 @@ def draw_seeking_alpha_news_section() -> None:
                     excerpts_path.write_text(_json.dumps(combined, indent=2), encoding="utf-8")
 
                     out_pdf = td_path / "sa_compiled.pdf"
+                    progress.progress(0.92)
+                    status.info("Rendering compiled PDF (Fund Families style)…")
                     make_pdf.build_pdf(
                         excerpts_json_path=str(excerpts_path),
                         output_pdf_path=str(out_pdf),
@@ -1472,8 +1522,12 @@ def draw_seeking_alpha_news_section() -> None:
                     st.session_state["sa_pdf_bytes"] = out_pdf.read_bytes()
                     st.session_state["sa_pdf_name"] = pdf_name
 
+                progress.progress(1.0)
+                status.empty()
                 st.success("Seeking Alpha PDF built successfully.")
             except Exception as e:
+                progress.empty()
+                status.empty()
                 st.session_state["sa_pdf_bytes"] = None
                 st.session_state["sa_pdf_name"] = None
                 st.error(f"Seeking Alpha PDF build failed: {e}")
