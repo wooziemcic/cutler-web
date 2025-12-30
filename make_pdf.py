@@ -164,6 +164,8 @@ class RawItem:
     text: str
     pages: List[int]
     order_hint: Tuple[int, int]  # (min_page_or_big, seq)
+    # NEW: carry is_header through the pipeline so per-article headers render in the PDF.
+    is_header: bool = False
 
 
 def _flatten_raw_items(data: Dict[str, Any]) -> List[RawItem]:
@@ -185,7 +187,15 @@ def _flatten_raw_items(data: Dict[str, Any]) -> List[RawItem]:
                     continue
                 pages = _normalize_pages(it.get("pages"))
                 order = (min(pages) if pages else 9999, seq)
-                items.append(RawItem(ticker=tkr, text=txt, pages=pages, order_hint=order))
+                items.append(
+                    RawItem(
+                        ticker=tkr,
+                        text=txt,
+                        pages=pages,
+                        order_hint=order,
+                        is_header=bool(it.get("is_header")),
+                    )
+                )
                 seq += 1
         return items
 
@@ -200,7 +210,15 @@ def _flatten_raw_items(data: Dict[str, Any]) -> List[RawItem]:
                 continue
             pages = _normalize_pages(it.get("pages"))
             order = (min(pages) if pages else 9999, seq)
-            items.append(RawItem(ticker=tkr_s, text=txt, pages=pages, order_hint=order))
+            items.append(
+                RawItem(
+                    ticker=tkr_s,
+                    text=txt,
+                    pages=pages,
+                    order_hint=order,
+                    is_header=bool(it.get("is_header")),
+                )
+            )
             seq += 1
 
     return items
@@ -212,6 +230,8 @@ class ParagraphAgg:
     pages: Set[int]
     tickers: Set[str]
     order_hint: Tuple[int, int]
+    # NEW: preserve header markers through aggregation/grouping.
+    is_header: bool = False
 
 
 @dataclass
@@ -233,12 +253,27 @@ def _aggregate_paragraphs(raw_items: List[RawItem]) -> Dict[str, ParagraphAgg]:
         txt = it.text.strip()
         if not txt:
             continue
+
+        # NEW: headers must not be de-duplicated or merged across tickers.
+        # Give each header its own unique aggregation key so it survives grouping.
+        if it.is_header:
+            k = f"__hdr__{it.ticker}__{it.order_hint[1]}"
+            agg[k] = ParagraphAgg(
+                text=txt,
+                pages=set(it.pages),
+                tickers={it.ticker},
+                order_hint=it.order_hint,
+                is_header=True,
+            )
+            continue
+
         if txt not in agg:
             agg[txt] = ParagraphAgg(
                 text=txt,
                 pages=set(it.pages),
                 tickers={it.ticker},
                 order_hint=it.order_hint,
+                is_header=False,
             )
         else:
             a = agg[txt]
@@ -262,6 +297,10 @@ def _groups_from_agg(agg: Dict[str, ParagraphAgg]) -> List[Group]:
             "pages": sorted(para.pages),
             "order_hint": para.order_hint,
         }
+        # NEW: carry header marker into render payload.
+        if para.is_header:
+            item["is_header"] = True
+
         by_tickerset.setdefault(key, []).append(item)
 
     groups: List[Group] = []
