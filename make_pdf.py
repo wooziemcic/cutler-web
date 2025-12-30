@@ -93,6 +93,17 @@ PagesLegacy = ParagraphStyle(
     spaceAfter=2,
 )
 
+ArticleHeader = ParagraphStyle(
+    "ArticleHeader",
+    parent=_base["Heading4"],
+    fontSize=9.5,
+    leading=12,
+    textColor=colors.HexColor("#4b2142"),
+    spaceBefore=6,
+    spaceAfter=4,
+)
+
+
 BodyLegacy = ParagraphStyle(
     "BodyLegacy",
     parent=_base["BodyText"],
@@ -359,82 +370,57 @@ def _hash_key(*parts: str) -> str:
     return h.hexdigest()
 
 
-def _heuristic_score_paragraph(*, company_label: str, tickers: str, paragraph: str) -> Dict[str, Any]:
-    """Fast, local scoring (1-5) without OpenAI.
-
-    Heuristic goal: approximate 'what to read vs skip' for investment research.
-    Returns {rating:int, rationale:str}.
+def _heuristic_score_paragraph(paragraph: str) -> Dict[str, Any]:
+    """Fast local scoring used when ai_model == 'heuristic'.
+    Returns {rating:int (1-5), rationale:str}.
+    5 = must read (green), 3 = neutral, 1 = skip (red).
     """
-    text = (paragraph or "").strip()
-    if not text:
-        return {"rating": 1, "rationale": "Empty."}
+    p = (paragraph or "").strip().lower()
+    if not p:
+        return {"rating": 3, "rationale": "empty"}
 
-    t = text.lower()
+    # Strong signals: numbers, guidance, valuation, catalysts
+    score = 3
+    rationale_bits: List[str] = []
+    if any(k in p for k in ["guidance", "raised", "lowered", "outlook", "q", "fy", "eps", "revenue", "margin", "free cash", "fcf", "dividend", "buyback", "valuation", "p/e", "multiple", "catalyst", "pipeline", "fda", "approval", "merger", "acquisition", "deal", "tariff", "regulatory"]):
+        score = max(score, 4)
+        rationale_bits.append("fundamentals/catalyst")
 
-    # Junk / widget / boilerplate detection
-    junk_markers = [
-        "seeking alpha premium", "subscription", "sign in", "click here",
-        "photo by", "via getty images", "inline_ad_placeholder",
-        "sa-widget", "ycharts", "table of contents", "related analysis",
-    ]
-    if any(j in t for j in junk_markers):
-        return {"rating": 1, "rationale": "Boilerplate/widget content."}
+    # Numeric density tends to be actionable
+    if re.search(r"\b\d{1,3}(?:\.\d+)?%\b", p) or re.search(r"\$\s*\d", p) or re.search(r"\b\d{1,3}(?:\.\d+)?x\b", p):
+        score = max(score, 4)
+        rationale_bits.append("numbers")
 
-    # Count signal terms
-    strong_terms = [
-        "valuation", "pe ", "p/e", "ev/ebitda", "multiple", "discount", "intrinsic",
-        "guidance", "raised guidance", "lowered guidance", "outlook",
-        "free cash flow", "fcf", "cash flow", "operating cash",
-        "margin", "gross margin", "operating margin", "ebit", "ebitda",
-        "earnings", "eps", "revenue", "sales", "q1", "q2", "q3", "q4",
-        "catalyst", "catalysts", "upside", "downside",
-        "risk", "risks", "bear case", "bull case",
-        "dividend", "yield", "buyback", "repurchase",
-        "debt", "leverage", "balance sheet", "net debt",
-        "patent", "pipeline", "fda", "trial", "approval",
-        "competition", "competitive", "market share",
-    ]
-    medium_terms = [
-        "management", "strategy", "execution", "segment", "portfolio",
-        "guiding", "expected", "estimate", "forecast",
-        "growth", "decline", "headwind", "tailwind", "demand",
-        "pricing", "volume", "mix",
-    ]
+    # Soft de-prioritizers
+    if any(k in p for k in ["disclaimer", "past performance", "seeking alpha", "subscription", "author's note", "i am/we are long", "not investment advice"]):
+        score = min(score, 2)
+        rationale_bits.append("boilerplate")
 
-    score = 0
-    score += sum(3 for w in strong_terms if w in t)
-    score += sum(1 for w in medium_terms if w in t)
+    # Very short fragments rarely help
+    if len(p) < 80 and score >= 3:
+        score = 2
+        rationale_bits.append("short")
 
-    # Ticker / company mention boost
-    tick_list = [x.strip().lower() for x in (tickers or "").split(",") if x.strip()]
-    if any(f" {tk} " in f" {t} " for tk in tick_list):
-        score += 4
-    if company_label and company_label.lower() in t:
-        score += 2
+    return {"rating": int(score), "rationale": ", ".join(rationale_bits) or "heuristic"}
 
-    # Numeric density boost (often financial substance)
-    if re.search(r"\b\d{1,3}(?:\.\d+)?%\b", t) or re.search(r"\$\s?\d", t) or re.search(r"\b\d{4}\b", t):
-        score += 2
-
-    # Length normalization
-    if len(text) < 120:
-        score -= 1
-
-    # Map score to 1-5
-    if score >= 14:
-        rating = 5
-    elif score >= 9:
-        rating = 4
-    elif score >= 5:
-        rating = 3
-    elif score >= 2:
-        rating = 2
-    else:
-        rating = 1
-
-    return {"rating": rating, "rationale": f"Heuristic score={score}."}
-
-
+def _score_paragraph(
+    *,
+    company_label: str,
+    tickers: str,
+    paragraph: str,
+    model: str,
+    cache: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Select scoring method based on model name."""
+    if (model or "").strip().lower() == "heuristic":
+        return _heuristic_score_paragraph(paragraph)
+    return _openai_score_paragraph(
+        company_label=company_label,
+        tickers=tickers,
+        paragraph=paragraph,
+        model=model,
+        cache=cache,
+    )
 def _openai_score_paragraph(
     *,
     company_label: str,
@@ -447,12 +433,6 @@ def _openai_score_paragraph(
     key = _hash_key(model, company_label, tickers, paragraph)
     if key in cache:
         return cache[key]
-
-    # Heuristic mode: avoid OpenAI calls entirely
-    if (model or '').lower().startswith('heuristic'):
-        out = _heuristic_score_paragraph(company_label=company_label, tickers=tickers, paragraph=paragraph)
-        cache[key] = out
-        return out
 
     api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_APIKEY")
     if not api_key:
@@ -543,6 +523,11 @@ def _render_group_block_table(
     for it in group.items:
         txt = (it.get("text") or "").strip()
         if not txt:
+            continue
+
+        # Article headers: render as a distinct line and do not score/number
+        if it.get("is_header"):
+            story.append(Paragraph(escape(txt).replace("\n", "<br/>") , ArticleHeader))
             continue
         ipages = it.get("pages") or []
         if ipages and set(ipages) != set(group.pages):
@@ -641,6 +626,7 @@ def _render_group_block_compact(
                 spaceAfter=6,
             )
 
+
     # Group header/meta
     display_names = [name_map.get(t, t) for t in group.tickers]
     title = ", ".join(display_names)
@@ -663,13 +649,18 @@ def _render_group_block_compact(
         if not txt:
             continue
 
+        # Article headers: render as a distinct line and do not score/number
+        if it.get("is_header"):
+            story.append(Paragraph(escape(txt).replace("\n", "<br/>") , ArticleHeader))
+            continue
+
         for chunk in _chunk_text(txt, max_words=140):
             safe_chunk = escape(chunk)
 
             rating: Optional[int] = None
             rationale = ""
             if ai_score:
-                scored = _openai_score_paragraph(
+                scored = _score_paragraph(
                     company_label=company_label,
                     tickers=tickers,
                     paragraph=chunk,
