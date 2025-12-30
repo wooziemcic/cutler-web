@@ -22,6 +22,7 @@ import shutil
 import traceback
 import json
 import hashlib
+from zoneinfo import ZoneInfo
 import openai
 from dataclasses import dataclass
 from io import BytesIO
@@ -42,7 +43,7 @@ from podcasts_config import PODCASTS
 from tickers import tickers
 import math
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 
 # pypdf compat
 try:
@@ -381,9 +382,42 @@ def _search_by_fund(page, keyword: str, retries: int = 2) -> None:
             # Out of retries: re-raise so caller logs the error for this fund only
             raise
 
+
+
+def _mf_recent_start_date() -> date:
+    """Fund Families: only keep letters from the last 2 calendar days (incl. today).
+    If today is Monday, include Fri/Sat/Sun/Mon (last 4 days incl. today).
+    """
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    return today - timedelta(days=3) if today.weekday() == 0 else today - timedelta(days=1)
+
+def _parse_letter_date_to_date(s: str) -> Optional[date]:
+    """Best-effort parsing for letter_date strings coming from the BSD table."""
+    if not s:
+        return None
+    raw = s.strip()
+    # common formats observed across fund letters / tables
+    fmts = (
+        "%m/%d/%Y",
+        "%m/%d/%y",
+        "%Y-%m-%d",
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%d-%b-%Y",
+        "%d-%B-%Y",
+    )
+    for fmt in fmts:
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except Exception:
+            continue
+    return None
+
 def _parse_rows(page, quarter: str) -> List[Hit]:
     rows = page.locator(TABLE_ROW)
     hits: List[Hit] = []
+    recent_start = _mf_recent_start_date()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
     for i in range(rows.count()):
         row = rows.nth(i)
         try:
@@ -391,6 +425,10 @@ def _parse_rows(page, quarter: str) -> List[Hit]:
             if q != quarter:
                 continue
             letter_date = row.locator("td").nth(COLMAP["letter_date"]-1).inner_text().strip()
+            ld = _parse_letter_date_to_date(letter_date)
+            if ld and ld < recent_start:
+                continue
+
             fund_cell = row.locator("td").nth(COLMAP["fund_name"]-1)
             link = fund_cell.locator("a").first
             fund_name = (link.inner_text() or '').strip()
