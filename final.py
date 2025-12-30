@@ -1517,7 +1517,7 @@ def draw_seeking_alpha_news_section() -> None:
                         source_pdf_name=pdf_name,
                         format_style="compact",
                         ai_score=True,
-                        ai_model=model,
+                        ai_model="heuristic",
                     )
                     st.session_state["sa_pdf_bytes"] = out_pdf.read_bytes()
                     st.session_state["sa_pdf_name"] = pdf_name
