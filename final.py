@@ -1523,7 +1523,7 @@ def draw_seeking_alpha_news_section() -> None:
                             header = f"{header}\nSource: {url}" if header else f"Source: {url}"
 
                         if header:
-                            items.append({"text": header, "pages": []})
+                            items.append({"text": header, "pages": [], "is_header": True})
 
                         # Split into paragraphs; filter tiny fragments
                         paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
