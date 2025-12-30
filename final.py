@@ -1038,6 +1038,42 @@ def draw_seeking_alpha_news_section() -> None:
                 if v:
                     return str(v)
         return ""
+    
+    def _sa_article_as_dict(a) -> dict:
+        """
+        Normalize an SA article row (dict or AnalysisArticle object) into a dict
+        that downstream UI + PDF code can use consistently.
+        """
+        if a is None:
+            return {}
+
+        # Already dict
+        if isinstance(a, dict):
+            d = dict(a)  # shallow copy
+            # ensure standard keys exist
+            if "id" not in d:
+                d["id"] = _sa_article_id(a)
+            d.setdefault("title", d.get("headline") or d.get("name") or "")
+            d.setdefault("url", d.get("link") or d.get("permalink") or "")
+            d.setdefault("published_at", d.get("published") or d.get("publishOn") or d.get("date") or "")
+            d.setdefault("author", d.get("author_name") or d.get("author") or d.get("authorName") or "")
+            d.setdefault("author_slug", d.get("author_slug") or d.get("authorSlug") or "")
+            return d
+
+        # Object / dataclass (patched sa_analysis_api.AnalysisArticle)
+        aid = _sa_article_id(a)
+        if not aid:
+            return {}
+
+        return {
+            "id": aid,
+            "title": getattr(a, "title", "") or "",
+            "url": getattr(a, "url", "") or "",
+            "published_at": getattr(a, "published", "") or getattr(a, "published_at", "") or "",
+            # author fields from patched sa_analysis_api.py
+            "author": getattr(a, "author_name", "") or getattr(a, "author", "") or "",
+            "author_slug": getattr(a, "author_slug", "") or "",
+        }
 
     def _sa_article_row(a) -> dict:
         """Normalize a list row into a dict with stable keys."""
@@ -1189,7 +1225,7 @@ def draw_seeking_alpha_news_section() -> None:
     def _fetch_for_symbol(sym: str) -> tuple[list[dict], str | None]:
         # list items
         raw_list = sa_api.fetch_analysis_list(sym, size=max_articles) or []
-        rows = [_sa_article_row(a) for a in raw_list]
+        rows = [_sa_article_as_dict(a) for a in raw_list]
         rows = [r for r in rows if r.get("id")]
         if not rows:
             return [], None
@@ -1207,11 +1243,10 @@ def draw_seeking_alpha_news_section() -> None:
                     r["body_clean"] = (body_raw or "").strip()
 
                 # author/title backfill
-                if author_d and not r.get("author"):
-                    r["author"] = author_d
+                if not r.get("author"):
+                    r["author"] = details.get("author_name") or details.get("author") or details.get("authorName") or ""
                 if title_d and not r.get("title"):
                     r["title"] = title_d
-
                 # url/published backfill if present
                 if isinstance(details, dict):
                     r["url"] = r.get("url") or details.get("url") or details.get("link") or r.get("url") or ""
@@ -1326,13 +1361,15 @@ def draw_seeking_alpha_news_section() -> None:
     for i, a in enumerate(articles, start=1):
         title = a.get("title") or f"Article {i}"
         url = a.get("url") or a.get("link") or ""
-        author = a.get("author") or a.get("author_name") or ""
         body = (a.get("body_clean") or a.get("body") or "").strip()
-        with st.expander(f"{i}. {title}" + (f" — {author}" if author else ""), expanded=False):
+        # Normalize/choose author field defensively
+        author = (a.get("author") or a.get("author_name") or a.get("authorName") or "").strip()
+
+        exp_label = f"{i}. {title}" + (f" — {author}" if author else "")
+        with st.expander(exp_label, expanded=False):
             if url:
                 st.markdown(f"Source: {url}")
             if body:
-                # split into paragraphs and highlight must-read
                 paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
                 for p in paras:
                     if _must_read_para(p):
@@ -1341,7 +1378,10 @@ def draw_seeking_alpha_news_section() -> None:
                             unsafe_allow_html=True,
                         )
                     else:
-                        st.markdown(f"""<div style="padding:6px 2px;margin:2px 0;">{p}</div>""", unsafe_allow_html=True)
+                        st.markdown(
+                            f"""<div style="padding:6px 2px;margin:2px 0;">{p}</div>""",
+                            unsafe_allow_html=True,
+                        )
             else:
                 st.caption("No body returned for this article.")
 
