@@ -107,7 +107,7 @@ ArticleHeader = ParagraphStyle(
 ArticleHeaderBox = ParagraphStyle(
     "ArticleHeaderBox",
     parent=ArticleHeader,
-    backColor=colors.HexColor("#F2EAF3"),
+    backColor=colors.HexColor("#F2EAF3"),  # light purple tint
     borderPadding=(4, 6, 4, 6),
     spaceBefore=6,
     spaceAfter=6,
@@ -165,195 +165,6 @@ def _normalize_pages(raw) -> List[int]:
         except Exception:
             continue
     return sorted(out)
-
-
-def _format_article_header_html(raw_txt: str) -> str:
-    """Format a multi-line Seeking Alpha header item into a clean, boxed header.
-
-    Expected raw_txt format (built in final.py):
-      Line 1: "<Title> — <Author>"  (author may be missing)
-      Line 2: "Source: <URL>"      (may be missing)
-
-    We render:
-      - bold Line 1
-      - smaller Line 2 (if present)
-    """
-    s = (raw_txt or "").strip()
-    if not s:
-        return ""
-    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
-    if not lines:
-        return ""
-    first = escape(lines[0])
-    rest = []
-    for ln in lines[1:]:
-        rest.append(escape(ln))
-    if rest:
-        rest_html = "<br/>".join(f"<font size='8' color='#4b5563'>{ln}</font>" for ln in rest)
-        return f"<b>{first}</b><br/>{rest_html}"
-    return f"<b>{first}</b>"
-
-
-@dataclass
-class RawItem:
-    ticker: str
-    text: str
-    pages: List[int]
-    order_hint: Tuple[int, int]  # (min_page_or_big, seq)
-    # True when this item is an inserted per-article header (e.g., "Title — Author\nSource: URL")
-    # that should render as a heading and should not be AI-scored or chunked.
-    is_header: bool = False
-
-
-def _flatten_raw_items(data: Dict[str, Any]) -> List[RawItem]:
-    """
-    Accept both shapes:
-      1) {"companies":[{"ticker","name","items":[...]}]}
-      2) {"TICKER":[{"text","pages"}, ...], ...}
-    and return a flat list of RawItem.
-    """
-    items: List[RawItem] = []
-    seq = 0
-
-    if "companies" in data and isinstance(data["companies"], list):
-        for comp_idx, c in enumerate(data["companies"]):
-            tkr = str(c.get("ticker") or c.get("name") or "").strip() or "—"
-            for it_idx, it in enumerate(c.get("items") or []):
-                txt = (it.get("text") or "").strip()
-                if not txt:
-                    continue
-                pages = _normalize_pages(it.get("pages"))
-                order = (min(pages) if pages else 9999, seq)
-                items.append(
-                    RawItem(
-                        ticker=tkr,
-                        text=txt,
-                        pages=pages,
-                        order_hint=order,
-                        is_header=bool(it.get("is_header")),
-                    )
-                )
-                seq += 1
-        return items
-
-    # flat mapping shape (what excerpt_check.py writes today)
-    for tkr, lst in data.items():
-        if not isinstance(lst, list):
-            continue
-        tkr_s = str(tkr).strip() or "—"
-        for it_idx, it in enumerate(lst):
-            txt = (it.get("text") or "").strip()
-            if not txt:
-                continue
-            pages = _normalize_pages(it.get("pages"))
-            order = (min(pages) if pages else 9999, seq)
-            items.append(
-                RawItem(
-                    ticker=tkr_s,
-                    text=txt,
-                    pages=pages,
-                    order_hint=order,
-                    is_header=bool(it.get("is_header")),
-                )
-            )
-            seq += 1
-
-    return items
-
-
-@dataclass
-class ParagraphAgg:
-    text: str
-    pages: Set[int]
-    tickers: Set[str]
-    order_hint: Tuple[int, int]
-    is_header: bool = False
-
-
-@dataclass
-class Group:
-    tickers: Tuple[str, ...]
-    items: List[Dict[str, Any]]  # each: {"text": str, "pages": List[int], "order_hint": (..,..)}
-    pages: List[int]
-    first_order: Tuple[int, int]
-
-
-def _aggregate_paragraphs(raw_items: List[RawItem]) -> Dict[str, ParagraphAgg]:
-    """
-    Aggregate duplicates by exact text, unioning tickers and pages.
-    If the same paragraph appears under AMZN and TSM, it will become
-    one ParagraphAgg with tickers={AMZN, TSM}.
-    """
-    agg: Dict[str, ParagraphAgg] = {}
-    for it in raw_items:
-        txt = it.text.strip()
-        if not txt:
-            continue
-
-        # Headers must not be de-duplicated or merged across tickers.
-        # Give each header its own unique aggregation key so it survives grouping.
-        if getattr(it, "is_header", False):
-            k = f"__hdr__{it.ticker}__{it.order_hint[1]}"
-            agg[k] = ParagraphAgg(
-                text=txt,
-                pages=set(it.pages),
-                tickers={it.ticker},
-                order_hint=it.order_hint,
-                is_header=True,
-            )
-            continue
-
-        if txt not in agg:
-            agg[txt] = ParagraphAgg(
-                text=txt,
-                pages=set(it.pages),
-                tickers={it.ticker},
-                order_hint=it.order_hint,
-                is_header=False,
-            )
-        else:
-            a = agg[txt]
-            a.pages.update(it.pages)
-            a.tickers.add(it.ticker)
-            if it.order_hint < a.order_hint:
-                a.order_hint = it.order_hint
-    return agg
-
-
-def _groups_from_agg(agg: Dict[str, ParagraphAgg]) -> List[Group]:
-    """
-    Turn paragraph aggregations into groups keyed by ticker-set.
-    Each Group can contain multiple paragraphs that share the same ticker set.
-    """
-    by_tickerset: Dict[frozenset, List[Dict[str, Any]]] = {}
-    for para in agg.values():
-        key = frozenset(para.tickers)
-        item = {
-            "text": para.text,
-            "pages": sorted(para.pages),
-            "order_hint": para.order_hint,
-        }
-        if getattr(para, "is_header", False):
-            item["is_header"] = True
-
-        by_tickerset.setdefault(key, []).append(item)
-
-    groups: List[Group] = []
-    for tickerset, items in by_tickerset.items():
-        items.sort(key=lambda x: x["order_hint"])
-        pages_union = sorted({p for it in items for p in it["pages"]})
-        first_order = min(it["order_hint"] for it in items)
-        groups.append(
-            Group(
-                tickers=tuple(sorted(tickerset)),
-                items=items,
-                pages=pages_union,
-                first_order=first_order,
-            )
-        )
-
-    groups.sort(key=lambda g: g.first_order)
-    return groups
 
 
 def _pages_text(pages: List[int]) -> str:
@@ -419,14 +230,201 @@ def _humanize_source_name(source_pdf_name: str) -> str:
     return " ".join(smart_title(w) for w in cleaned)
 
 
+def _format_article_header_html(raw_txt: str) -> str:
+    """
+    Format a multi-line Seeking Alpha header item into a clean, boxed header.
+
+    Expected raw_txt format (built in final.py):
+      Line 1: "<Title> — <Author>"  (author may be missing)
+      Line 2: "Source: <URL>"      (may be missing)
+
+    We render:
+      - bold Line 1
+      - smaller Line(s) after
+    """
+    s = (raw_txt or "").strip()
+    if not s:
+        return ""
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    first = escape(lines[0])
+    rest = []
+    for ln in lines[1:]:
+        rest.append(escape(ln))
+    if rest:
+        rest_html = "<br/>".join(
+            f"<font size='8' color='#4b5563'>{ln}</font>" for ln in rest
+        )
+        return f"<b>{first}</b><br/>{rest_html}"
+    return f"<b>{first}</b>"
+
+
+@dataclass
+class RawItem:
+    ticker: str
+    text: str
+    pages: List[int]
+    order_hint: Tuple[int, int]  # (min_page_or_big, seq)
+    # carry is_header through the pipeline so per-article headers render in the PDF.
+    is_header: bool = False
+
+
+def _flatten_raw_items(data: Dict[str, Any]) -> List[RawItem]:
+    """
+    Accept both shapes:
+      1) {"companies":[{"ticker","name","items":[...]}]}
+      2) {"TICKER":[{"text","pages"}, ...], ...}
+    and return a flat list of RawItem.
+    """
+    items: List[RawItem] = []
+    seq = 0
+
+    if "companies" in data and isinstance(data["companies"], list):
+        for c in data["companies"]:
+            tkr = str(c.get("ticker") or c.get("name") or "").strip() or "—"
+            for it in (c.get("items") or []):
+                txt = (it.get("text") or "").strip()
+                if not txt:
+                    continue
+                pages = _normalize_pages(it.get("pages"))
+                order = (min(pages) if pages else 9999, seq)
+                items.append(
+                    RawItem(
+                        ticker=tkr,
+                        text=txt,
+                        pages=pages,
+                        order_hint=order,
+                        is_header=bool(it.get("is_header")),
+                    )
+                )
+                seq += 1
+        return items
+
+    # flat mapping shape
+    for tkr, lst in data.items():
+        if not isinstance(lst, list):
+            continue
+        tkr_s = str(tkr).strip() or "—"
+        for it in lst:
+            txt = (it.get("text") or "").strip()
+            if not txt:
+                continue
+            pages = _normalize_pages(it.get("pages"))
+            order = (min(pages) if pages else 9999, seq)
+            items.append(
+                RawItem(
+                    ticker=tkr_s,
+                    text=txt,
+                    pages=pages,
+                    order_hint=order,
+                    is_header=bool(it.get("is_header")),
+                )
+            )
+            seq += 1
+
+    return items
+
+
+@dataclass
+class ParagraphAgg:
+    text: str
+    pages: Set[int]
+    tickers: Set[str]
+    order_hint: Tuple[int, int]
+    is_header: bool = False
+
+
+@dataclass
+class Group:
+    tickers: Tuple[str, ...]
+    items: List[Dict[str, Any]]
+    pages: List[int]
+    first_order: Tuple[int, int]
+
+
+def _aggregate_paragraphs(raw_items: List[RawItem]) -> Dict[str, ParagraphAgg]:
+    """
+    Aggregate duplicates by exact text, unioning tickers and pages.
+    Headers are NOT de-duped.
+    """
+    agg: Dict[str, ParagraphAgg] = {}
+    for it in raw_items:
+        txt = it.text.strip()
+        if not txt:
+            continue
+
+        # headers must not be de-duplicated or merged across tickers
+        if it.is_header:
+            k = f"__hdr__{it.ticker}__{it.order_hint[1]}"
+            agg[k] = ParagraphAgg(
+                text=txt,
+                pages=set(it.pages),
+                tickers={it.ticker},
+                order_hint=it.order_hint,
+                is_header=True,
+            )
+            continue
+
+        if txt not in agg:
+            agg[txt] = ParagraphAgg(
+                text=txt,
+                pages=set(it.pages),
+                tickers={it.ticker},
+                order_hint=it.order_hint,
+                is_header=False,
+            )
+        else:
+            a = agg[txt]
+            a.pages.update(it.pages)
+            a.tickers.add(it.ticker)
+            if it.order_hint < a.order_hint:
+                a.order_hint = it.order_hint
+    return agg
+
+
+def _groups_from_agg(agg: Dict[str, ParagraphAgg]) -> List[Group]:
+    """
+    Turn paragraph aggregations into groups keyed by ticker-set.
+    """
+    by_tickerset: Dict[frozenset, List[Dict[str, Any]]] = {}
+    for para in agg.values():
+        key = frozenset(para.tickers)
+        item = {
+            "text": para.text,
+            "pages": sorted(para.pages),
+            "order_hint": para.order_hint,
+        }
+        if para.is_header:
+            item["is_header"] = True
+        by_tickerset.setdefault(key, []).append(item)
+
+    groups: List[Group] = []
+    for tickerset, items in by_tickerset.items():
+        items.sort(key=lambda x: x["order_hint"])
+        pages_union = sorted({p for it in items for p in it["pages"]})
+        first_order = min(it["order_hint"] for it in items)
+        groups.append(
+            Group(
+                tickers=tuple(sorted(tickerset)),
+                items=items,
+                pages=pages_union,
+                first_order=first_order,
+            )
+        )
+
+    groups.sort(key=lambda g: g.first_order)
+    return groups
+
+
 # ---------- AI relevance scoring (optional) ----------
 
 _RATING_COLORS = {
-    5: colors.HexColor("#DFF3E3"),  # green-ish
+    5: colors.HexColor("#DFF3E3"),
     4: colors.HexColor("#EAF7ED"),
-    3: colors.HexColor("#FFF7DB"),  # light yellow
-    2: colors.HexColor("#FFE7D6"),  # light orange
-    1: colors.HexColor("#FDE2E2"),  # light red
+    3: colors.HexColor("#FFF7DB"),
+    2: colors.HexColor("#FFE7D6"),
+    1: colors.HexColor("#FDE2E2"),
 }
 
 def _hash_key(*parts: str) -> str:
@@ -443,24 +441,28 @@ def _heuristic_score_paragraph(paragraph: str) -> Dict[str, Any]:
         return {"rating": 3, "rationale": "empty"}
 
     score = 3
-    rationale_bits: List[str] = []
-    if any(k in p for k in ["guidance", "raised", "lowered", "outlook", "q", "fy", "eps", "revenue", "margin", "free cash", "fcf", "dividend", "buyback", "valuation", "p/e", "multiple", "catalyst", "pipeline", "fda", "approval", "merger", "acquisition", "deal", "tariff", "regulatory"]):
+    if any(k in p for k in [
+        "guidance", "raised", "lowered", "outlook", "eps", "revenue", "margin",
+        "free cash", "fcf", "dividend", "buyback", "valuation", "p/e", "multiple",
+        "catalyst", "pipeline", "fda", "approval", "merger", "acquisition", "deal",
+        "tariff", "regulatory"
+    ]):
         score = max(score, 4)
-        rationale_bits.append("fundamentals/catalyst")
 
     if re.search(r"\b\d{1,3}(?:\.\d+)?%\b", p) or re.search(r"\$\s*\d", p) or re.search(r"\b\d{1,3}(?:\.\d+)?x\b", p):
         score = max(score, 4)
-        rationale_bits.append("numbers")
 
-    if any(k in p for k in ["disclaimer", "past performance", "seeking alpha", "subscription", "author's note", "i am/we are long", "not investment advice"]):
+    if any(k in p for k in [
+        "disclaimer", "past performance", "seeking alpha", "subscription", "author's note",
+        "i am/we are long", "not investment advice"
+    ]):
         score = min(score, 2)
-        rationale_bits.append("boilerplate")
 
     if len(p) < 80 and score >= 3:
         score = 2
-        rationale_bits.append("short")
 
-    return {"rating": int(score), "rationale": ", ".join(rationale_bits) or "heuristic"}
+    return {"rating": int(score), "rationale": "heuristic"}
+
 
 def _score_paragraph(
     *,
@@ -479,6 +481,7 @@ def _score_paragraph(
         model=model,
         cache=cache,
     )
+
 
 def _openai_score_paragraph(
     *,
@@ -517,10 +520,6 @@ Paragraph:
 Return JSON with:
 - rating: integer 1-5 (5 = directly about the company with meaningful discussion; 1 = basically irrelevant / only a list mention)
 - rationale: 1 short sentence explaining why.
-Rules:
-- If the paragraph discusses position sizing, buy/sell, thesis, catalysts, risks, fundamentals, management, macro impact on the company: rating 4-5.
-- If it's a passing mention, sector list, index/holdings list, or name-drop without analysis: rating 1-2.
-- Be conservative (prefer lower ratings unless clearly substantive).
 """
 
         resp = openai.ChatCompletion.create(
@@ -546,6 +545,7 @@ Rules:
         cache[key] = out
         return out
 
+
 # ---------- Rendering ----------
 
 def _render_group_block_table(
@@ -553,6 +553,11 @@ def _render_group_block_table(
     group: Group,
     name_map: Dict[str, str],
 ) -> None:
+    """
+    Legacy renderer: two-column table.
+    Left: combined company name(s) + tickers.
+    Right: Pages + paragraphs.
+    """
     display_names = [name_map.get(t, t) for t in group.tickers]
     left_title = ", ".join(display_names)
     left_tickers = ", ".join(group.tickers)
@@ -568,14 +573,13 @@ def _render_group_block_table(
         ]
     )
 
-    # Body rows
     for it in group.items:
         txt = (it.get("text") or "").strip()
         if not txt:
             continue
 
-        # Article headers: render in boxed style and do not score/number
         if it.get("is_header"):
+            # For table mode, we keep header rendering as-is (not the primary SA output mode).
             story.append(Spacer(1, 6))
             story.append(Paragraph(_format_article_header_html(txt), ArticleHeaderBox))
             story.append(Spacer(1, 4))
@@ -589,7 +593,7 @@ def _render_group_block_table(
 
     table = Table(
         rows,
-        colWidths=[2.3 * 72, None],  # 2.3" left, rest right
+        colWidths=[2.3 * 72, None],
         repeatRows=1,
         style=TableStyle(
             [
@@ -620,16 +624,14 @@ def _render_group_block_compact(
     ai_cache: Dict[str, Dict[str, Any]],
 ) -> None:
     """
-    Compact renderer (default): full-width blocks with a single header line,
-    then numbered paragraphs below. This significantly reduces page count
-    versus nested tables.
+    Compact renderer (default): full-width blocks.
+    SA-specific formatting is applied only when is_header=True items exist.
     """
 
     # Seeking Alpha groups include per-article header items (is_header=True).
-    # We use this as a safe signal to apply SA-specific formatting only.
     has_article_headers = any(bool(it.get("is_header")) for it in (group.items or []))
 
-    # Styles created lazily so we don't mutate global stylesheet at import time
+    # Header style: larger for SA groups (ticker bar becomes more prominent).
     header_style = ParagraphStyle(
         "GroupHeaderCompact",
         parent=_base["Heading3"],
@@ -663,6 +665,7 @@ def _render_group_block_compact(
         wordWrap="CJK",
     )
 
+    # Fund Families numbering/hanging-indent style (unchanged)
     num_style = ParagraphStyle(
         "BodyCompactNumber",
         parent=body_style,
@@ -670,8 +673,19 @@ def _render_group_block_compact(
         firstLineIndent=-14,
     )
 
-    # Per-rating highlight styles (only used when ai_score=True)
+    # SA body style: NO hanging indent so background fill covers the whole first line
+    # (fixes the “few characters popping out” issue in highlighted blocks).
+    sa_style = ParagraphStyle(
+        "BodyCompactSA",
+        parent=body_style,
+        leftIndent=0,
+        firstLineIndent=0,
+    )
+
+    # Rating styles (highlight background)
     rating_styles: Dict[int, ParagraphStyle] = {}
+    sa_rating_styles: Dict[int, ParagraphStyle] = {}
+
     if ai_score:
         for r in (1, 2, 3, 4, 5):
             rating_styles[r] = ParagraphStyle(
@@ -681,8 +695,14 @@ def _render_group_block_compact(
                 borderPadding=(4, 6, 4, 6),
                 spaceAfter=6,
             )
+            sa_rating_styles[r] = ParagraphStyle(
+                f"SAStyleR{r}",
+                parent=sa_style,
+                backColor=_RATING_COLORS.get(r),
+                borderPadding=(4, 6, 4, 6),
+                spaceAfter=6,
+            )
 
-    # Group header/meta
     display_names = [name_map.get(t, t) for t in group.tickers]
     title = ", ".join(display_names)
     tickers = ", ".join(group.tickers)
@@ -690,27 +710,28 @@ def _render_group_block_compact(
 
     def _emit_ticker_header() -> None:
         story.append(Paragraph(escape(title), header_style))
-        story.append(
-            Paragraph(
-                f"Tickers: {escape(tickers)} &nbsp;&nbsp;|&nbsp;&nbsp; Page/s: {pages}",
-                meta_style,
+        # SA-only patch: do NOT render the meta line
+        if not has_article_headers:
+            story.append(
+                Paragraph(
+                    f"Tickers: {escape(tickers)} &nbsp;&nbsp;|&nbsp;&nbsp; Page/s: {pages}",
+                    meta_style,
+                )
             )
-        )
 
     _emit_ticker_header()
 
-    # Paragraphs
     company_label = f"{title} ({tickers})"
 
+    first_article_seen = False
     n = 1
 
-    first_article_seen = False
     for it in group.items:
         txt = (it.get("text") or "").strip()
         if not txt:
             continue
 
-        # Article headers: start each article on a new page with the ticker header repeated.
+        # SA: each article starts on a new page with ticker header at top
         if it.get("is_header"):
             if first_article_seen:
                 story.append(PageBreak())
@@ -739,21 +760,23 @@ def _render_group_block_compact(
                     rating = 3
                 rating = 1 if rating < 1 else 5 if rating > 5 else rating
 
-            if rating is not None:
-                style = rating_styles.get(rating, num_style)
-                prefix = f"[{rating}] "
-                if has_article_headers:
-                    # Seeking Alpha: no numbering and hide rating prefix for cleaner skimmability.
+            # SA: no numbering, no rating prefix rendered, but keep highlight backgrounds
+            if has_article_headers:
+                if rating is not None and ai_score:
+                    style = sa_rating_styles.get(rating, sa_style)
                     story.append(Paragraph(f"{safe_chunk}", style))
                 else:
-                    story.append(Paragraph(f"{n}. {prefix}{safe_chunk}", style))
-                    n += 1
+                    story.append(Paragraph(f"{safe_chunk}", sa_style))
+                continue
+
+            # Fund Families: preserve existing behavior exactly
+            if rating is not None and ai_score:
+                style = rating_styles.get(rating, num_style)
+                prefix = f"[{rating}] "
+                story.append(Paragraph(f"{n}. {prefix}{safe_chunk}", style))
             else:
-                if has_article_headers:
-                    story.append(Paragraph(f"{safe_chunk}", num_style))
-                else:
-                    story.append(Paragraph(f"{n}. {safe_chunk}", num_style))
-                    n += 1
+                story.append(Paragraph(f"{n}. {safe_chunk}", num_style))
+            n += 1
 
     story.append(Spacer(1, 8))
 
@@ -768,7 +791,6 @@ def _render_group_block(
     ai_model: str = "gpt-4o-mini",
     ai_cache: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
-    """Dispatch between legacy table view and compact view."""
     if (format_style or "").lower() in {"table", "grid", "legacy_table"}:
         _render_group_block_table(story, group, name_map)
         return
@@ -805,25 +827,20 @@ def build_pdf(
         print("SKIP: No narrative excerpts found; not writing a PDF.")
         return None
 
-    # Aggregate and group paragraphs (de-dup across tickers)
     agg = _aggregate_paragraphs(raw_items)
     groups = _groups_from_agg(agg)
     if not groups:
         print("SKIP: No narrative excerpts after de-dup; not writing a PDF.")
         return None
 
-    # Map tickers to nicer display names if available
     name_map = _load_ticker_display_names(here)
 
-    # Determine source name
     if not source_pdf_name:
-        # best-effort: pick most recent PDF in working dir
         pdfs = sorted(here.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
         source_pdf_name = pdfs[0].name if pdfs else "Unknown.pdf"
 
     commentary_title = _humanize_source_name(source_pdf_name)
 
-    # Document
     doc = SimpleDocTemplate(
         str(output_pdf_path),
         pagesize=LETTER,
@@ -837,7 +854,6 @@ def build_pdf(
     ai_cache: Dict[str, Dict[str, Any]] = {}
     now = datetime.now(ZoneInfo("America/New_York"))
 
-    # --- Cover / header ---
     story.append(Spacer(1, 0.25 * 72))
     story.append(Paragraph("Cutler Capital Excerption", CoverMain))
     story.append(Spacer(1, 0.1 * 72))
@@ -859,7 +875,6 @@ def build_pdf(
         story.append(Paragraph(f"Letter Date: {letter_date}", MetaX))
     story.append(Spacer(1, 0.25 * 72))
 
-    # --- Excerpt groups ---
     for grp in groups:
         _render_group_block(
             story,
