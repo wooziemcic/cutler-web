@@ -12,7 +12,7 @@ Depends on:
 import os
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -51,7 +51,7 @@ BASE_URL = f"https://{BASE_HOST}"
 
 LIST_PATH = "/analysis/v2/list"
 DETAILS_PATH = "/analysis/v2/get-details"
-AUTHOR_DETAILS_PATH = "/authors/get-details"
+AUTHORS_DETAILS_PATH = "/authors/get-details"
 
 def _headers() -> dict:
     """Build RapidAPI headers only when needed."""
@@ -61,9 +61,6 @@ def _headers() -> dict:
     }
 
 log = logging.getLogger("sa_analysis_api")
-
-# Simple in-module cache for author lookups (optional).
-_AUTHOR_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 # -------------------------------------------------------------------
@@ -78,11 +75,64 @@ class AnalysisArticle:
     published: str
     url: str
     primary_tickers: List[str] = field(default_factory=list)
-    body_html: Optional[str] = None  # filled after get-details
 
-    # NEW: author fields (best-effort)
-    author_name: Optional[str] = None
-    author_slug: Optional[str] = None
+    # Optional author fields (may be blank depending on API payload / plan)
+    author_name: str = ""
+    author_slug: str = ""
+
+    # Filled after get-details
+    body_html: Optional[str] = None
+
+
+# -------------------------------------------------------------------
+#  Payload parsing helpers
+# -------------------------------------------------------------------
+
+def _author_map_from_included(payload: dict) -> dict:
+    """Return mapping: author_id -> {name, slug}. Defensive to missing shapes."""
+    out: dict = {}
+    included = payload.get("included")
+    if not isinstance(included, list):
+        return out
+    for it in included:
+        if not isinstance(it, dict):
+            continue
+        if it.get("type") not in ("author", "authors"):
+            continue
+        aid = it.get("id")
+        attrs = it.get("attributes") or {}
+        if aid:
+            out[str(aid)] = {
+                "name": (attrs.get("name") or attrs.get("displayName") or "").strip(),
+                "slug": (attrs.get("slug") or "").strip(),
+            }
+    return out
+
+
+def _extract_author_from_item(item: dict, author_map: dict) -> tuple[str, str]:
+    """Return (author_name, author_slug) for a list row, if present."""
+    rel = item.get("relationships") or {}
+    auth = rel.get("author") or {}
+    data = auth.get("data") or {}
+    aid = data.get("id")
+    if aid and str(aid) in author_map:
+        m = author_map[str(aid)]
+        return m.get("name", "") or "", m.get("slug", "") or ""
+    return "", ""
+
+
+def _extract_author_from_details(payload: dict) -> tuple[str, str]:
+    """Return (author_name, author_slug) from a get-details payload, if present."""
+    author_map = _author_map_from_included(payload)
+    data = payload.get("data")
+    main = None
+    if isinstance(data, list) and data:
+        main = data[0]
+    elif isinstance(data, dict):
+        main = data
+    if not isinstance(main, dict):
+        return "", ""
+    return _extract_author_from_item(main, author_map)
 
 
 # -------------------------------------------------------------------
@@ -98,19 +148,6 @@ def _request(path: str, params: dict) -> dict:
         return resp.json()
     except Exception as e:
         raise RuntimeError(f"Failed to parse JSON from {url}: {e}")
-
-
-def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
-    """
-    Try a sequence of keys on a dict-like object. Returns first non-empty.
-    """
-    if not isinstance(d, dict):
-        return default
-    for k in keys:
-        v = d.get(k)
-        if v is not None and v != "":
-            return v
-    return default
 
 
 # -------------------------------------------------------------------
@@ -132,6 +169,8 @@ def fetch_analysis_list(symbol: str, size: int = 10) -> List[AnalysisArticle]:
 
     payload = _request(LIST_PATH, params)
 
+    author_map = _author_map_from_included(payload)
+
     data = payload.get("data")
     if not isinstance(data, list):
         log.debug("Unexpected analysis list payload: %r", payload)
@@ -140,32 +179,24 @@ def fetch_analysis_list(symbol: str, size: int = 10) -> List[AnalysisArticle]:
     articles: List[AnalysisArticle] = []
     for item in data:
         try:
-            # SeekingAlpha RapidAPI shapes:
-            # item: { id, attributes:{title,publishOn,authorName,authorSlug...}, links:{self}, relationships:{...} }
-            art_id = str(item.get("id", "")).strip()
-            if not art_id:
-                continue
-
-            attrs = item.get("attributes", {}) if isinstance(item.get("attributes"), dict) else {}
-
-            title = _safe_get(attrs, "title", default="") or ""
-            published = _safe_get(attrs, "publishOn", "publishedAt", "published_at", default="") or ""
-
-            link_self = _safe_get(item.get("links", {}), "self", default="") or ""
+            art_id = str(item["id"])
+            attrs = item.get("attributes", {})
+            title = attrs.get("title") or ""
+            published = attrs.get("publishOn") or ""
+            link_self = item.get("links", {}).get("self") or ""
             url = f"https://seekingalpha.com{link_self}" if link_self else ""
 
-            # NEW: author (best-effort)
-            author_name = _safe_get(attrs, "authorName", "author", "author_name", default=None)
-            author_slug = _safe_get(attrs, "authorSlug", "author_slug", default=None)
-
-            # relationships -> sentiments -> primaryTickers ids (left as-is; you can extend later)
-            primary: List[str] = []
-            rel = item.get("relationships", {}) if isinstance(item.get("relationships"), dict) else {}
-            sentiments = rel.get("sentiments", {}) if isinstance(rel.get("sentiments"), dict) else {}
+            # relationships -> sentiments -> primaryTickers ids
+            primary = []
+            rel = item.get("relationships", {})
+            sentiments = rel.get("sentiments", {})
             sdata = sentiments.get("data") or []
-            # Keeping existing placeholder behavior; do not break anything.
-            # If you later want primary tickers, you can enrich via included[].
-            _ = sdata
+            for s in sdata:
+                if s.get("type") == "sentiment":
+                    # inside each sentiment, there is another data-> primaryTickers,
+                    # but for our purposes we just collect their ids if present
+                    # (you can extend this later if you need mapping to sym)
+                    pass
 
             articles.append(
                 AnalysisArticle(
@@ -175,8 +206,8 @@ def fetch_analysis_list(symbol: str, size: int = 10) -> List[AnalysisArticle]:
                     published=published,
                     url=url,
                     primary_tickers=primary,
-                    author_name=author_name,
-                    author_slug=author_slug,
+                    author_name=_extract_author_from_item(item, author_map)[0],
+                    author_slug=_extract_author_from_item(item, author_map)[1],
                 )
             )
         except Exception as e:
@@ -186,112 +217,61 @@ def fetch_analysis_list(symbol: str, size: int = 10) -> List[AnalysisArticle]:
     return articles
 
 
-def fetch_analysis_details(article_id: str) -> dict:
-    """
-    Fetch full Seeking Alpha article details (HTML body, title, summary, images).
-    Returns dict or {} on failure.
+def fetch_article_details(article_id: str) -> Optional[str]:
+    """Fetch full HTML body of a specific analysis article.
 
-    Output keys:
-      - title
-      - summary_html
-      - body_html
-      - images
-      - url
-      - author_name (best-effort)
-      - author_slug (best-effort)
+    RapidAPI shapes vary:
+      - payload["data"] may be a dict or a list with a single dict
+      - body may appear under 'content', 'bodyHtml', 'body_html', 'body', or 'html'
+    Returns HTML (or sometimes plain text) string, or None if missing.
     """
     params = {"id": str(article_id)}
+    payload = _request(DETAILS_PATH, params)
 
-    try:
-        payload = _request(DETAILS_PATH, params)
-        if not isinstance(payload, dict):
-            return {}
+    data = payload.get("data")
+    main = None
+    if isinstance(data, list) and data:
+        main = data[0]
+    elif isinstance(data, dict):
+        main = data
 
-        data = payload.get("data") or {}
-        if not isinstance(data, dict):
-            return {}
-
-        attributes = data.get("attributes") or {}
-        if not isinstance(attributes, dict):
-            attributes = {}
-
-        title = _safe_get(attributes, "title", default="") or ""
-        summary_html = _safe_get(attributes, "summary", "summary_html", default="") or ""
-        body_html = _safe_get(attributes, "content", "body_html", default="") or ""
-        images = attributes.get("images", [])
-        if not isinstance(images, list):
-            images = []
-
-        # NEW: author (details sometimes include it; if not present, return None)
-        author_name = _safe_get(attributes, "authorName", "author", "author_name", default=None)
-        author_slug = _safe_get(attributes, "authorSlug", "author_slug", default=None)
-
-        # Prefer canonical SA article URL if present in links; else fallback
-        links = data.get("links") or {}
-        link_self = _safe_get(links, "self", default="") or ""
-        url = f"https://seekingalpha.com{link_self}" if link_self else f"https://seekingalpha.com/article/{article_id}"
-
-        return {
-            "title": title,
-            "summary_html": summary_html,
-            "body_html": body_html,
-            "images": images,
-            "url": url,
-            "author_name": author_name,
-            "author_slug": author_slug,
-        }
-
-    except Exception as e:
-        log.warning("fetch_analysis_details ERROR for id=%s: %s", article_id, e)
-        return {}
-
-
-def fetch_article_details(article_id: str) -> Optional[str]:
-    """
-    Fetch full HTML body of a specific analysis article.
-    Returns HTML string or None on failure.
-    """
-    details = fetch_analysis_details(article_id)
-    body = details.get("body_html") if isinstance(details, dict) else None
-    if not body:
+    if not isinstance(main, dict):
+        log.debug("No usable data in get-details payload: %r", payload)
         return None
-    return body
+
+    attrs = main.get("attributes") or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+
+    body = (
+        attrs.get("content")
+        or attrs.get("bodyHtml")
+        or attrs.get("body_html")
+        or attrs.get("body")
+        or attrs.get("html")
+        or attrs.get("text")
+        or ""
+    )
+
+    body = str(body or "").strip()
+    return body or None
 
 
-def fetch_author_details(author_slug: str, use_cache: bool = True) -> Dict[str, Any]:
+def fetch_author_details(author_slug: str) -> dict:
+    """Optional: fetch author details by slug.
+
+    Endpoint: /authors/get-details?slug=...
+    Returns dict (possibly empty). Caller must be defensive.
     """
-    Fetch author details via RapidAPI endpoint:
-      /authors/get-details?slug=...
-
-    Returns dict (may include name/bio/etc) or {} on failure.
-    """
-    slug = (author_slug or "").strip()
-    if not slug:
+    if not author_slug:
         return {}
-
-    if use_cache and slug in _AUTHOR_CACHE:
-        return _AUTHOR_CACHE[slug]
-
     try:
-        payload = _request(AUTHOR_DETAILS_PATH, {"slug": slug})
-        if not isinstance(payload, dict):
-            return {}
-
-        # Keep raw payload; callers can pick what they want.
-        result = payload
-
-        if use_cache:
-            _AUTHOR_CACHE[slug] = result
-
-        return result
-    except Exception as e:
-        log.warning("fetch_author_details ERROR slug=%s: %s", slug, e)
+        payload = _request(AUTHORS_DETAILS_PATH, {"slug": str(author_slug)})
+        # Some variants return {"data":{...}}; others {"data":[...]}
+        return payload or {}
+    except Exception:
         return {}
 
-
-# -------------------------------------------------------------------
-#  AI summarisation
-# -------------------------------------------------------------------
 
 def build_sa_analysis_digest(
     symbol: str,
@@ -320,13 +300,6 @@ def build_sa_analysis_digest(
                 log.warning("Failed to fetch body for %s: %s", art.id, e)
                 art.body_html = ""
 
-        # If details has author fields, backfill onto article (best-effort)
-        if (art.author_name is None) or (art.author_slug is None):
-            details = fetch_analysis_details(art.id)
-            if details:
-                art.author_name = art.author_name or details.get("author_name")
-                art.author_slug = art.author_slug or details.get("author_slug")
-
     # Build prompt context
     context_chunks = []
     for art in selected:
@@ -335,14 +308,9 @@ def build_sa_analysis_digest(
         if len(body) > 4000:
             body = body[:4000] + " [...]"
 
-        author_line = ""
-        if art.author_name:
-            author_line = f"Author: {art.author_name}\n"
-
         context_chunks.append(
             f"### Article\n"
             f"Title: {art.title}\n"
-            f"{author_line}"
             f"Published: {art.published}\n"
             f"URL: {art.url}\n"
             f"Body (HTML):\n{body}\n"
@@ -409,18 +377,46 @@ def analyse_symbol_with_digest(
     # Pre-fill body_html for a few of the top ones to avoid repeat calls later
     for art in articles[:4]:
         try:
-            details = fetch_analysis_details(art.id)
-            art.body_html = details.get("body_html") if details else ""
-            # Backfill author if details had it
-            if details:
-                art.author_name = art.author_name or details.get("author_name")
-                art.author_slug = art.author_slug or details.get("author_slug")
+            art.body_html = fetch_article_details(art.id)
         except Exception as e:
             log.warning("Failed to fetch article %s: %s", art.id, e)
             art.body_html = ""
 
     digest = build_sa_analysis_digest(symbol, articles, model=model)
     return articles, digest
+
+
+def fetch_analysis_details(article_id: str) -> dict:
+    """
+    Fetch full Seeking Alpha article details (HTML body, title, summary, images).
+    Returns dict or {} on failure.
+    """
+    url = "https://seeking-alpha.p.rapidapi.com/analysis/v2/get-details"
+    headers = _headers()
+    params = {"id": str(article_id)}
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not isinstance(data, dict):
+            return {}
+
+        # Extract content
+        attributes = data.get("data", {}).get("attributes", {})
+
+        return {
+            "title": attributes.get("title", ""),
+            "summary_html": attributes.get("summary", ""),
+            "body_html": attributes.get("content", ""),
+            "images": attributes.get("images", []),
+            "url": f"https://seekingalpha.com/article/{article_id}"
+        }
+
+    except Exception as e:
+        print("fetch_analysis_details ERROR:", e)
+        return {}
 
 
 # -------------------------------------------------------------------
@@ -436,8 +432,7 @@ if __name__ == "__main__":
 
     print(f"Got {len(arts)} articles")
     for a in arts:
-        author = f" | author={a.author_name}" if a.author_name else ""
-        print(f"- {a.published} | {a.title} | id={a.id} | {a.url}{author}")
+        print(f"- {a.published} | {a.title} | id={a.id} | {a.url}")
 
     print("\n=== AI DIGEST ===\n")
     print(digest_text)
