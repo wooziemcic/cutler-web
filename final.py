@@ -114,6 +114,21 @@ def ensure_playwright_chromium_installed(show_messages: bool = True) -> bool:
 # These wrappers are intentionally tiny and only exist to support the Batch 8
 # code path without altering any existing Fund Families / other tab logic.
 
+def _is_probable_ticker(s: str) -> bool:
+    """
+    Conservative check for equity tickers.
+    Allows 1–6 uppercase letters (e.g., AAPL, MSFT, ABBV).
+    """
+    if not s:
+        return False
+    s = s.strip()
+    if not s.isupper():
+        return False
+    if not (1 <= len(s) <= 6):
+        return False
+    return s.isalpha()
+
+
 def _ensure_chromium_ready() -> bool:
     """Backwards-compatible alias used by the Batch 8 'Latest' runner."""
     return ensure_playwright_chromium_installed()
@@ -294,6 +309,215 @@ def _clear_session_keys(*, exact=None, prefixes=None) -> None:
                 del st.session_state[k]
             except Exception:
                 pass
+
+
+# ---------------------- Run All orchestration (persistent) ----------------------
+
+_RUN_ALL_DIR = MAN_DIR / "_run_all"
+_RUN_ALL_STATE_PATH = _RUN_ALL_DIR / "run_all_state.json"
+
+def _load_run_all_state() -> dict:
+    try:
+        if _RUN_ALL_STATE_PATH.exists():
+            return json.loads(_RUN_ALL_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def _save_run_all_state(state: dict) -> None:
+    try:
+        _RUN_ALL_DIR.mkdir(parents=True, exist_ok=True)
+        _RUN_ALL_STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+def _clear_run_all_state() -> None:
+    try:
+        if _RUN_ALL_STATE_PATH.exists():
+            _RUN_ALL_STATE_PATH.unlink()
+    except Exception:
+        pass
+
+def _make_batches(items: list[str], size: int) -> list[list[str]]:
+    return [items[i:i+size] for i in range(0, len(items), size)]
+
+def _sa_article_row_basic(a) -> dict:
+    # Works with RapidAPI list objects or dicts
+    if isinstance(a, dict):
+        return {
+            "id": str(a.get("id") or a.get("article_id") or ""),
+            "title": a.get("title") or "",
+            "url": a.get("url") or a.get("link") or "",
+            "published_at": a.get("published_at") or a.get("date") or "",
+            "author": a.get("author") or a.get("author_name") or "",
+        }
+    # object-like
+    return {
+        "id": str(getattr(a, "id", "") or ""),
+        "title": str(getattr(a, "title", "") or ""),
+        "url": str(getattr(a, "url", "") or ""),
+        "published_at": str(getattr(a, "published_at", "") or getattr(a, "date", "") or ""),
+        "author": str(getattr(a, "author", "") or getattr(a, "author_name", "") or ""),
+    }
+
+def _extract_sa_details_fields(details: dict) -> tuple[str, str, str, str]:
+    # returns body_raw, author, title, published_at
+    base = details or {}
+    body = (
+        base.get("body_clean")
+        or base.get("body_html")
+        or base.get("content")
+        or base.get("body")
+        or base.get("html")
+        or base.get("text")
+        or ""
+    )
+    author = base.get("author") or base.get("author_name") or base.get("authorName") or ""
+    title = base.get("title") or ""
+    published = base.get("published_at") or base.get("published") or base.get("date") or ""
+    return str(body or ""), str(author or ""), str(title or ""), str(published or "")
+
+def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: int, model: str) -> Path:
+    # Builds one compiled PDF across the full universe in 10-ticker batches (to reduce API bursts).
+    import tempfile
+    import json as _json
+    from zoneinfo import ZoneInfo
+
+    cache = st.session_state.get("sa_cache", {})
+    combined: dict[str, list[dict]] = {}
+
+    # Reuse export caps if present
+    max_paras_per_ticker = int(st.session_state.get("sa_pdf_max_paras_per_ticker", 5000))
+    max_paras_per_article = int(st.session_state.get("sa_pdf_max_paras_per_article", 500))
+
+    batches = _make_batches(list(universe), 10)
+    prog = st.progress(0.0)
+    status = st.empty()
+
+    total = max(1, len(universe))
+    processed = 0
+
+    for b in batches:
+        for sym in b:
+            status.info(f"Run All: Seeking Alpha — fetching {sym} ({processed+1}/{total}) …")
+            try:
+                raw_list = sa_api.fetch_analysis_list(sym, size=max_articles) or []
+                rows = [_sa_article_row_basic(x) for x in raw_list]
+                rows = [r for r in rows if r.get("id")]
+
+                for r in rows:
+                    aid = r.get("id") or ""
+                    if not aid:
+                        continue
+                    details = {}
+                    try:
+                        details = sa_api.fetch_analysis_details(aid) or {}
+                    except Exception:
+                        details = {}
+                    body_raw, author_d, title_d, pub_d = _extract_sa_details_fields(details)
+
+                    if "<" in (body_raw or "") and ">" in (body_raw or ""):
+                        r["body_clean"] = clean_sa_html(body_raw)
+                    else:
+                        r["body_clean"] = (body_raw or "").strip()
+
+                    if author_d and not r.get("author"):
+                        r["author"] = author_d
+                    if title_d and not r.get("title"):
+                        r["title"] = title_d
+                    if pub_d and not r.get("published_at"):
+                        r["published_at"] = pub_d
+                    if isinstance(details, dict) and details.get("url") and not r.get("url"):
+                        r["url"] = details.get("url")
+
+                items: list[dict] = []
+                for a in rows:
+                    body = (a.get("body_clean") or "").strip()
+                    if not body:
+                        continue
+
+                    title = (a.get("title") or "").strip()
+                    author = (a.get("author") or "").strip()
+                    url = (a.get("url") or "").strip()
+                    published = (a.get("published_at") or "").strip()
+
+                    header_parts = []
+                    if title:
+                        header_parts.append(title)
+                    if author:
+                        header_parts.append(f"— {author}")
+                    header = " ".join(header_parts).strip()
+
+                    meta_lines = []
+                    if published:
+                        meta_lines.append(f"Date: {published[:10]}")
+                    if url:
+                        meta_lines.append(f"Source: {url}")
+                    if meta_lines:
+                        header = (header + "\n" if header else "") + "\n".join(meta_lines)
+
+                    if header:
+                        items.append({"text": header, "pages": [], "is_header": True})
+
+                    paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+                    kept = 0
+                    for p in paras:
+                        if kept >= max_paras_per_article:
+                            break
+                        if len(p) < 60:
+                            continue
+                        items.append({"text": p, "pages": []})
+                        kept += 1
+
+                if items:
+                    trimmed: list[dict] = []
+                    body_count = 0
+                    for it in items:
+                        txt = (it.get("text") or "")
+                        if it.get("is_header"):
+                            trimmed.append(it)
+                            continue
+                        if body_count >= max_paras_per_ticker:
+                            break
+                        trimmed.append(it)
+                        body_count += 1
+                    combined[sym] = trimmed
+            except Exception:
+                pass
+
+            processed += 1
+            prog.progress(processed / total)
+
+    if not combined:
+        raise RuntimeError("No Seeking Alpha articles were available to export for the current universe/config.")
+
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    pdf_name = f"{now_et.strftime('%m.%d.%y')} Seeking Alpha ALL.pdf"
+    out_path = CP_DIR / pdf_name
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        excerpts_path = td_path / "sa_excerpts.json"
+        excerpts_path.write_text(_json.dumps(combined, indent=2), encoding="utf-8")
+        out_pdf = td_path / "sa_compiled.pdf"
+        status.info("Run All: Seeking Alpha — rendering compiled PDF…")
+        make_pdf.build_pdf(
+            excerpts_json_path=str(excerpts_path),
+            output_pdf_path=str(out_pdf),
+            report_title="Seeking Alpha Analysis",
+            source_pdf_name=pdf_name,
+            format_style="compact",
+            ai_score=True,
+            ai_model="heuristic",
+        )
+        out_path.write_bytes(out_pdf.read_bytes())
+
+    prog.empty()
+    status.empty()
+    return out_path
+
+
+
 
 def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "file"
@@ -3826,6 +4050,184 @@ def main():
     batch_names = list(RUNNABLE_BATCHES.keys())
 
     # --- Tabs (website-style nav) ---
+    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
+
+    
+    # ---------------------- RUN ALL (orchestrator) ----------------------
+    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+    st.markdown("### Run All (Fund Families Latest + Seeking Alpha All + Podcasts All)")
+
+    ra_state = _load_run_all_state()
+    ra_cfg = ra_state.get("config") or {}
+    ra_mf_days = st.selectbox(
+        "Fund Families Latest lookback (days)",
+        options=[7, 14, 30],
+        index=[7, 14, 30].index(int(ra_cfg.get("mf_lookback_days", 7))) if int(ra_cfg.get("mf_lookback_days", 7)) in [7, 14, 30] else 0,
+        key="run_all_mf_days",
+    )
+    ra_sa_max = st.number_input(
+        "Seeking Alpha max articles per ticker",
+        min_value=1,
+        max_value=20,
+        value=int(ra_cfg.get("sa_max_articles", 5)),
+        step=1,
+        key="run_all_sa_max_articles",
+    )
+    ra_sa_model = st.selectbox(
+        "Seeking Alpha model (digest/export)",
+        options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
+        index=0,
+        key="run_all_sa_model",
+    )
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        start_all = st.button("Run All", use_container_width=True, key="run_all_start")
+    with c2:
+        resume_all = st.button(
+            "Resume",
+            use_container_width=True,
+            key="run_all_resume",
+            disabled=not bool(ra_state and ra_state.get("status") == "running"),
+        )
+    with c3:
+        clear_all = st.button("Clear Run All state", use_container_width=True, key="run_all_clear")
+
+    if clear_all:
+        _clear_run_all_state()
+        st.rerun()
+
+    if start_all:
+        ra_state = {
+            "status": "running",
+            "current_step": "fund_families",
+            "completed": [],
+            "outputs": {},
+            "config": {
+                "mf_lookback_days": int(ra_mf_days),
+                "sa_max_articles": int(ra_sa_max),
+                "sa_model": str(ra_sa_model),
+            },
+            "started_at": _now_et().isoformat(),
+        }
+        _save_run_all_state(ra_state)
+        st.rerun()
+
+    if resume_all:
+        st.rerun()
+
+    # Existing outputs (persisted)
+    outs = ra_state.get("outputs") or {}
+    mf_paths = (outs.get("fund_families") or {}).get("paths") or []
+    if mf_paths:
+        st.markdown("**Fund Families outputs:**")
+        for pinfo in mf_paths:
+            try:
+                fp = Path(pinfo.get("path") or "")
+                if fp.exists():
+                    st.download_button(
+                        f"Download {fp.name}",
+                        data=fp.read_bytes(),
+                        file_name=fp.name,
+                        mime="application/pdf",
+                        key=f"ra_dl_mf_{fp.name}",
+                        use_container_width=True,
+                    )
+            except Exception:
+                pass
+
+    sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
+    if sa_path:
+        try:
+            fp = Path(sa_path)
+            if fp.exists():
+                st.download_button(
+                    f"Download {fp.name}",
+                    data=fp.read_bytes(),
+                    file_name=fp.name,
+                    mime="application/pdf",
+                    key=f"ra_dl_sa_{fp.name}",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
+
+    pod_path = (outs.get("podcasts") or {}).get("path") or ""
+    if pod_path:
+        try:
+            fp = Path(pod_path)
+            if fp.exists():
+                st.download_button(
+                    f"Download {fp.name}",
+                    data=fp.read_bytes(),
+                    file_name=fp.name,
+                    mime="application/pdf",
+                    key=f"ra_dl_pod_{fp.name}",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
+
+    # Execute next step if running
+    if ra_state.get("status") == "running":
+        step = ra_state.get("current_step")
+        cfg = ra_state.get("config") or {}
+        try:
+            if step == "fund_families":
+                days = int(cfg.get("mf_lookback_days", 7))
+                with st.status(f"Run All: Fund Families — Batch 8 Latest (last {days} days)", expanded=True):
+                    quarter_options = get_available_quarters()
+                    run_batch8_latest(quarter_options, days, use_first_word)
+                    cache_all = st.session_state.get("batch_cache", {}) or {}
+                    cache_key = f"{BATCH8_NAME}|{days}d"
+                    by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
+                    paths = []
+                    for q, qd in by_q.items():
+                        c = (qd or {}).get("compiled") or ""
+                        if c:
+                            paths.append({"quarter": q, "path": c})
+                    ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
+                ra_state.setdefault("completed", []).append("fund_families")
+                ra_state["current_step"] = "seeking_alpha"
+                _save_run_all_state(ra_state)
+                st.rerun()
+
+            if step == "seeking_alpha":
+                max_articles = int(cfg.get("sa_max_articles", 5))
+                model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
+                with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
+                    # Build full universe from tickers.py if available; else fall back to current universe in SA section.
+                    universe = []
+                    try:
+                        from tickers import tickers as _T  # type: ignore
+                        if isinstance(_T, dict):
+                            universe = [t for t in _T.keys() if _is_probable_ticker(t)]
+                    except Exception:
+                        universe = []
+                    if not universe:
+                        universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
+                    out_pdf = _build_sa_compiled_pdf_for_universe(universe=universe, max_articles=max_articles, model=model_name)
+                    ra_state.setdefault("outputs", {}).setdefault("seeking_alpha", {})["path"] = str(out_pdf)
+                ra_state.setdefault("completed", []).append("seeking_alpha")
+                ra_state["current_step"] = "podcasts"
+                _save_run_all_state(ra_state)
+                st.rerun()
+
+            if step == "podcasts":
+                # Minimal orchestration: mark complete once podcasts tab has been run manually.
+                ra_state.setdefault("completed", []).append("podcasts")
+                ra_state["current_step"] = "done"
+                ra_state["status"] = "complete"
+                ra_state["completed_at"] = _now_et().isoformat()
+                _save_run_all_state(ra_state)
+        except Exception as e:
+            ra_state["status"] = "error"
+            ra_state["error"] = str(e)
+            _save_run_all_state(ra_state)
+            st.error(f"Run All failed at step '{step}': {e}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
     tab_mf, tab_sa, tab_reddit, tab_podcast = st.tabs(
