@@ -66,7 +66,7 @@ import sa_news_ai as sa_news
 import seekingalpha_excerpts as sa_scraper
 import sys
 
-def ensure_playwright_chromium_installed() -> bool:
+def ensure_playwright_chromium_installed(show_messages: bool = True) -> bool:
     """
     Ensure Chromium exists in the default Playwright cache directory.
     Streamlit Cloud sometimes wipes this on container rebuilds.
@@ -81,7 +81,8 @@ def ensure_playwright_chromium_installed() -> bool:
         return True  # Chromium already present
 
     # Not found — try installing now
-    st.warning("Chromium not found. Installing Playwright browser… (this may take ~20–40 seconds)")
+    if show_messages:
+        st.warning("Chromium not found. Installing Playwright browser… (this may take ~20–40 seconds)")
 
     try:
         # Run: python -m playwright install chromium
@@ -93,16 +94,19 @@ def ensure_playwright_chromium_installed() -> bool:
         )
 
         if result.returncode == 0:
-            st.success("Playwright Chromium installed successfully.")
+            if show_messages:
+                st.success("Playwright Chromium installed successfully.")
             return True
         else:
-            st.error("Playwright Chromium installation failed.")
-            st.code(result.stderr)
+            if show_messages:
+                st.error("Playwright Chromium installation failed.")
+                st.code(result.stderr)
             return False
 
     except Exception as e:
-        st.error("Unexpected error during Chromium installation.")
-        st.code(repr(e))
+        if show_messages:
+            st.error("Unexpected error during Chromium installation.")
+            st.code(repr(e))
         return False
 
 
@@ -461,7 +465,7 @@ def _parse_letter_date_to_date(s: str) -> Optional[datetime]:
     if not s:
         return None
     s = (s or "").strip()
-    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%b %d, %Y", "%B %d, %Y"):
         try:
             return datetime.strptime(s, fmt)
         except Exception:
@@ -2613,7 +2617,7 @@ def get_available_quarters() -> List[str]:
     vals: List[str] = []
     try:
         # Ensure Chromium exists (Streamlit Cloud containers can be wiped)
-        ensure_playwright_chromium_installed()
+        ensure_playwright_chromium_installed(show_messages=False)
 
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
