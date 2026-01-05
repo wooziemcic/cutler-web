@@ -22,8 +22,8 @@ import shutil
 import traceback
 import json
 import hashlib
-from zoneinfo import ZoneInfo
 import openai
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -384,12 +384,25 @@ def _search_by_fund(page, keyword: str, retries: int = 2) -> None:
 
 
 
-def _mf_recent_start_date() -> date:
-    """Fund Families: only keep letters from the last 2 calendar days (incl. today).
-    If today is Monday, include Fri/Sat/Sun/Mon (last 4 days incl. today).
+def _mf_recent_start_date(lookback_days: Optional[int] = None) -> date:
+    """Fund Families: rolling lookback window (inclusive).
+
+    Default is 7 days (weekly) unless overridden by UI selection.
+    Example (lookback_days=7): keep rows where letter_date >= today-6.
     """
+    # UI-driven default (Option D): 7/14/30 days; falls back to 7 if not set.
+    if lookback_days is None:
+        try:
+            lookback_days = int(st.session_state.get("mf_lookback_days", 7))
+        except Exception:
+            lookback_days = 7
+
+    # Guardrails
+    if lookback_days < 1:
+        lookback_days = 1
+
     today = datetime.now(ZoneInfo("America/New_York")).date()
-    return today - timedelta(days=3) if today.weekday() == 0 else today - timedelta(days=1)
+    return today - timedelta(days=(lookback_days - 1))
 
 def _parse_letter_date_to_date(s: str) -> Optional[date]:
     """Best-effort parsing for letter_date strings coming from the BSD table."""
@@ -3484,6 +3497,16 @@ def main():
                             for name in names_in_batch
                         )
                         st.markdown(chips, unsafe_allow_html=True)
+
+
+                    # Lookback window (Option D): defaults to 7 days
+                    lookback_days = st.selectbox(
+                        "Lookback window (days)",
+                        options=[7, 14, 30],
+                        index=0,
+                        key="mf_lookback_days",
+                        help="Downloads only fund documents whose letter date falls within the last N calendar days (inclusive).",
+                    )
 
                     selected_funds = st.multiselect(
                         "Optionally target specific fund families "
