@@ -23,7 +23,6 @@ import traceback
 import json
 import hashlib
 import openai
-from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -43,7 +42,8 @@ from podcasts_config import PODCASTS
 from tickers import tickers
 import math
 import subprocess
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 # pypdf compat
 try:
@@ -104,6 +104,70 @@ def ensure_playwright_chromium_installed() -> bool:
         st.error("Unexpected error during Chromium installation.")
         st.code(repr(e))
         return False
+
+
+# ---------------------- compatibility helpers (Batch 8) ----------------------
+# These wrappers are intentionally tiny and only exist to support the Batch 8
+# code path without altering any existing Fund Families / other tab logic.
+
+def _ensure_chromium_ready() -> bool:
+    """Backwards-compatible alias used by the Batch 8 'Latest' runner."""
+    return ensure_playwright_chromium_installed()
+
+
+def _downloads_dir() -> Path:
+    """Return a stable download directory for Batch 8 runs."""
+    d = DL_DIR / "_latest"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _already_completed(brand: str, quarter: str) -> bool:
+    """Check marker file for Batch 8 completion."""
+    try:
+        return _brand_progress_path(BATCH8_NAME, quarter, brand).exists()
+    except Exception:
+        return False
+
+
+def _mark_completed(brand: str, quarter: str) -> None:
+    """Create marker file for Batch 8 completion."""
+    try:
+        p = _brand_progress_path(BATCH8_NAME, quarter, brand)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("done", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _excerpt_pdf(
+    pdf_path: Path,
+    *,
+    brand: str,
+    quarter: str,
+    use_first_word: bool,
+    source_pdf_name: Optional[str] = None,
+    letter_date: Optional[str] = None,
+    source_url: Optional[str] = None,
+) -> Optional[Path]:
+    """Batch 8 helper: run excerption + build excerpt PDF, returning the excerpt output dir.
+
+    This is a very thin wrapper around the existing Fund Families pipeline
+    (run_excerpt_and_build) to avoid any behavior changes elsewhere.
+    """
+    try:
+        # Keep the same folder convention used by the standard batch runner.
+        out_dir = EX_DIR / quarter / _safe(brand) / _safe(pdf_path.stem)
+        built = run_excerpt_and_build(
+            pdf_path,
+            out_dir,
+            source_pdf_name=source_pdf_name or pdf_path.name,
+            letter_date=letter_date,
+            source_url=source_url,
+        )
+        return out_dir if built else None
+    except Exception:
+        return None
 
 def _brand_progress_path(batch_name: str, quarter: str, brand: str) -> Path:
     """
@@ -183,6 +247,8 @@ ALL_FUND_NAMES = _parse_big_list(BIG_LIST_RAW)
 BATCH_COUNT = 7
 _batches = _chunk_round_robin(ALL_FUND_NAMES, BATCH_COUNT)
 RUNNABLE_BATCHES: Dict[str, List[str]] = {f"Batch {i+1}": b for i, b in enumerate(_batches)}
+BATCH8_NAME = "Batch 8 — Latest"  # dynamic weekly/latest mode
+
 
 # External data source URL (kept internal; not shown in UI)
 BSD_URL = "https://www.buysidedigest.com/hedge-fund-database/"
@@ -383,54 +449,58 @@ def _search_by_fund(page, keyword: str, retries: int = 2) -> None:
             raise
 
 
+def _parse_letter_date_to_date(s: str) -> Optional[datetime]:
+    """Parse BSD 'letter_date' cell into a datetime (date-only semantics).
 
-def _mf_recent_start_date(lookback_days: Optional[int] = None) -> date:
-    """Fund Families: rolling lookback window (inclusive).
-
-    Default is 7 days (weekly) unless overridden by UI selection.
-    Example (lookback_days=7): keep rows where letter_date >= today-6.
+    BSD commonly uses formats like:
+      - MM/DD/YYYY
+      - MM/DD/YY
+      - YYYY-MM-DD
+    Returns None if parsing fails.
     """
-    # UI-driven default (Option D): 7/14/30 days; falls back to 7 if not set.
-    if lookback_days is None:
-        try:
-            lookback_days = int(st.session_state.get("mf_lookback_days", 7))
-        except Exception:
-            lookback_days = 7
-
-    # Guardrails
-    if lookback_days < 1:
-        lookback_days = 1
-
-    today = datetime.now(ZoneInfo("America/New_York")).date()
-    return today - timedelta(days=(lookback_days - 1))
-
-def _parse_letter_date_to_date(s: str) -> Optional[date]:
-    """Best-effort parsing for letter_date strings coming from the BSD table."""
     if not s:
         return None
-    raw = s.strip()
-    # common formats observed across fund letters / tables
-    fmts = (
-        "%m/%d/%Y",
-        "%m/%d/%y",
-        "%Y-%m-%d",
-        "%b %d, %Y",
-        "%B %d, %Y",
-        "%d-%b-%Y",
-        "%d-%B-%Y",
-    )
-    for fmt in fmts:
+    s = (s or "").strip()
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
         try:
-            return datetime.strptime(raw, fmt).date()
+            return datetime.strptime(s, fmt)
         except Exception:
             continue
     return None
 
+
+def _today_et_date() -> datetime:
+    """Return current datetime in America/New_York."""
+    return datetime.now(ZoneInfo("America/New_York"))
+
+
+def _normalize_fund_name(name: str) -> str:
+    n = (name or "").lower()
+    n = re.sub(r"[^a-z0-9\s]+", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    # remove very common noise tokens
+    noise = {"fund", "strategy", "portfolio", "trust", "class", "institutional", "investor", "shares", "share", "l.p", "lp"}
+    toks = [t for t in n.split() if t and t not in noise]
+    return " ".join(toks).strip()
+
+
+def _build_fund_to_batch_lookup() -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Build lookups: exact_name -> Batch X, normalized_name -> Batch X."""
+    exact: Dict[str, str] = {}
+    norm: Dict[str, str] = {}
+    for bname, names in RUNNABLE_BATCHES.items():
+        for nm in names:
+            if not nm:
+                continue
+            exact[nm.strip()] = bname
+            nn = _normalize_fund_name(nm)
+            if nn and nn not in norm:
+                norm[nn] = bname
+    return exact, norm
+
 def _parse_rows(page, quarter: str) -> List[Hit]:
     rows = page.locator(TABLE_ROW)
     hits: List[Hit] = []
-    recent_start = _mf_recent_start_date()
-    today = datetime.now(ZoneInfo("America/New_York")).date()
     for i in range(rows.count()):
         row = rows.nth(i)
         try:
@@ -438,10 +508,6 @@ def _parse_rows(page, quarter: str) -> List[Hit]:
             if q != quarter:
                 continue
             letter_date = row.locator("td").nth(COLMAP["letter_date"]-1).inner_text().strip()
-            ld = _parse_letter_date_to_date(letter_date)
-            if ld and ld < recent_start:
-                continue
-
             fund_cell = row.locator("td").nth(COLMAP["fund_name"]-1)
             link = fund_cell.locator("a").first
             fund_name = (link.inner_text() or '').strip()
@@ -2958,6 +3024,250 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 
 # ---------- NEW: incremental per-batch updater ----------
 
+
+def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_word: bool):
+    """
+    Batch 8 — Latest:
+    - Scrape BSD table for the last N days (default 7).
+    - For each hit, download the quarter PDF from the fund page.
+    - If fund name matches a known batch (1–7), label as '<FundName>_BatchX' for traceability.
+    """
+    st.markdown(f"### Running {BATCH8_NAME} (last {lookback_days} days)")
+
+    cache_all = st.session_state.get("batch_cache", {})
+    cache_key = f"{BATCH8_NAME}|{lookback_days}d"
+    cache_entry = cache_all.get(cache_key)
+
+    # cache reuse (session-only)
+    if cache_entry and cache_entry.get("lookback_days") == lookback_days:
+        st.info("Using cached results for this latest run in this session (no new scraping).")
+        by_quarter = cache_entry.get("by_quarter") or {}
+        for q, qdata in by_quarter.items():
+            compiled_str = qdata.get("compiled") or ""
+            compiled = Path(compiled_str) if compiled_str else None
+            manifest_items = qdata.get("manifest_items") or []
+
+            if compiled and compiled.exists():
+                st.success(f"[{q}] Compiled excerpt PDF ready.")
+                try:
+                    with open(compiled, "rb") as f:
+                        st.download_button(
+                            label=f"Download compiled excerpts ({q})",
+                            data=f.read(),
+                            file_name=compiled.name,
+                            mime="application/pdf",
+                            key=f"download_compiled_latest_cached_{q}",
+                            use_container_width=True,
+                        )
+                except Exception:
+                    st.warning(f"Could not open compiled PDF: {compiled}")
+
+            if manifest_items:
+                with st.expander(f"[{q}] Download full letters ({len(manifest_items)})", expanded=False):
+                    for idx, row in enumerate(manifest_items):
+                        pdf_path = Path(row.get("downloaded_pdf") or "")
+                        label_text = row.get("fund_family") or row.get("fund_name") or ""
+                        if pdf_path.exists():
+                            try:
+                                with open(pdf_path, "rb") as f:
+                                    st.download_button(
+                                        label=f"Download full letter #{idx+1}: {label_text or pdf_path.name}",
+                                        data=f.read(),
+                                        file_name=pdf_path.name,
+                                        mime="application/pdf",
+                                        key=f"download_full_latest_cached_{q}_{idx}",
+                                    )
+                            except Exception:
+                                st.warning(f"Could not open full letter: {pdf_path}")
+                        else:
+                            st.warning(f"Full letter file not found on disk: {pdf_path}")
+
+        return
+
+    # ---------------------- scrape ----------------------
+    _ensure_chromium_ready()
+
+    exact_lookup, norm_lookup = _build_fund_to_batch_lookup()
+
+    today = _today_et_date().date()
+    start_date = today - timedelta(days=max(1, lookback_days) - 1)
+
+    def _label_with_batch(fund_name: str) -> str:
+        fn = (fund_name or "").strip()
+        if not fn:
+            return fn
+        b = exact_lookup.get(fn)
+        if not b:
+            b = norm_lookup.get(_normalize_fund_name(fn))
+        if b:
+            # b looks like "Batch 3"
+            return f"{fn}_{b.replace(' ', '')}"  # FundName_Batch3
+        return fn
+
+    # We'll still compile by quarter for consistent outputs
+    by_quarter: Dict[str, Dict[str, Any]] = {}
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        ctx = browser.new_context(accept_downloads=True)
+        page = ctx.new_page()
+        page.set_default_timeout(30000)
+        page.goto(BSD_URL)
+
+        # Iterate quarters (newest-first) and stop once a whole quarter has no dates within window.
+        for q in quarter_options:
+            if not _set_quarter(page, q):
+                continue
+
+            st.write(f"Scanning {q} for items in window {start_date.isoformat()} → {today.isoformat()} …")
+            try:
+                # clear fund filter and search
+                page.locator(FILTERS["fund"]).first.fill("")
+                page.locator(FILTERS["search_btn"]).first.click()
+                page.wait_for_timeout(900)
+            except Exception:
+                pass
+
+            rows = page.locator(TABLE_ROW)
+            hits: List[Hit] = []
+            newest_in_q: Optional[datetime] = None
+
+            for i in range(rows.count()):
+                row = rows.nth(i)
+                try:
+                    letter_date_str = row.locator("td").nth(COLMAP["letter_date"]-1).inner_text().strip()
+                    dt = _parse_letter_date_to_date(letter_date_str)
+                    if dt is None:
+                        continue
+
+                    # track newest date we see in this quarter table
+                    if newest_in_q is None or dt > newest_in_q:
+                        newest_in_q = dt
+
+                    if dt.date() < start_date or dt.date() > today:
+                        continue
+
+                    fund_cell = row.locator("td").nth(COLMAP["fund_name"]-1)
+                    link = fund_cell.locator("a").first
+                    fund_name = (link.inner_text() or "").strip()
+                    fund_href = link.get_attribute("href") or ""
+                    if fund_href and fund_href.startswith("/"):
+                        fund_href = "https://www.buysidedigest.com" + fund_href
+
+                    hits.append(
+                        Hit(
+                            quarter=q,
+                            letter_date=letter_date_str,
+                            fund_name=fund_name,
+                            fund_href=fund_href,
+                        )
+                    )
+                except Exception:
+                    continue
+
+            # Early stop: if even the newest date on this quarter table is older than start_date,
+            # older quarters won't help.
+            if newest_in_q is not None and newest_in_q.date() < start_date:
+                break
+
+            if not hits:
+                continue
+
+            table_rows: List[Dict[str, Any]] = []
+            manifest_items: List[Dict[str, Any]] = []
+            collected_pdfs: List[Path] = []
+
+            for h in hits:
+                brand = _label_with_batch(h.fund_name or "")
+                st.write(f"[{q}] Latest — {brand} ({h.letter_date})")
+
+                # completed marker is keyed by brand+quarter; keep container behavior consistent
+                if _already_completed(brand, q):
+                    st.info(f"[{q}] Skipping {brand} (already completed in this container).")
+                    continue
+
+                table_rows.append(
+                    {
+                        "fund_family": brand,
+                        "search_token": "",
+                        "quarter": h.quarter,
+                        "letter_date": h.letter_date,
+                        "fund_name": h.fund_name,
+                        "fund_href": h.fund_href,
+                    }
+                )
+
+                try:
+                    page.goto(h.fund_href)
+                    pdfs = _download_quarter_pdf_from_fund(page, q, _downloads_dir())
+                    if not pdfs:
+                        _mark_completed(brand, q)
+                        continue
+
+                    seen = set()
+                    for pdf in pdfs:
+                        if pdf.name in seen:
+                            continue
+                        seen.add(pdf.name)
+
+                        # Stamp / excerpt + compiled excerpt PDF per letter
+                        out_dir = _excerpt_pdf(
+                            pdf,
+                            brand=brand,
+                            quarter=q,
+                            use_first_word=use_first_word,
+                            source_pdf_name=pdf.name,
+                            letter_date=h.letter_date or None,
+                            source_url=h.fund_href,
+                        )
+                        if out_dir:
+                            manifest_items.append(
+                                {
+                                    "fund_family": brand,
+                                    "search_token": "",
+                                    "letter_date": h.letter_date or "",
+                                    "downloaded_pdf": str(pdf),
+                                    "source_pdf_name": pdf.name,
+                                    "excerpt_dir": str(out_dir),
+                                    "fund_name": h.fund_name,
+                                    "fund_href": h.fund_href,
+                                }
+                            )
+                            collected_pdfs.append(pdf)
+
+                    _mark_completed(brand, q)
+                except Exception as e:
+                    st.warning(f"[{q}] Failed to process {brand}: {e}")
+                    continue
+
+            compiled = compile_merged(BATCH8_NAME, q, collected_pdfs, incremental=False)
+            by_quarter[q] = {
+                "compiled": str(compiled) if compiled else "",
+                "manifest_items": manifest_items,
+                "table_rows": table_rows,
+            }
+
+        try:
+            ctx.close()
+        finally:
+            browser.close()
+
+    # Save to session cache
+    cache_all[cache_key] = {
+        "quarters": ["LATEST"],
+        "lookback_days": lookback_days,
+        "by_quarter": by_quarter,
+    }
+    st.session_state["batch_cache"] = cache_all
+
+    st.success("Batch 8 latest run complete.")
+
+
+
+
 def _row_key(row: Dict[str, Any]) -> Tuple[str, str, str, str, str]:
     """
     Build a stable key for a table row so we can compare snapshots.
@@ -3471,7 +3781,7 @@ def main():
 
             run_mode = st.radio(
                 "Run mode",
-                ["Run all 7 batches", "Run a specific batch"],
+                ["Run all 7 batches", "Run a specific batch", "Run Batch 8 — Latest"],
                 index=1,
             )
 
@@ -3483,6 +3793,20 @@ def main():
                 if st.button("Run all 7 batches", use_container_width=True):
                     for bn in batch_names:
                         run_batch(bn, quarters, use_first_word, subset=None)
+                    st.markdown("</div>", unsafe_allow_html=True)
+                    st.stop()
+            elif run_mode == "Run Batch 8 — Latest":
+                lookback_days = st.selectbox(
+                    "Lookback window (days)",
+                    options=[7, 14, 30],
+                    index=0,
+                )
+                st.info(
+                    "Batch 8 scans the BSD database for anything published within the lookback window. "
+                    "If a fund matches one of Batch 1–7 names, it is labeled with that batch for traceability."
+                )
+                if st.button("Run Batch 8 — Latest", use_container_width=True):
+                    run_batch8_latest(quarter_options, int(lookback_days), use_first_word)
                     st.markdown("</div>", unsafe_allow_html=True)
                     st.stop()
             else:
@@ -3497,16 +3821,6 @@ def main():
                             for name in names_in_batch
                         )
                         st.markdown(chips, unsafe_allow_html=True)
-
-
-                    # Lookback window (Option D): defaults to 7 days
-                    lookback_days = st.selectbox(
-                        "Lookback window (days)",
-                        options=[7, 14, 30],
-                        index=0,
-                        key="mf_lookback_days",
-                        help="Downloads only fund documents whose letter date falls within the last N calendar days (inclusive).",
-                    )
 
                     selected_funds = st.multiselect(
                         "Optionally target specific fund families "
