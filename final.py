@@ -2607,13 +2607,16 @@ def get_available_quarters() -> List[str]:
     """
     Read the available quarters from the site's <select> element.
     Skips 'all' and 'latest_two'. Returns values like:
-      ['2025 Q3', '2025 Q2', '2025 Q1', '2024 Q4', ...]
+      ['2025 Q4', '2025 Q3', '2025 Q2', ...]
     Cached so we don't hit the site on every rerun.
     """
     vals: List[str] = []
     try:
+        # Ensure Chromium exists (Streamlit Cloud containers can be wiped)
+        ensure_playwright_chromium_installed()
+
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
             ctx = browser.new_context()
             page = ctx.new_page()
             page.set_default_timeout(30000)
@@ -2643,16 +2646,28 @@ def get_available_quarters() -> List[str]:
             out.append(v)
 
     if not out:
-        # conservative fallback if the site scrape fails
-        out = [
-            "2025 Q3",
-            "2025 Q2",
-            "2025 Q1",
-            "2024 Q4",
-            "2024 Q3",
-            "2024 Q2",
-            "2024 Q1",
-        ]
+        # Dynamic fallback: include current quarter and a few previous quarters
+        now = datetime.now(ZoneInfo("America/New_York"))
+        y = now.year
+        m = now.month
+        if 1 <= m <= 3:
+            cur_q = 1
+        elif 4 <= m <= 6:
+            cur_q = 2
+        elif 7 <= m <= 9:
+            cur_q = 3
+        else:
+            cur_q = 4
+
+        out = []
+        yy, qq = y, cur_q
+        for _ in range(8):
+            out.append(f"{yy} Q{qq}")
+            qq -= 1
+            if qq == 0:
+                qq = 4
+                yy -= 1
+
     return out
 
 def _parse_quarter_label(label: str) -> Optional[Tuple[int, int]]:
@@ -2689,9 +2704,10 @@ def _last_completed_us_quarter(today: Optional[datetime] = None) -> Tuple[int, i
 
 def choose_default_quarter(available: List[str]) -> Optional[str]:
     """
-    Given the list of available quarters from the site, choose the default
-    as the **last completed US quarter**, if present. If not present,
-    choose the most recent available.
+    Choose default quarter for UI:
+    1) Prefer the **current US quarter** if present (e.g., 2025 Q4 once Q4 starts).
+    2) Else fall back to the **last completed US quarter** if present.
+    3) Else choose the most recent available.
     """
     if not available:
         return None
@@ -2708,11 +2724,28 @@ def choose_default_quarter(available: List[str]) -> Optional[str]:
     # Sort by (year DESC, quarter DESC) so index 0 is newest
     parsed.sort(key=lambda x: (x[1], x[2]), reverse=True)
 
-    target_year, target_q = _last_completed_us_quarter()
+    now = datetime.now(ZoneInfo("America/New_York"))
+    m = now.month
+    if 1 <= m <= 3:
+        cur = (now.year, 1)
+    elif 4 <= m <= 6:
+        cur = (now.year, 2)
+    elif 7 <= m <= 9:
+        cur = (now.year, 3)
+    else:
+        cur = (now.year, 4)
+
+    for lab, year, q in parsed:
+        if (year, q) == cur:
+            return lab
+
+    target_year, target_q = _last_completed_us_quarter(now)
 
     for lab, year, q in parsed:
         if year < target_year or (year == target_year and q <= target_q):
             return lab
+
+    return parsed[0][0]
 
     return parsed[0][0]
 
@@ -3028,8 +3061,8 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_word: bool):
     """
     Batch 8 — Latest:
-    - Scrape BSD table for the last N days (default 7).
-    - For each hit, download the quarter PDF from the fund page.
+    - Ignore quarter selection; scan the BSD database table for anything published within the last N days.
+    - For each hit, download the correct quarter PDF from the fund page (quarter comes from the row).
     - If fund name matches a known batch (1–7), label as '<FundName>_BatchX' for traceability.
     """
     st.markdown(f"### Running {BATCH8_NAME} (last {lookback_days} days)")
@@ -3038,11 +3071,18 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
     cache_key = f"{BATCH8_NAME}|{lookback_days}d"
     cache_entry = cache_all.get(cache_key)
 
-    # cache reuse (session-only)
-    if cache_entry and cache_entry.get("lookback_days") == lookback_days:
-        st.info("Using cached results for this latest run in this session (no new scraping).")
-        by_quarter = cache_entry.get("by_quarter") or {}
-        for q, qdata in by_quarter.items():
+    def _render_latest_results(by_quarter: Dict[str, Dict[str, Any]]) -> None:
+        if not by_quarter:
+            st.info("No letters found within the selected lookback window.")
+            return
+
+        # Newest quarter first
+        def _q_sort_key(q: str) -> Tuple[int, int]:
+            pq = _parse_quarter_label(q) or (0, 0)
+            return pq[0], pq[1]
+
+        for q in sorted(by_quarter.keys(), key=_q_sort_key, reverse=True):
+            qdata = by_quarter.get(q) or {}
             compiled_str = qdata.get("compiled") or ""
             compiled = Path(compiled_str) if compiled_str else None
             manifest_items = qdata.get("manifest_items") or []
@@ -3056,7 +3096,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                             data=f.read(),
                             file_name=compiled.name,
                             mime="application/pdf",
-                            key=f"download_compiled_latest_cached_{q}",
+                            key=f"download_compiled_latest_{q}",
                             use_container_width=True,
                         )
                 except Exception:
@@ -3075,13 +3115,17 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                                         data=f.read(),
                                         file_name=pdf_path.name,
                                         mime="application/pdf",
-                                        key=f"download_full_latest_cached_{q}_{idx}",
+                                        key=f"download_full_latest_{q}_{idx}",
                                     )
                             except Exception:
                                 st.warning(f"Could not open full letter: {pdf_path}")
                         else:
                             st.warning(f"Full letter file not found on disk: {pdf_path}")
 
+    # cache reuse (session-only)
+    if cache_entry and cache_entry.get("lookback_days") == lookback_days:
+        st.info("Using cached results for this latest run in this session (no new scraping).")
+        _render_latest_results(cache_entry.get("by_quarter") or {})
         return
 
     # ---------------------- scrape ----------------------
@@ -3100,91 +3144,109 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         if not b:
             b = norm_lookup.get(_normalize_fund_name(fn))
         if b:
-            # b looks like "Batch 3"
             return f"{fn}_{b.replace(' ', '')}"  # FundName_Batch3
         return fn
 
-    # We'll still compile by quarter for consistent outputs
-    by_quarter: Dict[str, Dict[str, Any]] = {}
+    # Collect hits from the database table within the window, grouped by row quarter.
+    hits_by_quarter: Dict[str, List[Hit]] = {}
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox"],
-        )
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30000)
         page.goto(BSD_URL)
 
-        # Iterate quarters (newest-first) and stop once a whole quarter has no dates within window.
-        for q in quarter_options:
-            if not _set_quarter(page, q):
-                continue
+        # IMPORTANT: for Batch 8 we do NOT iterate quarters; we want the table sorted by most recent.
+        # Use "Last Two Quarters" view (latest_two) to ensure recency and reduce pagination.
+        try:
+            sel = page.locator(FILTERS["quarter"]).first
+            # Set to latest_two if present; else leave current selection.
+            sel.select_option("latest_two")
+        except Exception:
+            pass
 
-            st.write(f"Scanning {q} for items in window {start_date.isoformat()} → {today.isoformat()} …")
+        try:
+            # clear fund filter and search
+            page.locator(FILTERS["fund"]).first.fill("")
+            page.locator(FILTERS["search_btn"]).first.click()
+            page.wait_for_timeout(900)
+        except Exception:
+            pass
+
+        st.write(f"Scanning latest table for items in window {start_date.isoformat()} → {today.isoformat()} …")
+
+        rows = page.locator(TABLE_ROW)
+
+        # If the table is sorted newest-first (as BSD indicates), we can early-stop once we hit older dates.
+        for i in range(rows.count()):
+            row = rows.nth(i)
             try:
-                # clear fund filter and search
-                page.locator(FILTERS["fund"]).first.fill("")
-                page.locator(FILTERS["search_btn"]).first.click()
-                page.wait_for_timeout(900)
-            except Exception:
-                pass
-
-            rows = page.locator(TABLE_ROW)
-            hits: List[Hit] = []
-            newest_in_q: Optional[datetime] = None
-
-            for i in range(rows.count()):
-                row = rows.nth(i)
-                try:
-                    letter_date_str = row.locator("td").nth(COLMAP["letter_date"]-1).inner_text().strip()
-                    dt = _parse_letter_date_to_date(letter_date_str)
-                    if dt is None:
-                        continue
-
-                    # track newest date we see in this quarter table
-                    if newest_in_q is None or dt > newest_in_q:
-                        newest_in_q = dt
-
-                    if dt.date() < start_date or dt.date() > today:
-                        continue
-
-                    fund_cell = row.locator("td").nth(COLMAP["fund_name"]-1)
-                    link = fund_cell.locator("a").first
-                    fund_name = (link.inner_text() or "").strip()
-                    fund_href = link.get_attribute("href") or ""
-                    if fund_href and fund_href.startswith("/"):
-                        fund_href = "https://www.buysidedigest.com" + fund_href
-
-                    hits.append(
-                        Hit(
-                            quarter=q,
-                            letter_date=letter_date_str,
-                            fund_name=fund_name,
-                            fund_href=fund_href,
-                        )
-                    )
-                except Exception:
+                letter_date_str = row.locator("td").nth(COLMAP["letter_date"]-1).inner_text().strip()
+                dt = _parse_letter_date_to_date(letter_date_str)
+                if dt is None:
                     continue
 
-            # Early stop: if even the newest date on this quarter table is older than start_date,
-            # older quarters won't help.
-            if newest_in_q is not None and newest_in_q.date() < start_date:
-                break
+                d = dt.date()
+                if d > today:
+                    continue
+                if d < start_date:
+                    break  # older than window; stop scanning
 
-            if not hits:
+                # quarter comes from the row itself
+                q_row = row.locator("td").nth(COLMAP["quarter"]-1).inner_text().strip()
+                q_row = q_row or "UNKNOWN"
+
+                fund_cell = row.locator("td").nth(COLMAP["fund_name"]-1)
+                link = fund_cell.locator("a").first
+                fund_name = (link.inner_text() or "").strip()
+                fund_href = link.get_attribute("href") or ""
+                if fund_href and fund_href.startswith("/"):
+                    fund_href = "https://www.buysidedigest.com" + fund_href
+
+                h = Hit(
+                    quarter=q_row,
+                    letter_date=letter_date_str,
+                    fund_name=fund_name,
+                    fund_href=fund_href,
+                )
+                hits_by_quarter.setdefault(q_row, []).append(h)
+            except Exception:
                 continue
 
+        try:
+            ctx.close()
+        finally:
+            browser.close()
+
+    if not hits_by_quarter:
+        cache_all[cache_key] = {
+            "quarters": ["LATEST"],
+            "lookback_days": lookback_days,
+            "by_quarter": {},
+        }
+        st.session_state["batch_cache"] = cache_all
+        st.info("No letters found within the selected lookback window.")
+        return
+
+    # ---------------------- process hits (download + excerpt) ----------------------
+    by_quarter: Dict[str, Dict[str, Any]] = {}
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
+        ctx = browser.new_context(accept_downloads=True)
+        page = ctx.new_page()
+        page.set_default_timeout(30000)
+
+        for q, hits in hits_by_quarter.items():
             table_rows: List[Dict[str, Any]] = []
             manifest_items: List[Dict[str, Any]] = []
-            collected_pdfs: List[Path] = []
+            excerpt_pdfs: List[Path] = []
 
             for h in hits:
                 brand = _label_with_batch(h.fund_name or "")
                 st.write(f"[{q}] Latest — {brand} ({h.letter_date})")
 
-                # completed marker is keyed by brand+quarter; keep container behavior consistent
                 if _already_completed(brand, q):
                     st.info(f"[{q}] Skipping {brand} (already completed in this container).")
                     continue
@@ -3193,7 +3255,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     {
                         "fund_family": brand,
                         "search_token": "",
-                        "quarter": h.quarter,
+                        "quarter": q,
                         "letter_date": h.letter_date,
                         "fund_name": h.fund_name,
                         "fund_href": h.fund_href,
@@ -3213,37 +3275,39 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                             continue
                         seen.add(pdf.name)
 
-                        # Stamp / excerpt + compiled excerpt PDF per letter
-                        out_dir = _excerpt_pdf(
+                        out_dir = EX_DIR / q / _safe(brand) / _safe(pdf.stem)
+                        built = run_excerpt_and_build(
                             pdf,
-                            brand=brand,
-                            quarter=q,
-                            use_first_word=use_first_word,
+                            out_dir,
                             source_pdf_name=pdf.name,
                             letter_date=h.letter_date or None,
                             source_url=h.fund_href,
                         )
-                        if out_dir:
-                            manifest_items.append(
-                                {
-                                    "fund_family": brand,
-                                    "search_token": "",
-                                    "letter_date": h.letter_date or "",
-                                    "downloaded_pdf": str(pdf),
-                                    "source_pdf_name": pdf.name,
-                                    "excerpt_dir": str(out_dir),
-                                    "fund_name": h.fund_name,
-                                    "fund_href": h.fund_href,
-                                }
-                            )
-                            collected_pdfs.append(pdf)
+
+                        manifest_items.append(
+                            {
+                                "fund_family": brand,
+                                "search_token": "",
+                                "letter_date": h.letter_date or "",
+                                "downloaded_pdf": str(pdf),
+                                "source_pdf_name": pdf.name,
+                                "excerpt_dir": str(out_dir),
+                                "excerpts_json": str(out_dir / "excerpts_clean.json"),
+                                "excerpt_pdf": str(built) if built else "",
+                                "fund_name": h.fund_name,
+                                "fund_href": h.fund_href,
+                            }
+                        )
+
+                        if built:
+                            excerpt_pdfs.append(Path(built))
 
                     _mark_completed(brand, q)
                 except Exception as e:
                     st.warning(f"[{q}] Failed to process {brand}: {e}")
                     continue
 
-            compiled = compile_merged(BATCH8_NAME, q, collected_pdfs, incremental=False)
+            compiled = compile_merged(BATCH8_NAME, q, excerpt_pdfs, incremental=False)
             by_quarter[q] = {
                 "compiled": str(compiled) if compiled else "",
                 "manifest_items": manifest_items,
@@ -3264,6 +3328,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
     st.session_state["batch_cache"] = cache_all
 
     st.success("Batch 8 latest run complete.")
+    _render_latest_results(by_quarter)
 
 
 
@@ -3808,7 +3873,6 @@ def main():
                 if st.button("Run Batch 8 — Latest", use_container_width=True):
                     run_batch8_latest(quarter_options, int(lookback_days), use_first_word)
                     st.markdown("</div>", unsafe_allow_html=True)
-                    st.stop()
             else:
                 selected_batch = st.selectbox("Choose a batch to run", batch_names)
                 if selected_batch:
