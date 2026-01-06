@@ -4175,18 +4175,31 @@ def main():
         try:
             if step == "fund_families":
                 days = int(cfg.get("mf_lookback_days", 7))
-                with st.status(f"Run All: Fund Families — Batch 8 Latest (last {days} days)", expanded=True):
+
+                # IMPORTANT: Fund Families already uses st.expander() internally.
+                # Wrapping it in st.status(expanded=True) nests expanders and Streamlit throws:
+                # "Expanders may not be nested inside other expanders."
+                st.subheader(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
+                _ff_msg = st.empty()
+                _ff_msg.info("Running Fund Families Batch 8…")
+
+                ff_box = st.container()  # NOT an expander
+                with ff_box:
                     quarter_options = get_available_quarters()
                     run_batch8_latest(quarter_options, days, use_first_word)
-                    cache_all = st.session_state.get("batch_cache", {}) or {}
-                    cache_key = f"{BATCH8_NAME}|{days}d"
-                    by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
-                    paths = []
-                    for q, qd in by_q.items():
-                        c = (qd or {}).get("compiled") or ""
-                        if c:
-                            paths.append({"quarter": q, "path": c})
-                    ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
+
+                _ff_msg.success("Fund Families Batch 8 complete.")
+
+                cache_all = st.session_state.get("batch_cache", {}) or {}
+                cache_key = f"{BATCH8_NAME}|{days}d"
+                by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
+                paths = []
+                for q, qd in by_q.items():
+                    c = (qd or {}).get("compiled") or ""
+                    if c:
+                        paths.append({"quarter": q, "path": c})
+                ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
+
                 ra_state.setdefault("completed", []).append("fund_families")
                 ra_state["current_step"] = "seeking_alpha"
                 _save_run_all_state(ra_state)
