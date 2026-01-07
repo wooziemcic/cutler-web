@@ -30,6 +30,10 @@ from typing import List, Dict, Optional, Tuple, Any
 import re as _re
 import html as html_lib
 import streamlit as st
+
+# Streamlit must configure the page before any other Streamlit command.
+st.set_page_config(page_title="Public Research Community Extractor", layout="wide")
+
 import requests
 try:
     import sa_analysis_api as sa_api
@@ -3873,8 +3877,6 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
-    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
-
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
         """
@@ -3882,8 +3884,8 @@ def main():
         /* Center all images (logo) */
         .stImage img {
             display: block;
-            margin-left: calc(100% - 20px);  /* pushes it ~20px to the right */
-            transform: translateX(-50%);
+            margin-left: auto;
+            margin-right: auto;
         }
         /* Overall background and font tweaks */
         .stApp {
@@ -4128,10 +4130,13 @@ def main():
         if logo_path.exists():
             st.image(str(logo_path), width=260)
 
-        st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
+        st.markdown("<div class='app-title'>Public Research Community Extractor</div>", unsafe_allow_html=True)
 
-    # Sidebar: run settings
-    st.sidebar.header("Run settings")
+        st.markdown("<div class='app-subtitle'>Aggregated public investment research — distilled and exportable</div>", unsafe_allow_html=True)
+
+    # Run settings (kept out of the sidebar for a cleaner, website-style layout)
+    st.markdown("<div class='cc-card settings-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Run settings</div>", unsafe_allow_html=True)
 
     quarter_options = get_available_quarters()
     default_q = choose_default_quarter(quarter_options)
@@ -4147,32 +4152,53 @@ def main():
             st.session_state["quarters"] = [default_q]
             st.session_state["auto_default_quarter"] = default_q
 
-    quarters = st.sidebar.multiselect(
-        "Quarters",
-        quarter_options,
-        default=st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]),
-        key="quarters",
-    )
+    # Quarter selector (main page). Stores selection in st.session_state["quarters"] (list).
+    current_q = (st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]))
+    current_q = current_q[0] if isinstance(current_q, list) and current_q else (default_q or (quarter_options[0] if quarter_options else ""))
+    try:
+        q_idx = quarter_options.index(current_q) if (quarter_options and current_q in quarter_options) else 0
+    except Exception:
+        q_idx = 0
 
-    use_first_word = st.sidebar.checkbox(
+    qc1, qc2, qc3 = st.columns([1, 6, 1])
+    with qc1:
+        prev_clicked = st.button("◀", key="quarter_prev", use_container_width=True, help="Previous quarter")
+    with qc2:
+        st.markdown(f"<div class='quarter-pill'>Quarter: <b>{quarter_options[q_idx] if quarter_options else ''}</b></div>", unsafe_allow_html=True)
+    with qc3:
+        next_clicked = st.button("▶", key="quarter_next", use_container_width=True, help="Next quarter")
+
+    if quarter_options:
+        if prev_clicked:
+            q_idx = (q_idx - 1) % len(quarter_options)
+            st.session_state["quarters"] = [quarter_options[q_idx]]
+        if next_clicked:
+            q_idx = (q_idx + 1) % len(quarter_options)
+            st.session_state["quarters"] = [quarter_options[q_idx]]
+
+    quarters = st.session_state.get("quarters")
+
+    use_first_word = st.checkbox(
         "Use first word for search (recommended)",
         value=True,
     )
 
     # Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
-    ai_score_enabled = st.sidebar.checkbox(
+    ai_score_enabled = st.checkbox(
         "AI relevance scoring (1–5 highlights)",
-        value=False,
+        value=bool(st.session_state.get("ai_score_enabled", False)),
         help="Uses OpenAI to rate how directly a paragraph discusses the company. "
              "Adds a rating tag and background highlight for faster skimming.",
         key="ai_score_enabled",
     )
-    ai_score_model = st.sidebar.text_input(
+    ai_score_model = st.text_input(
         "AI model (for relevance scoring)",
-        value="gpt-4o-mini",
+        value=str(st.session_state.get("ai_score_model", "gpt-4o-mini")),
         help="Used only if AI relevance scoring is enabled.",
         key="ai_score_model",
     )
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     batch_names = list(RUNNABLE_BATCHES.keys())
 
@@ -4234,6 +4260,7 @@ def main():
                 "mf_lookback_days": int(ra_mf_days),
                 "sa_max_articles": int(ra_sa_max),
                 "sa_model": str(ra_sa_model),
+                "podcast_lookback_days": 2,
             },
             "started_at": _now_et().isoformat(),
         }
