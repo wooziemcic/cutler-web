@@ -617,6 +617,121 @@ def _build_text_pdf(
     doc.build(story)
     return output_path
 
+
+
+
+def _build_podcast_all_pdf(
+    *,
+    excerpts_path: Path,
+    insights_path: Path,
+    output_path: Path,
+    days_back: int | None = None,
+    group_label: str | None = None,
+) -> Path:
+    """
+    Build a single 'Podcast ALL' PDF from existing podcast pipeline outputs.
+
+    This is intentionally lightweight and reuses the existing text-PDF renderer
+    used in the Podcasts tab (_build_text_pdf). It does NOT change the podcast
+    pipeline itself (ingest/excerpts/insights).
+    """
+    # Load excerpts (for quick mention counts)
+    excerpts: dict = {}
+    try:
+        if excerpts_path and Path(excerpts_path).exists():
+            excerpts = json.loads(Path(excerpts_path).read_text(encoding="utf-8"))
+    except Exception:
+        excerpts = {}
+
+    # Load insights (company stance summaries)
+    insights: list[dict] = []
+    try:
+        if insights_path and Path(insights_path).exists():
+            data = json.loads(Path(insights_path).read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                insights = [d for d in data if isinstance(d, dict)]
+    except Exception:
+        insights = []
+
+    now_et = _now_et()
+
+    # Mention counts from excerpts (exclude _episodes)
+    mention_counts: list[tuple[str, int]] = []
+    if isinstance(excerpts, dict):
+        for k, v in excerpts.items():
+            if not isinstance(k, str) or k.startswith("_"):
+                continue
+            if isinstance(v, list):
+                mention_counts.append((k, len(v)))
+    mention_counts.sort(key=lambda x: x[1], reverse=True)
+
+    # Keep it skimmable: top N companies
+    top_symbols = [sym for sym, cnt in mention_counts if cnt > 0][:25]
+    if not top_symbols:
+        # Fallback: use insights tickers (excluding not_mentioned)
+        top_symbols = [
+            d.get("ticker") for d in insights
+            if isinstance(d.get("ticker"), str) and d.get("stance") != "not_mentioned"
+        ][:25]
+
+    # Build sections
+    sections: list[tuple[str, str]] = []
+
+    # Overview
+    window_line = f"Lookback: last {days_back} days" if days_back else "Lookback: recent window"
+    if group_label:
+        window_line += f"\nPodcasts: {group_label}"
+    sections.append(("Podcast Intelligence — Overview", window_line))
+
+    # Summary table-ish block
+    if mention_counts:
+        top_lines = []
+        for sym, cnt in mention_counts[:20]:
+            top_lines.append(f"{sym}: {cnt} mention(s)")
+        sections.append(("Most-mentioned tickers (top 20)", "\n".join(top_lines)))
+
+    # Detailed stance summaries
+    insights_by_ticker = {d.get("ticker"): d for d in insights if isinstance(d.get("ticker"), str)}
+
+    for sym in top_symbols:
+        d = insights_by_ticker.get(sym, {})
+        stance = d.get("stance", "unknown")
+        conf = d.get("stance_confidence", 0.0)
+        overall = d.get("overall_summary", "") or ""
+        # Supporting points and risks (keep short)
+        sp = d.get("supporting_points") or []
+        rk = d.get("risks_or_headwinds") or []
+
+        body_parts: list[str] = []
+        body_parts.append(f"Stance: {stance} (confidence: {conf})")
+        if overall:
+            body_parts.append("")
+            body_parts.append(overall.strip())
+
+        if isinstance(sp, list) and sp:
+            body_parts.append("")
+            body_parts.append("Supporting points:")
+            for x in sp[:5]:
+                if isinstance(x, str) and x.strip():
+                    body_parts.append(f"- {x.strip()}")
+
+        if isinstance(rk, list) and rk:
+            body_parts.append("")
+            body_parts.append("Risks / headwinds:")
+            for x in rk[:5]:
+                if isinstance(x, str) and x.strip():
+                    body_parts.append(f"- {x.strip()}")
+
+        sections.append((f"{sym} — Podcast stance", "\n".join(body_parts).strip() or "No summary available."))
+
+    subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p ET} • {window_line.replace(chr(10),' • ')}"
+    return _build_text_pdf(
+        output_path=output_path,
+        title="Cutler Capital — Podcast Intelligence (ALL)",
+        subtitle=subtitle,
+        sections=sections,
+    )
+
 def _set_quarter(page, wanted: str) -> bool:
     """
     Try to select the requested quarter in the site's <select>.
@@ -4021,10 +4136,22 @@ def main():
     quarter_options = get_available_quarters()
     default_q = choose_default_quarter(quarter_options)
 
+    # Auto-update the default quarter based on current date (ET),
+    # without overriding a user's manual selection.
+    if "quarters" not in st.session_state:
+        st.session_state["quarters"] = ([default_q] if default_q else quarter_options[:1])
+        st.session_state["auto_default_quarter"] = (st.session_state["quarters"][0] if st.session_state["quarters"] else None)
+    else:
+        prev_auto = st.session_state.get("auto_default_quarter")
+        if prev_auto and st.session_state.get("quarters") == [prev_auto] and default_q and default_q != prev_auto:
+            st.session_state["quarters"] = [default_q]
+            st.session_state["auto_default_quarter"] = default_q
+
     quarters = st.sidebar.multiselect(
         "Quarters",
         quarter_options,
-        default=[default_q] if default_q else quarter_options[:1],
+        default=st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]),
+        key="quarters",
     )
 
     use_first_word = st.sidebar.checkbox(
@@ -4175,21 +4302,10 @@ def main():
         try:
             if step == "fund_families":
                 days = int(cfg.get("mf_lookback_days", 7))
-
-                # IMPORTANT: Fund Families already uses st.expander() internally.
-                # Wrapping it in st.status(expanded=True) nests expanders and Streamlit throws:
-                # "Expanders may not be nested inside other expanders."
-                st.subheader(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
-                _ff_msg = st.empty()
-                _ff_msg.info("Running Fund Families Batch 8…")
-
-                ff_box = st.container()  # NOT an expander
-                with ff_box:
-                    quarter_options = get_available_quarters()
-                    run_batch8_latest(quarter_options, days, use_first_word)
-
-                _ff_msg.success("Fund Families Batch 8 complete.")
-
+                # NOTE: Do not wrap Fund Families in st.status(expanded=True) because Fund Families uses expanders internally.
+                st.info(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
+                quarter_options = get_available_quarters()
+                run_batch8_latest(quarter_options, days, use_first_word)
                 cache_all = st.session_state.get("batch_cache", {}) or {}
                 cache_key = f"{BATCH8_NAME}|{days}d"
                 by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
@@ -4199,7 +4315,6 @@ def main():
                     if c:
                         paths.append({"quarter": q, "path": c})
                 ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
-
                 ra_state.setdefault("completed", []).append("fund_families")
                 ra_state["current_step"] = "seeking_alpha"
                 _save_run_all_state(ra_state)
@@ -4227,7 +4342,54 @@ def main():
                 st.rerun()
 
             if step == "podcasts":
-                # Minimal orchestration: mark complete once podcasts tab has been run manually.
+                days_back = int(cfg.get("mf_lookback_days", 7))
+                model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
+                with st.status(f"Run All: Podcasts — building compiled PDF (last {days_back} days)", expanded=True):
+                    # Run the existing podcast pipeline (subprocess-based) for ALL configured podcasts
+                    try:
+                        from podcasts_config import PODCASTS as _PODCASTS  # type: ignore
+                        podcast_ids = []
+                        for p in (_PODCASTS or []):
+                            pid = getattr(p, "podcast_id", None) or getattr(p, "id", None) or getattr(p, "pod_id", None)
+                            if pid:
+                                podcast_ids.append(str(pid))
+                    except Exception:
+                        podcast_ids = []
+                    if not podcast_ids:
+                        st.warning("No podcast IDs found in podcasts_config.py; skipping podcasts.")
+                        out_pdf = None
+                    else:
+                        run_dir = BASE / "Podcasts" / "_run_all"
+                        podcasts_root = run_dir / "transcripts"
+                        excerpts_path = run_dir / "podcast_excerpts.json"
+                        insights_path = run_dir / "podcast_insights.json"
+                        run_dir.mkdir(parents=True, exist_ok=True)
+
+                        _ = run_podcast_pipeline_from_ui(
+                            days_back=days_back,
+                            podcast_ids=podcast_ids,
+                            podcasts_root=podcasts_root,
+                            excerpts_path=excerpts_path,
+                            insights_path=insights_path,
+                            model_name=model_name,
+                        )
+
+                        # Build a single skimmable PDF across all tickers with mentions
+                        now_et = _now_et()
+                        out_name = f"{now_et:%m.%d.%y} Podcast ALL.pdf"
+                        out_path = (BASE / "Podcasts" / out_name)
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        out_pdf = _build_podcast_all_pdf(
+                            excerpts_path=excerpts_path,
+                            insights_path=insights_path,
+                            output_path=out_path,
+                            days_back=days_back,
+                            podcasts_count=len(podcast_ids),
+                        )
+
+                    if out_pdf:
+                        ra_state.setdefault("outputs", {}).setdefault("podcasts", {})["path"] = str(out_pdf)
                 ra_state.setdefault("completed", []).append("podcasts")
                 ra_state["current_step"] = "done"
                 ra_state["status"] = "complete"
