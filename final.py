@@ -947,7 +947,14 @@ def run_excerpt_and_build(
             ai_model=str(st.session_state.get("ai_score_model", "gpt-4o-mini") or "gpt-4o-mini"),
         )
 
-        return out_pdf if out_pdf.exists() else None
+        # Some environments may emit a PDF with a slightly different name; fall back to newest PDF in out_dir.
+        if out_pdf.exists():
+            return out_pdf
+        try:
+            candidates = sorted(out_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+            return candidates[0] if candidates else None
+        except Exception:
+            return None
 
     except Exception:
         traceback.print_exc()
@@ -1011,6 +1018,9 @@ def _build_compiled_filename(batch: str, *, incremental: bool = False, dt: Optio
 def compile_merged(batch: str, quarter: str, collected: List[Path], *, incremental: bool = False) -> Optional[Path]:
     if not collected:
         return None
+
+    # Ensure output directory exists (Streamlit Cloud ephemeral FS)
+    CP_DIR.mkdir(parents=True, exist_ok=True)
 
     # File name now matches your convention:
     #   BatchN_YYYY-MM-DD_Excerpt.pdf
