@@ -1,5 +1,5 @@
 """
-Public Research Community Extractor
+Cutler Capital — Hedge Fund Letter Scraper
 ------------------------------------------
 Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
 by fund family and quarter. Uses an external hedge-fund letter database as the
@@ -3758,27 +3758,25 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
+
+    # PATCH: Locked defaults (Run settings hidden from UI)
+    st.session_state["use_first_word"] = True
+    st.session_state["enable_ai_scoring"] = True
+    st.session_state["sa_model"] = "gpt-4o-mini"
+    st.session_state["sa_max_articles"] = 1
+    st.session_state["podcast_lookback_days"] = 2
+
     st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
         """
         <style>
-/* === Modern UI polish === */
-.stApp { background: radial-gradient(circle at top left, #f6f3fb 0%, #ffffff 45%, #f7f3fb 100%); }
-.cc-card { background:#fff; border-radius:18px; padding:18px 20px; box-shadow:0 10px 28px rgba(0,0,0,0.06); margin-bottom:16px; }
-.app-title { text-align:center; font-weight:750; font-size:2.15rem; margin: 10px 0 4px 0; color:#3d1630; }
-.app-subtitle { text-align:center; color:#6b6b6b; margin:0 0 14px 0; font-size:0.98rem; }
-div[data-testid='stVerticalBlock'] > div:has(> div.download-card) { margin-top: 8px; }
-.download-card { background:#fff; border:1px solid rgba(91,31,68,0.08); border-radius:16px; padding:14px 16px; box-shadow:0 6px 18px rgba(0,0,0,0.05); }
-.download-card h4 { margin:0 0 6px 0; }
-.helper-text { color:#777; font-size:0.9rem; }
-.stButton>button { border-radius:999px; font-weight:650; padding:0.55rem 1.2rem; }
-.pill-wrap { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
-.pill { display:inline-block; padding:7px 12px; border-radius:999px; background:#f2f2f7; border:1px solid rgba(0,0,0,0.06); font-weight:600; font-size:0.9rem; }
-.pill.active { background:#5b1f44; color:white; border-color:#5b1f44; }
-.skeleton { background: linear-gradient(90deg,#eee 25%,#f5f5f5 37%,#eee 63%); background-size:1000px 100%; animation: shimmer 1.4s infinite; height:14px; border-radius:6px; margin-bottom:8px; }
-@keyframes shimmer { 0% {background-position:-1000px 0;} 100% {background-position:1000px 0;} }
+/* PATCH: hide sidebar */
+[data-testid="stSidebar"]{display:none !important;}
+[data-testid="stSidebarNav"]{display:none !important;}
+[data-testid="collapsedControl"]{display:none !important;}
+section.main > div{padding-top: 1.5rem;}
 
 
         /* Center all images (logo) */
@@ -4030,31 +4028,51 @@ div[data-testid='stVerticalBlock'] > div:has(> div.download-card) { margin-top: 
         if logo_path.exists():
             st.image(str(logo_path), width=260)
 
-        st.markdown("<div class='app-title'>Public Research Community Extractor</div>", unsafe_allow_html=True)
-        st.markdown("<div class='app-subtitle'>Aggregated public investment research — distilled and exportable</div>", unsafe_allow_html=True)
+        st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
 
 
-    # (PATCH) Main run settings (sidebar hidden)
+    # PATCH: Quarter selector carousel (single-quarter)
     st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>Run settings</div>", unsafe_allow_html=True)
-    st.markdown("<div class='helper-text'>Select quarter(s) to run. All other settings are locked for consistency.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Quarter</div>", unsafe_allow_html=True)
+    st.markdown("<div class='helper-text'>Use arrows to switch quarters. (Batch 8 ignores quarter.)</div>", unsafe_allow_html=True)
 
     quarter_options = get_available_quarters()
-    default_q = choose_default_quarter(quarter_options)
+    if not quarter_options:
+        quarter_options = []
+    # default quarter
+    try:
+        default_q = choose_default_quarter(quarter_options)
+    except Exception:
+        default_q = quarter_options[-1] if quarter_options else None
 
-    # Preserve existing quarter selection semantics (session_state['quarters'])
-    if "quarters" not in st.session_state:
-        st.session_state["quarters"] = ([default_q] if default_q else quarter_options[:1])
-        st.session_state["auto_default_quarter"] = (st.session_state["quarters"][0] if st.session_state["quarters"] else None)
+    if "quarters" not in st.session_state or not st.session_state.get("quarters"):
+        st.session_state["quarters"] = ([default_q] if default_q else (quarter_options[:1] if quarter_options else []))
 
-    selected_quarters = st.multiselect(
-        "Quarters",
-        options=quarter_options,
-        default=st.session_state.get("quarters", []),
-        help="Choose one or more quarters. This controls Fund Families Batches 1–7. Batch 8 ignores quarter.",
-    )
-    if selected_quarters:
-        st.session_state["quarters"] = selected_quarters
+    current_q = st.session_state["quarters"][0] if st.session_state.get("quarters") else (default_q or (quarter_options[-1] if quarter_options else ""))
+    if current_q not in quarter_options and quarter_options:
+        current_q = quarter_options[-1]
+        st.session_state["quarters"] = [current_q]
+
+    # Compute index safely
+    idx = quarter_options.index(current_q) if (quarter_options and current_q in quarter_options) else 0
+
+    c1, c2, c3 = st.columns([1, 3, 1])
+    with c1:
+        prev_disabled = (idx <= 0)
+        if st.button("◀", use_container_width=True, disabled=prev_disabled, key="q_prev_btn"):
+            new_idx = max(0, idx - 1)
+            st.session_state["quarters"] = [quarter_options[new_idx]]
+            st.rerun()
+    with c2:
+        # Display current selection as a styled pill
+        st.markdown(f"<div style='text-align:center; font-size:1.15rem; font-weight:750; padding:10px 0; color:#3d1630;'>"
+                    f"{current_q}</div>", unsafe_allow_html=True)
+    with c3:
+        next_disabled = (idx >= len(quarter_options) - 1)
+        if st.button("▶", use_container_width=True, disabled=next_disabled, key="q_next_btn"):
+            new_idx = min(len(quarter_options) - 1, idx + 1)
+            st.session_state["quarters"] = [quarter_options[new_idx]]
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
