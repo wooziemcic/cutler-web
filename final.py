@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 # ================= PATCH: UI + DEFAULTS ONLY =================
 import streamlit as st
@@ -30,7 +31,6 @@ Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
 by fund family and quarter. Uses an external hedge-fund letter database as the
 data source; all branding in the UI is Cutler-only.
 """
-from __future__ import annotations
 
 # Windows Playwright policy fix
 import asyncio, platform
