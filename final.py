@@ -3763,10 +3763,11 @@ def main():
     st.session_state["use_first_word"] = True
     st.session_state["enable_ai_scoring"] = True
     st.session_state["sa_model"] = "gpt-4o-mini"
+    st.session_state["ai_score_model"] = "gpt-4o-mini"
     st.session_state["sa_max_articles"] = 1
     st.session_state["podcast_lookback_days"] = 2
 
-    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
+    # PATCH: removed duplicate st.set_page_config (must be called once at top)
 
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
@@ -4236,18 +4237,23 @@ section.main > div{padding-top: 1.5rem;}
         try:
             if step == "fund_families":
                 days = int(cfg.get("mf_lookback_days", 7))
-                with st.status(f"Run All: Fund Families — Batch 8 Latest (last {days} days)", expanded=True):
-                    quarter_options = get_available_quarters()
-                    run_batch8_latest(quarter_options, days, use_first_word)
-                    cache_all = st.session_state.get("batch_cache", {}) or {}
-                    cache_key = f"{BATCH8_NAME}|{days}d"
-                    by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
-                    paths = []
-                    for q, qd in by_q.items():
-                        c = (qd or {}).get("compiled") or ""
-                        if c:
-                            paths.append({"quarter": q, "path": c})
-                    ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
+                # PATCH: Fund Families uses expanders internally; do NOT wrap in st.status(expanded=True)
+                st.subheader(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
+                _ff_msg = st.empty()
+                _ff_msg.info("Running Fund Families Batch 8…")
+
+                quarter_options = get_available_quarters()
+                run_batch8_latest(quarter_options, days, use_first_word)
+                cache_all = st.session_state.get("batch_cache", {}) or {}
+                cache_key = f"{BATCH8_NAME}|{days}d"
+                by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
+                paths = []
+                for q, qd in by_q.items():
+                    c = (qd or {}).get("compiled") or ""
+                    if c:
+                        paths.append({"quarter": q, "path": c})
+                ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
+                _ff_msg.success("Fund Families Batch 8 complete.")
                 ra_state.setdefault("completed", []).append("fund_families")
                 ra_state["current_step"] = "seeking_alpha"
                 _save_run_all_state(ra_state)
