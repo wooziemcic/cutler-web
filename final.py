@@ -1,29 +1,3 @@
-from __future__ import annotations
-
-# ================= PATCH: UI + DEFAULTS ONLY =================
-import streamlit as st
-
-# Force brand title (do not touch core logic)
-st.markdown("""
-<style>
-[data-testid="stSidebar"] { display: none; }
-.app-title { text-align:center; font-weight:700; font-size:2.2rem; margin-bottom:0.25rem; }
-.app-subtitle { text-align:center; color:#666; margin-bottom:1.5rem; }
-.cc-card { background:#fff; border-radius:16px; padding:1.5rem 1.75rem; box-shadow:0 10px 28px rgba(0,0,0,0.06); margin-bottom:1.25rem; }
-</style>
-""", unsafe_allow_html=True)
-
-st.session_state.setdefault("use_first_word", True)
-st.session_state.setdefault("enable_ai_scoring", True)
-st.session_state.setdefault("sa_model", "gpt-4o-mini")
-st.session_state.setdefault("sa_max_articles", 1)
-st.session_state.setdefault("podcast_lookback_days", 2)
-
-st.markdown("<div class='app-title'>Public Research Community Extractor</div>", unsafe_allow_html=True)
-st.markdown("<div class='app-subtitle'>Aggregated public investment research — distilled and exportable</div>", unsafe_allow_html=True)
-# ================= END PATCH =================
-
-
 """
 Cutler Capital — Hedge Fund Letter Scraper
 ------------------------------------------
@@ -31,6 +5,7 @@ Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
 by fund family and quarter. Uses an external hedge-fund letter database as the
 data source; all branding in the UI is Cutler-only.
 """
+from __future__ import annotations
 
 # Windows Playwright policy fix
 import asyncio, platform
@@ -3898,7 +3873,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
-    # PATCH: removed duplicate set_page_config (must be called once at top)
+    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
