@@ -1,36 +1,11 @@
-from __future__ import annotations
-
-# ================= PATCH: UI + DEFAULTS ONLY =================
-import streamlit as st
-
-# Force brand title (do not touch core logic)
-st.markdown("""
-<style>
-[data-testid="stSidebar"] { display: none; }
-.app-title { text-align:center; font-weight:700; font-size:2.2rem; margin-bottom:0.25rem; }
-.app-subtitle { text-align:center; color:#666; margin-bottom:1.5rem; }
-.cc-card { background:#fff; border-radius:16px; padding:1.5rem 1.75rem; box-shadow:0 10px 28px rgba(0,0,0,0.06); margin-bottom:1.25rem; }
-</style>
-""", unsafe_allow_html=True)
-
-st.session_state.setdefault("use_first_word", True)
-st.session_state.setdefault("enable_ai_scoring", True)
-st.session_state.setdefault("sa_model", "gpt-4o-mini")
-st.session_state.setdefault("sa_max_articles", 1)
-st.session_state.setdefault("podcast_lookback_days", 2)
-
-st.markdown("<div class='app-title'>Public Research Community Extractor</div>", unsafe_allow_html=True)
-st.markdown("<div class='app-subtitle'>Aggregated public investment research — distilled and exportable</div>", unsafe_allow_html=True)
-# ================= END PATCH =================
-
-
 """
-Cutler Capital — Hedge Fund Letter Scraper
+Public Research Community Extractor
 ------------------------------------------
 Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
 by fund family and quarter. Uses an external hedge-fund letter database as the
 data source; all branding in the UI is Cutler-only.
 """
+from __future__ import annotations
 
 # Windows Playwright policy fix
 import asyncio, platform
@@ -641,121 +616,6 @@ def _build_text_pdf(
                 story.append(Paragraph(safe_b, Body))
     doc.build(story)
     return output_path
-
-
-
-
-def _build_podcast_all_pdf(
-    *,
-    excerpts_path: Path,
-    insights_path: Path,
-    output_path: Path,
-    days_back: int | None = None,
-    group_label: str | None = None,
-) -> Path:
-    """
-    Build a single 'Podcast ALL' PDF from existing podcast pipeline outputs.
-
-    This is intentionally lightweight and reuses the existing text-PDF renderer
-    used in the Podcasts tab (_build_text_pdf). It does NOT change the podcast
-    pipeline itself (ingest/excerpts/insights).
-    """
-    # Load excerpts (for quick mention counts)
-    excerpts: dict = {}
-    try:
-        if excerpts_path and Path(excerpts_path).exists():
-            excerpts = json.loads(Path(excerpts_path).read_text(encoding="utf-8"))
-    except Exception:
-        excerpts = {}
-
-    # Load insights (company stance summaries)
-    insights: list[dict] = []
-    try:
-        if insights_path and Path(insights_path).exists():
-            data = json.loads(Path(insights_path).read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                insights = [d for d in data if isinstance(d, dict)]
-    except Exception:
-        insights = []
-
-    now_et = _now_et()
-
-    # Mention counts from excerpts (exclude _episodes)
-    mention_counts: list[tuple[str, int]] = []
-    if isinstance(excerpts, dict):
-        for k, v in excerpts.items():
-            if not isinstance(k, str) or k.startswith("_"):
-                continue
-            if isinstance(v, list):
-                mention_counts.append((k, len(v)))
-    mention_counts.sort(key=lambda x: x[1], reverse=True)
-
-    # Keep it skimmable: top N companies
-    top_symbols = [sym for sym, cnt in mention_counts if cnt > 0][:25]
-    if not top_symbols:
-        # Fallback: use insights tickers (excluding not_mentioned)
-        top_symbols = [
-            d.get("ticker") for d in insights
-            if isinstance(d.get("ticker"), str) and d.get("stance") != "not_mentioned"
-        ][:25]
-
-    # Build sections
-    sections: list[tuple[str, str]] = []
-
-    # Overview
-    window_line = f"Lookback: last {days_back} days" if days_back else "Lookback: recent window"
-    if group_label:
-        window_line += f"\nPodcasts: {group_label}"
-    sections.append(("Podcast Intelligence — Overview", window_line))
-
-    # Summary table-ish block
-    if mention_counts:
-        top_lines = []
-        for sym, cnt in mention_counts[:20]:
-            top_lines.append(f"{sym}: {cnt} mention(s)")
-        sections.append(("Most-mentioned tickers (top 20)", "\n".join(top_lines)))
-
-    # Detailed stance summaries
-    insights_by_ticker = {d.get("ticker"): d for d in insights if isinstance(d.get("ticker"), str)}
-
-    for sym in top_symbols:
-        d = insights_by_ticker.get(sym, {})
-        stance = d.get("stance", "unknown")
-        conf = d.get("stance_confidence", 0.0)
-        overall = d.get("overall_summary", "") or ""
-        # Supporting points and risks (keep short)
-        sp = d.get("supporting_points") or []
-        rk = d.get("risks_or_headwinds") or []
-
-        body_parts: list[str] = []
-        body_parts.append(f"Stance: {stance} (confidence: {conf})")
-        if overall:
-            body_parts.append("")
-            body_parts.append(overall.strip())
-
-        if isinstance(sp, list) and sp:
-            body_parts.append("")
-            body_parts.append("Supporting points:")
-            for x in sp[:5]:
-                if isinstance(x, str) and x.strip():
-                    body_parts.append(f"- {x.strip()}")
-
-        if isinstance(rk, list) and rk:
-            body_parts.append("")
-            body_parts.append("Risks / headwinds:")
-            for x in rk[:5]:
-                if isinstance(x, str) and x.strip():
-                    body_parts.append(f"- {x.strip()}")
-
-        sections.append((f"{sym} — Podcast stance", "\n".join(body_parts).strip() or "No summary available."))
-
-    subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p ET} • {window_line.replace(chr(10),' • ')}"
-    return _build_text_pdf(
-        output_path=output_path,
-        title="Cutler Capital — Podcast Intelligence (ALL)",
-        subtitle=subtitle,
-        sections=sections,
-    )
 
 def _set_quarter(page, wanted: str) -> bool:
     """
@@ -3898,12 +3758,29 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
-    # PATCH: removed duplicate set_page_config (must be called once at top)
+    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
         """
         <style>
+/* === Modern UI polish === */
+.stApp { background: radial-gradient(circle at top left, #f6f3fb 0%, #ffffff 45%, #f7f3fb 100%); }
+.cc-card { background:#fff; border-radius:18px; padding:18px 20px; box-shadow:0 10px 28px rgba(0,0,0,0.06); margin-bottom:16px; }
+.app-title { text-align:center; font-weight:750; font-size:2.15rem; margin: 10px 0 4px 0; color:#3d1630; }
+.app-subtitle { text-align:center; color:#6b6b6b; margin:0 0 14px 0; font-size:0.98rem; }
+div[data-testid='stVerticalBlock'] > div:has(> div.download-card) { margin-top: 8px; }
+.download-card { background:#fff; border:1px solid rgba(91,31,68,0.08); border-radius:16px; padding:14px 16px; box-shadow:0 6px 18px rgba(0,0,0,0.05); }
+.download-card h4 { margin:0 0 6px 0; }
+.helper-text { color:#777; font-size:0.9rem; }
+.stButton>button { border-radius:999px; font-weight:650; padding:0.55rem 1.2rem; }
+.pill-wrap { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
+.pill { display:inline-block; padding:7px 12px; border-radius:999px; background:#f2f2f7; border:1px solid rgba(0,0,0,0.06); font-weight:600; font-size:0.9rem; }
+.pill.active { background:#5b1f44; color:white; border-color:#5b1f44; }
+.skeleton { background: linear-gradient(90deg,#eee 25%,#f5f5f5 37%,#eee 63%); background-size:1000px 100%; animation: shimmer 1.4s infinite; height:14px; border-radius:6px; margin-bottom:8px; }
+@keyframes shimmer { 0% {background-position:-1000px 0;} 100% {background-position:1000px 0;} }
+
+
         /* Center all images (logo) */
         .stImage img {
             display: block;
@@ -4153,7 +4030,33 @@ def main():
         if logo_path.exists():
             st.image(str(logo_path), width=260)
 
-        st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
+        st.markdown("<div class='app-title'>Public Research Community Extractor</div>", unsafe_allow_html=True)
+        st.markdown("<div class='app-subtitle'>Aggregated public investment research — distilled and exportable</div>", unsafe_allow_html=True)
+
+
+    # (PATCH) Main run settings (sidebar hidden)
+    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Run settings</div>", unsafe_allow_html=True)
+    st.markdown("<div class='helper-text'>Select quarter(s) to run. All other settings are locked for consistency.</div>", unsafe_allow_html=True)
+
+    quarter_options = get_available_quarters()
+    default_q = choose_default_quarter(quarter_options)
+
+    # Preserve existing quarter selection semantics (session_state['quarters'])
+    if "quarters" not in st.session_state:
+        st.session_state["quarters"] = ([default_q] if default_q else quarter_options[:1])
+        st.session_state["auto_default_quarter"] = (st.session_state["quarters"][0] if st.session_state["quarters"] else None)
+
+    selected_quarters = st.multiselect(
+        "Quarters",
+        options=quarter_options,
+        default=st.session_state.get("quarters", []),
+        help="Choose one or more quarters. This controls Fund Families Batches 1–7. Batch 8 ignores quarter.",
+    )
+    if selected_quarters:
+        st.session_state["quarters"] = selected_quarters
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     # Sidebar: run settings
     st.sidebar.header("Run settings")
@@ -4161,22 +4064,10 @@ def main():
     quarter_options = get_available_quarters()
     default_q = choose_default_quarter(quarter_options)
 
-    # Auto-update the default quarter based on current date (ET),
-    # without overriding a user's manual selection.
-    if "quarters" not in st.session_state:
-        st.session_state["quarters"] = ([default_q] if default_q else quarter_options[:1])
-        st.session_state["auto_default_quarter"] = (st.session_state["quarters"][0] if st.session_state["quarters"] else None)
-    else:
-        prev_auto = st.session_state.get("auto_default_quarter")
-        if prev_auto and st.session_state.get("quarters") == [prev_auto] and default_q and default_q != prev_auto:
-            st.session_state["quarters"] = [default_q]
-            st.session_state["auto_default_quarter"] = default_q
-
     quarters = st.sidebar.multiselect(
         "Quarters",
         quarter_options,
-        default=st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]),
-        key="quarters",
+        default=[default_q] if default_q else quarter_options[:1],
     )
 
     use_first_word = st.sidebar.checkbox(
@@ -4327,19 +4218,18 @@ def main():
         try:
             if step == "fund_families":
                 days = int(cfg.get("mf_lookback_days", 7))
-                # NOTE: Do not wrap Fund Families in st.status(expanded=True) because Fund Families uses expanders internally.
-                st.info(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
-                quarter_options = get_available_quarters()
-                run_batch8_latest(quarter_options, days, use_first_word)
-                cache_all = st.session_state.get("batch_cache", {}) or {}
-                cache_key = f"{BATCH8_NAME}|{days}d"
-                by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
-                paths = []
-                for q, qd in by_q.items():
-                    c = (qd or {}).get("compiled") or ""
-                    if c:
-                        paths.append({"quarter": q, "path": c})
-                ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
+                with st.status(f"Run All: Fund Families — Batch 8 Latest (last {days} days)", expanded=True):
+                    quarter_options = get_available_quarters()
+                    run_batch8_latest(quarter_options, days, use_first_word)
+                    cache_all = st.session_state.get("batch_cache", {}) or {}
+                    cache_key = f"{BATCH8_NAME}|{days}d"
+                    by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
+                    paths = []
+                    for q, qd in by_q.items():
+                        c = (qd or {}).get("compiled") or ""
+                        if c:
+                            paths.append({"quarter": q, "path": c})
+                    ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
                 ra_state.setdefault("completed", []).append("fund_families")
                 ra_state["current_step"] = "seeking_alpha"
                 _save_run_all_state(ra_state)
@@ -4367,54 +4257,7 @@ def main():
                 st.rerun()
 
             if step == "podcasts":
-                days_back = int(cfg.get("mf_lookback_days", 7))
-                model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
-                with st.status(f"Run All: Podcasts — building compiled PDF (last {days_back} days)", expanded=True):
-                    # Run the existing podcast pipeline (subprocess-based) for ALL configured podcasts
-                    try:
-                        from podcasts_config import PODCASTS as _PODCASTS  # type: ignore
-                        podcast_ids = []
-                        for p in (_PODCASTS or []):
-                            pid = getattr(p, "podcast_id", None) or getattr(p, "id", None) or getattr(p, "pod_id", None)
-                            if pid:
-                                podcast_ids.append(str(pid))
-                    except Exception:
-                        podcast_ids = []
-                    if not podcast_ids:
-                        st.warning("No podcast IDs found in podcasts_config.py; skipping podcasts.")
-                        out_pdf = None
-                    else:
-                        run_dir = BASE / "Podcasts" / "_run_all"
-                        podcasts_root = run_dir / "transcripts"
-                        excerpts_path = run_dir / "podcast_excerpts.json"
-                        insights_path = run_dir / "podcast_insights.json"
-                        run_dir.mkdir(parents=True, exist_ok=True)
-
-                        _ = run_podcast_pipeline_from_ui(
-                            days_back=days_back,
-                            podcast_ids=podcast_ids,
-                            podcasts_root=podcasts_root,
-                            excerpts_path=excerpts_path,
-                            insights_path=insights_path,
-                            model_name=model_name,
-                        )
-
-                        # Build a single skimmable PDF across all tickers with mentions
-                        now_et = _now_et()
-                        out_name = f"{now_et:%m.%d.%y} Podcast ALL.pdf"
-                        out_path = (BASE / "Podcasts" / out_name)
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-                        out_pdf = _build_podcast_all_pdf(
-                            excerpts_path=excerpts_path,
-                            insights_path=insights_path,
-                            output_path=out_path,
-                            days_back=days_back,
-                            podcasts_count=len(podcast_ids),
-                        )
-
-                    if out_pdf:
-                        ra_state.setdefault("outputs", {}).setdefault("podcasts", {})["path"] = str(out_pdf)
+                # Minimal orchestration: mark complete once podcasts tab has been run manually.
                 ra_state.setdefault("completed", []).append("podcasts")
                 ra_state["current_step"] = "done"
                 ra_state["status"] = "complete"
