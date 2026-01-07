@@ -25,7 +25,7 @@ st.markdown("<div class='app-subtitle'>Aggregated public investment research —
 
 
 """
-Cutler Capital — Hedge Fund Letter Scraper
+Public Research Community Extractor
 ------------------------------------------
 Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
 by fund family and quarter. Uses an external hedge-fund letter database as the
@@ -3898,7 +3898,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
-    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
+    st.set_page_config(page_title="Public Research Community Extractor", layout="wide")
 
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
@@ -4221,7 +4221,7 @@ def main():
         "Seeking Alpha max articles per ticker",
         min_value=1,
         max_value=20,
-        value=int(ra_cfg.get("sa_max_articles", 5)),
+        value=int(ra_cfg.get("sa_max_articles", 1)),
         step=1,
         key="run_all_sa_max_articles",
     )
@@ -4346,7 +4346,7 @@ def main():
                 st.rerun()
 
             if step == "seeking_alpha":
-                max_articles = int(cfg.get("sa_max_articles", 5))
+                max_articles = int(cfg.get("sa_max_articles", 1))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
                 with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
                     # Build full universe from tickers.py if available; else fall back to current universe in SA section.
