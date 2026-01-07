@@ -4273,6 +4273,23 @@ def main():
     # Existing outputs (persisted)
     outs = ra_state.get("outputs") or {}
     mf_paths = (outs.get("fund_families") or {}).get("paths") or []
+
+    # Fallback: if Run All state doesn't yet contain Fund Families outputs,
+    # try to recover them from the Fund Families Batch 8 Latest cache (no behavior change).
+    if not mf_paths:
+        try:
+            cache_all = st.session_state.get("batch_cache", {}) or {}
+            cfg_days = int((ra_state.get("config") or {}).get("mf_lookback_days", st.session_state.get("run_all_mf_days", 7)))
+            cache_key = f"{BATCH8_NAME}|{cfg_days}d"
+            by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
+            recovered = []
+            for q, qd in by_q.items():
+                c = (qd or {}).get("compiled") or ""
+                if c:
+                    recovered.append({"quarter": q, "path": c})
+            mf_paths = recovered
+        except Exception:
+            pass
     if mf_paths:
         st.markdown("**Fund Families outputs:**")
         for pinfo in mf_paths:
