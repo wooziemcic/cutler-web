@@ -3654,6 +3654,16 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     st.warning(f"[{q}] Failed to process {brand}: {e}")
                     continue
 
+            # Safety: if excerpt_pdfs wasn't populated for any reason, rebuild it from manifest_items
+            # so the compiled excerpt PDF download button can still appear.
+            if (not excerpt_pdfs) and manifest_items:
+                for mi in manifest_items:
+                    ep = (mi or {}).get("excerpt_pdf") or ""
+                    if ep:
+                        ep_path = Path(ep)
+                        if ep_path.exists():
+                            excerpt_pdfs.append(ep_path)
+
             compiled = compile_merged(BATCH8_NAME, q, excerpt_pdfs, incremental=False)
             by_quarter[q] = {
                 "compiled": str(compiled) if compiled else "",
