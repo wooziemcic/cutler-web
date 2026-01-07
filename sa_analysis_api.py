@@ -11,6 +11,7 @@ Depends on:
 
 import os
 import logging
+from datetime import datetime, timezone, timedelta, date
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -88,6 +89,40 @@ class AnalysisArticle:
 #  Payload parsing helpers
 # -------------------------------------------------------------------
 
+
+def _parse_sa_datetime(value) -> Optional[datetime]:
+    """Best-effort parse for Seeking Alpha date/time fields.
+
+    Returns timezone-aware datetime when possible.
+    Accepts ISO strings (with or without 'Z') or unix timestamps (seconds or ms).
+    """
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            ts = float(value)
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            # try full ISO first
+            try:
+                dt = datetime.fromisoformat(s)
+            except Exception:
+                # try date-only
+                dt = datetime.fromisoformat(s[:10])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+    except Exception:
+        return None
+    return None
+
 def _author_map_from_included(payload: dict) -> dict:
     """Return mapping: author_id -> {name, slug}. Defensive to missing shapes."""
     out: dict = {}
@@ -154,12 +189,13 @@ def _request(path: str, params: dict) -> dict:
 #  Public API – list & details
 # -------------------------------------------------------------------
 
-def fetch_analysis_list(symbol: str, size: int = 10) -> List[AnalysisArticle]:
+def fetch_analysis_list(symbol: str, size: int = 10, lookback_days: int = 7) -> List[AnalysisArticle]:
     """
     Get list of recent analysis articles for a single ticker symbol.
 
     symbol: 'TSLA', 'AAPL', etc.
     size:   how many articles to pull from page 1 (max 40 allowed by API)
+    lookback_days: keep only articles published in the last N days (inclusive)
     """
     params = {
         "id": symbol.lower(),  # symbol slug
@@ -176,13 +212,29 @@ def fetch_analysis_list(symbol: str, size: int = 10) -> List[AnalysisArticle]:
         log.debug("Unexpected analysis list payload: %r", payload)
         return []
 
+    # --- Date filter (cost control): keep only last N days at list stage ---
+    cutoff_date = None
+    try:
+        lb = int(lookback_days) if lookback_days is not None else 0
+        if lb and lb > 0:
+            today_utc = datetime.now(timezone.utc).date()
+            cutoff_date = today_utc - timedelta(days=max(lb - 1, 0))
+    except Exception:
+        cutoff_date = None
+
     articles: List[AnalysisArticle] = []
     for item in data:
         try:
             art_id = str(item["id"])
             attrs = item.get("attributes", {})
             title = attrs.get("title") or ""
-            published = attrs.get("publishOn") or ""
+            raw_published = (attrs.get("publishOn") or attrs.get("publishedAt") or attrs.get("published_at") or attrs.get("createdAt") or attrs.get("created_at") or "")
+            published = raw_published or ""
+            # Apply lookback filter if we can parse a publish date
+            if cutoff_date:
+                dt_pub = _parse_sa_datetime(raw_published)
+                if dt_pub and dt_pub.date() < cutoff_date:
+                    continue
             link_self = item.get("links", {}).get("self") or ""
             url = f"https://seekingalpha.com{link_self}" if link_self else ""
 
