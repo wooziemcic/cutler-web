@@ -75,9 +75,11 @@ class AnalysisArticle:
     title: str
     published: str
     url: str
-    primary_tickers: List[str] = field(default_factory=list)
+
     # Derived publish date (YYYY-MM-DD) for display/PDFs
     published_date: str = ""
+
+    primary_tickers: List[str] = field(default_factory=list)
 
     # Optional author fields (may be blank depending on API payload / plan)
     author_name: str = ""
