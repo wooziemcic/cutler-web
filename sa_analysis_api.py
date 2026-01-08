@@ -76,11 +76,10 @@ class AnalysisArticle:
     published: str
     url: str
     primary_tickers: List[str] = field(default_factory=list)
+    # Derived publish date (YYYY-MM-DD) for display/PDFs
+    published_date: str = ""
 
-    # Optional / derived fields
-    published_date: str = ""  # YYYY-MM-DD
-
-    # Optional author fields
+    # Optional author fields (may be blank depending on API payload / plan)
     author_name: str = ""
     author_slug: str = ""
 
@@ -233,15 +232,8 @@ def fetch_analysis_list(symbol: str, size: int = 10, lookback_days: int = 2) -> 
             title = attrs.get("title") or ""
             raw_published = (attrs.get("publishOn") or attrs.get("publishedAt") or attrs.get("published_at") or attrs.get("createdAt") or attrs.get("created_at") or "")
             published = raw_published or ""
-
-            # Parse publish datetime once; use for both filtering and display.
             dt_pub = _parse_sa_datetime(raw_published)
-            published_date = ""
-            if dt_pub:
-                published_date = dt_pub.date().isoformat()
-            elif isinstance(raw_published, str) and len(raw_published) >= 10:
-                published_date = raw_published[:10]
-
+            published_date = dt_pub.date().isoformat() if dt_pub else ""
             # Apply lookback filter if we can parse a publish date
             if cutoff_date and dt_pub and dt_pub.date() < cutoff_date:
                 continue
@@ -266,8 +258,8 @@ def fetch_analysis_list(symbol: str, size: int = 10, lookback_days: int = 2) -> 
                     symbol=symbol.upper(),
                     title=title,
                     published=published,
-                    published_date=published_date,
                     url=url,
+                    published_date=published_date,
                     primary_tickers=primary,
                     author_name=_extract_author_from_item(item, author_map)[0],
                     author_slug=_extract_author_from_item(item, author_map)[1],
@@ -427,7 +419,6 @@ def analyse_symbol_with_digest(
     symbol: str,
     list_size: int = 10,
     model: str = "gpt-4o-mini",
-    lookback_days: int = 2,
 ) -> Tuple[List[AnalysisArticle], str]:
     """
     Convenience wrapper used by Streamlit:
@@ -436,7 +427,7 @@ def analyse_symbol_with_digest(
       - build AI digest
     Returns (articles, digest_text)
     """
-    articles = fetch_analysis_list(symbol, size=list_size, lookback_days=lookback_days)
+    articles = fetch_analysis_list(symbol, size=list_size)
 
     # Pre-fill body_html for a few of the top ones to avoid repeat calls later
     for art in articles[:4]:
