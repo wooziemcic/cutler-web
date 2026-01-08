@@ -3457,6 +3457,8 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                         )
                 except Exception:
                     st.warning(f"Could not open compiled PDF: {compiled}")
+            else:
+                st.info(f"[{q}] No compiled excerpt PDF was produced (no ticker excerpts found).")
 
             if manifest_items:
                 with st.expander(f"[{q}] Download full letters ({len(manifest_items)})", expanded=False):
@@ -4315,6 +4317,9 @@ def main():
                     )
             except Exception:
                 pass
+    else:
+        st.info("Fund Families: No compiled excerpt PDFs to download yet.")
+
 
     sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
     if sa_path:
