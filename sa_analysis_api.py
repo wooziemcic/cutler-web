@@ -75,11 +75,10 @@ class AnalysisArticle:
     title: str
     published: str
     url: str
-
-    # Derived publish date (YYYY-MM-DD) for display/PDFs
-    published_date: str = ""
-
     primary_tickers: List[str] = field(default_factory=list)
+
+    # Derived publish date for display (YYYY-MM-DD)
+    published_date: str = ""
 
     # Optional author fields (may be blank depending on API payload / plan)
     author_name: str = ""
@@ -260,8 +259,8 @@ def fetch_analysis_list(symbol: str, size: int = 10, lookback_days: int = 2) -> 
                     symbol=symbol.upper(),
                     title=title,
                     published=published,
-                    url=url,
                     published_date=published_date,
+                    url=url,
                     primary_tickers=primary,
                     author_name=_extract_author_from_item(item, author_map)[0],
                     author_slug=_extract_author_from_item(item, author_map)[1],
