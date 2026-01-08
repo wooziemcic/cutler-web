@@ -188,7 +188,7 @@ def _excerpt_pdf(
             letter_date=letter_date,
             source_url=source_url,
         )
-        return out_dir if built else None
+        return built if built else None
     except Exception:
         return None
 
@@ -2025,12 +2025,20 @@ def draw_seeking_alpha_news_section() -> None:
                         title = (a.get("title") or "").strip()
                         author = (a.get("author") or a.get("author_name") or "").strip()
                         url = (a.get("url") or a.get("link") or "").strip()
+                        date_raw = (a.get("published_date") or a.get("published_at") or a.get("published") or "").strip()
+                        date_str = ""
+                        if date_raw:
+                            date_str = date_raw.split("T", 1)[0].strip()
+                            if len(date_str) > 10:
+                                date_str = date_str[:10]
 
                         header_bits = []
                         if title:
                             header_bits.append(title)
                         if author:
                             header_bits.append(f"— {author}")
+                        if date_str:
+                            header_bits.append(f"({date_str})")
                         header = " ".join(header_bits).strip()
                         if url:
                             header = f"{header}\nSource: {url}" if header else f"Source: {url}"
@@ -4301,12 +4309,14 @@ def main():
             mf_paths = recovered
         except Exception:
             pass
-    if mf_paths:
         st.markdown("**Fund Families outputs:**")
+    _mf_found = False
+    if mf_paths:
         for pinfo in mf_paths:
             try:
                 fp = Path(pinfo.get("path") or "")
-                if fp.exists():
+                if fp and fp.exists():
+                    _mf_found = True
                     st.download_button(
                         f"Download {fp.name}",
                         data=fp.read_bytes(),
@@ -4317,8 +4327,9 @@ def main():
                     )
             except Exception:
                 pass
-    else:
-        st.info("Fund Families: No compiled excerpt PDFs to download yet.")
+    if not _mf_found:
+        st.info("Fund Families: No compiled excerpt PDFs to download (none produced or file missing).")
+
 
 
     sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
