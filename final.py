@@ -348,33 +348,17 @@ def _sa_article_row_basic(a) -> dict:
             "id": str(a.get("id") or a.get("article_id") or ""),
             "title": a.get("title") or "",
             "url": a.get("url") or a.get("link") or "",
-            "published_at": a.get("published_at") or a.get("published") or a.get("publishOn") or a.get("date") or "",
-            # Prefer display author name; fall back to slug if name is unavailable
-            "author": a.get("author") or a.get("author_name") or a.get("authorName") or a.get("author_slug") or a.get("authorSlug") or "",
+            "published_at": a.get("published_at") or a.get("date") or "",
+            "author": a.get("author") or a.get("author_name") or "",
         }
     # object-like
     return {
         "id": str(getattr(a, "id", "") or ""),
         "title": str(getattr(a, "title", "") or ""),
         "url": str(getattr(a, "url", "") or ""),
-        "published_at": str(
-            getattr(a, "published_at", "")
-            or getattr(a, "published", "")
-            or getattr(a, "publishOn", "")
-            or getattr(a, "date", "")
-            or ""
-        ),
-        # Prefer display author name; fall back to slug if name is unavailable
-        "author": str(
-            getattr(a, "author", "")
-            or getattr(a, "author_name", "")
-            or getattr(a, "authorName", "")
-            or getattr(a, "author_slug", "")
-            or getattr(a, "authorSlug", "")
-            or ""
-        ),
+        "published_at": str(getattr(a, "published_at", "") or getattr(a, "date", "") or ""),
+        "author": str(getattr(a, "author", "") or getattr(a, "author_name", "") or ""),
     }
-
 
 def _extract_sa_details_fields(details: dict) -> tuple[str, str, str, str]:
     # returns body_raw, author, title, published_at
@@ -2045,16 +2029,27 @@ def draw_seeking_alpha_news_section() -> None:
                         header_bits = []
                         if title:
                             header_bits.append(title)
+                        # Keep author in the title line too (compact), but ALSO print explicit Author/Published lines below.
                         if author:
                             header_bits.append(f"— {author}")
                         if pub:
                             header_bits.append(f"({pub})")
                         header = " ".join(header_bits).strip()
-                        if url:
-                            header = f"{header}\nSource: {url}" if header else f"Source: {url}"
 
-                        if header:
-                            items.append({"text": header, "pages": [], "is_header": True})
+                        meta_lines = []
+                        if author:
+                            meta_lines.append(f"Author: {author}")
+                        if pub:
+                            meta_lines.append(f"Published: {pub}")
+                        if url:
+                            meta_lines.append(f"Source: {url}")
+
+                        block_lines = [header] if header else []
+                        block_lines.extend(meta_lines)
+                        header_block = "\n".join([ln for ln in block_lines if ln]).strip()
+
+                        if header_block:
+                            items.append({"text": header_block, "pages": [], "is_header": True})
 
                         # Split into paragraphs; filter tiny fragments
                         paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
@@ -2396,6 +2391,139 @@ def run_podcast_pipeline_from_ui(
         "excerpts_stdout": excerpts_proc.stdout,
         "insights_stdout": insights_proc.stdout,
     }
+
+def _merge_podcast_excerpts_dict(dst: dict, src: dict) -> dict:
+    """Merge podcast_excerpts.json structures (ticker -> list of excerpts, plus _episodes)."""
+    if not isinstance(dst, dict):
+        dst = {}
+    if not isinstance(src, dict):
+        return dst
+
+    for k, v in src.items():
+        if not isinstance(k, str):
+            continue
+        if k.startswith("_"):
+            # Episodes list
+            if isinstance(v, list):
+                dst.setdefault(k, [])
+                if isinstance(dst[k], list):
+                    dst[k].extend([x for x in v if isinstance(x, dict) or isinstance(x, str)])
+            continue
+
+        if isinstance(v, list):
+            dst.setdefault(k, [])
+            if isinstance(dst[k], list):
+                dst[k].extend(v)
+    return dst
+
+
+def _merge_podcast_insights_list(dst: list, src: list) -> list:
+    """Merge podcast_insights.json lists; keep one row per ticker with higher confidence when duplicates exist."""
+    if not isinstance(dst, list):
+        dst = []
+    if not isinstance(src, list):
+        return dst
+
+    by_ticker = {}
+    # load existing
+    for d in dst:
+        if isinstance(d, dict) and isinstance(d.get("ticker"), str):
+            by_ticker[d["ticker"]] = d
+
+    for d in src:
+        if not isinstance(d, dict) or not isinstance(d.get("ticker"), str):
+            continue
+        t = d["ticker"]
+        if t not in by_ticker:
+            by_ticker[t] = d
+        else:
+            try:
+                old_c = float(by_ticker[t].get("stance_confidence", 0) or 0)
+            except Exception:
+                old_c = 0.0
+            try:
+                new_c = float(d.get("stance_confidence", 0) or 0)
+            except Exception:
+                new_c = 0.0
+            if new_c >= old_c:
+                by_ticker[t] = d
+
+    # stable order: keep original order of dst, then append new tickers
+    seen = set()
+    merged = []
+    for d in dst:
+        if isinstance(d, dict) and isinstance(d.get("ticker"), str):
+            t = d["ticker"]
+            if t in by_ticker and t not in seen:
+                merged.append(by_ticker[t])
+                seen.add(t)
+    for t, d in by_ticker.items():
+        if t not in seen:
+            merged.append(d)
+            seen.add(t)
+    return merged
+
+
+def run_podcast_pipeline_run_all_chunked(
+    *,
+    days_back: int,
+    model_name: str,
+    run_dir: Path,
+    podcast_ids: list[str],
+) -> tuple[Path, Path]:
+    """
+    Run the existing podcast pipeline in smaller chunks to avoid long single runs in Streamlit Cloud.
+    Produces merged excerpts + insights JSON under run_dir and returns their paths.
+    """
+    # chunk podcast_ids into ~9 groups (same as Podcasts tab grouping)
+    n_groups = 9
+    size = max(1, int((len(podcast_ids) + n_groups - 1) / n_groups))
+    chunks = [podcast_ids[i:i+size] for i in range(0, len(podcast_ids), size)]
+
+    merged_excerpts: dict = {}
+    merged_insights: list = []
+
+    for idx, chunk in enumerate(chunks, start=1):
+        st.write(f"Podcast batch {idx}/{len(chunks)} — {len(chunk)} podcast(s)")
+        chunk_dir = run_dir / f"chunk_{idx:02d}"
+        podcasts_root = chunk_dir / "transcripts"
+        excerpts_path = chunk_dir / "podcast_excerpts.json"
+        insights_path = chunk_dir / "podcast_insights.json"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+
+        # run existing pipeline (does its own cleanup of podcasts_root)
+        run_podcast_pipeline_from_ui(
+            days_back=days_back,
+            podcast_ids=chunk,
+            podcasts_root=podcasts_root,
+            excerpts_path=excerpts_path,
+            insights_path=insights_path,
+            model_name=model_name,
+        )
+
+        # merge excerpts
+        try:
+            if excerpts_path.exists():
+                data = json.loads(excerpts_path.read_text(encoding="utf-8"))
+                merged_excerpts = _merge_podcast_excerpts_dict(merged_excerpts, data)
+        except Exception:
+            pass
+
+        # merge insights
+        try:
+            if insights_path.exists():
+                data = json.loads(insights_path.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    merged_insights = _merge_podcast_insights_list(merged_insights, data)
+        except Exception:
+            pass
+
+    # write merged outputs
+    merged_excerpts_path = run_dir / "podcast_excerpts.json"
+    merged_insights_path = run_dir / "podcast_insights.json"
+    merged_excerpts_path.write_text(json.dumps(merged_excerpts, indent=2), encoding="utf-8")
+    merged_insights_path.write_text(json.dumps(merged_insights, indent=2), encoding="utf-8")
+    return merged_excerpts_path, merged_insights_path
 
 def draw_podcast_intelligence_section():
     st.subheader("Podcast Intelligence – Company mentions across finance podcasts")
@@ -4373,10 +4501,10 @@ def main():
                 st.rerun()
 
             if step == "podcasts":
-                days_back = int(cfg.get("mf_lookback_days", 7))
+                days_back = int(cfg.get("podcast_lookback_days", 2))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
                 with st.status(f"Run All: Podcasts — building compiled PDF (last {days_back} days)", expanded=True):
-                    # Run the existing podcast pipeline (subprocess-based) for ALL configured podcasts
+                    # Run the existing podcast pipeline in smaller chunks (same pipeline, safer for Streamlit Cloud)
                     try:
                         from podcasts_config import PODCASTS as _PODCASTS  # type: ignore
                         podcast_ids = []
@@ -4386,41 +4514,37 @@ def main():
                                 podcast_ids.append(str(pid))
                     except Exception:
                         podcast_ids = []
+            
                     if not podcast_ids:
                         st.warning("No podcast IDs found in podcasts_config.py; skipping podcasts.")
                         out_pdf = None
                     else:
                         run_dir = BASE / "Podcasts" / "_run_all"
-                        podcasts_root = run_dir / "transcripts"
-                        excerpts_path = run_dir / "podcast_excerpts.json"
-                        insights_path = run_dir / "podcast_insights.json"
                         run_dir.mkdir(parents=True, exist_ok=True)
-
-                        _ = run_podcast_pipeline_from_ui(
+            
+                        merged_excerpts_path, merged_insights_path = run_podcast_pipeline_run_all_chunked(
                             days_back=days_back,
-                            podcast_ids=podcast_ids,
-                            podcasts_root=podcasts_root,
-                            excerpts_path=excerpts_path,
-                            insights_path=insights_path,
                             model_name=model_name,
+                            run_dir=run_dir,
+                            podcast_ids=podcast_ids,
                         )
-
-                        # Build a single skimmable PDF across all tickers with mentions
+            
                         now_et = _now_et()
                         out_name = f"{now_et:%m.%d.%y} Podcast ALL.pdf"
                         out_path = (BASE / "Podcasts" / out_name)
                         out_path.parent.mkdir(parents=True, exist_ok=True)
-
+            
                         out_pdf = _build_podcast_all_pdf(
-                            excerpts_path=excerpts_path,
-                            insights_path=insights_path,
+                            excerpts_path=merged_excerpts_path,
+                            insights_path=merged_insights_path,
                             output_path=out_path,
                             days_back=days_back,
                             podcasts_count=len(podcast_ids),
                         )
-
+            
                     if out_pdf:
                         ra_state.setdefault("outputs", {}).setdefault("podcasts", {})["path"] = str(out_pdf)
+
                 ra_state.setdefault("completed", []).append("podcasts")
                 ra_state["current_step"] = "done"
                 ra_state["status"] = "complete"
