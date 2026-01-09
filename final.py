@@ -1,7 +1,7 @@
 """
-Cutler Capital — Hedge Fund Letter Scraper
+Public Research Community Extractor
 ------------------------------------------
-Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
+Aggregated public investment research — distilled and exportable
 by fund family and quarter. Uses an external hedge-fund letter database as the
 data source; all branding in the UI is Cutler-only.
 """
@@ -924,8 +924,15 @@ def run_excerpt_and_build(
 
         excerpt_check.excerpt_pdf_for_tickers(str(pdf_path), debug=False)
 
-        src_json = pdf_path.parent / "excerpts_clean.json"
-        if not src_json.exists():
+        candidate_jsons = [
+            pdf_path.parent / "excerpts_clean.json",
+            out_dir / "excerpts_clean.json",
+            Path.cwd() / "excerpts_clean.json",
+            HERE / "excerpts_clean.json",
+        ]
+        src_json = next((p for p in candidate_jsons if p.exists()), None)
+        if not src_json:
+            # no excerpts produced (or excerpt_check failed silently)
             return None
 
         dst_json = out_dir / "excerpts_clean.json"
@@ -3873,7 +3880,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
-    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
+    st.set_page_config(page_title="Public Research Community Extractor", layout="wide")
 
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
@@ -4128,11 +4135,13 @@ def main():
         if logo_path.exists():
             st.image(str(logo_path), width=260)
 
-        st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='app-title'>Public Research Community Extractor</div>"
+            "<div class='app-subtitle'>Aggregated public investment research — distilled and exportable</div>",
+            unsafe_allow_html=True,
+        )
 
-    # Sidebar: run settings
-    st.sidebar.header("Run settings")
-
+    # Quarter + run settings (main page)
     quarter_options = get_available_quarters()
     default_q = choose_default_quarter(quarter_options)
 
@@ -4147,19 +4156,50 @@ def main():
             st.session_state["quarters"] = [default_q]
             st.session_state["auto_default_quarter"] = default_q
 
-    quarters = st.sidebar.multiselect(
-        "Quarters",
-        quarter_options,
-        default=st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]),
-        key="quarters",
-    )
+    # Sleek quarter selector (single-quarter; preserves st.session_state["quarters"] list)
+    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+    st.markdown("#### Quarter", unsafe_allow_html=True)
 
-    use_first_word = st.sidebar.checkbox(
+    current_q = (st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]))
+    current_q = current_q[0] if current_q else (default_q or (quarter_options[0] if quarter_options else ""))
+
+    if quarter_options:
+        try:
+            cur_idx = quarter_options.index(current_q)
+        except ValueError:
+            cur_idx = 0
+            current_q = quarter_options[0]
+
+        b1, b2, b3 = st.columns([1, 4, 1])
+        with b1:
+            if st.button("◀", use_container_width=True, key="q_prev"):
+                st.session_state["quarters"] = [quarter_options[(cur_idx - 1) % len(quarter_options)]]
+                st.rerun()
+        with b3:
+            if st.button("▶", use_container_width=True, key="q_next"):
+                st.session_state["quarters"] = [quarter_options[(cur_idx + 1) % len(quarter_options)]]
+                st.rerun()
+        with b2:
+            sel_q = st.selectbox(
+                "Selected quarter",
+                options=quarter_options,
+                index=cur_idx,
+                key="quarters_single",
+                label_visibility="collapsed",
+            )
+            st.session_state["quarters"] = [sel_q]
+            quarters = [sel_q]
+    else:
+        quarters = st.session_state.get("quarters") or []
+
+    use_first_word = st.checkbox(
         "Use first word for search (recommended)",
-        value=True,
+        value=bool(st.session_state.get("use_first_word", True)),
+        key="use_first_word",
     )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    # Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
+# Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
     ai_score_enabled = st.sidebar.checkbox(
         "AI relevance scoring (1–5 highlights)",
         value=False,
@@ -4233,7 +4273,7 @@ def main():
             "config": {
                 "mf_lookback_days": int(ra_mf_days),
                 "sa_max_articles": int(ra_sa_max),
-                "sa_model": str(ra_sa_model),
+                "sa_model": str(ra_sa_model),                "podcast_lookback_days": 2,
             },
             "started_at": _now_et().isoformat(),
         }
@@ -4262,6 +4302,9 @@ def main():
                     )
             except Exception:
                 pass
+
+    else:
+        st.caption("Fund Families: no compiled excerpt PDF to download for this run.")
 
     sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
     if sa_path:
@@ -4342,7 +4385,7 @@ def main():
                 st.rerun()
 
             if step == "podcasts":
-                days_back = int(cfg.get("mf_lookback_days", 7))
+                days_back = int(cfg.get("podcast_lookback_days", 2))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
                 with st.status(f"Run All: Podcasts — building compiled PDF (last {days_back} days)", expanded=True):
                     # Run the existing podcast pipeline (subprocess-based) for ALL configured podcasts
