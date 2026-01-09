@@ -348,17 +348,33 @@ def _sa_article_row_basic(a) -> dict:
             "id": str(a.get("id") or a.get("article_id") or ""),
             "title": a.get("title") or "",
             "url": a.get("url") or a.get("link") or "",
-            "published_at": a.get("published_at") or a.get("date") or "",
-            "author": a.get("author") or a.get("author_name") or "",
+            "published_at": a.get("published_at") or a.get("published") or a.get("publishOn") or a.get("date") or "",
+            # Prefer display author name; fall back to slug if name is unavailable
+            "author": a.get("author") or a.get("author_name") or a.get("authorName") or a.get("author_slug") or a.get("authorSlug") or "",
         }
     # object-like
     return {
         "id": str(getattr(a, "id", "") or ""),
         "title": str(getattr(a, "title", "") or ""),
         "url": str(getattr(a, "url", "") or ""),
-        "published_at": str(getattr(a, "published_at", "") or getattr(a, "date", "") or ""),
-        "author": str(getattr(a, "author", "") or getattr(a, "author_name", "") or ""),
+        "published_at": str(
+            getattr(a, "published_at", "")
+            or getattr(a, "published", "")
+            or getattr(a, "publishOn", "")
+            or getattr(a, "date", "")
+            or ""
+        ),
+        # Prefer display author name; fall back to slug if name is unavailable
+        "author": str(
+            getattr(a, "author", "")
+            or getattr(a, "author_name", "")
+            or getattr(a, "authorName", "")
+            or getattr(a, "author_slug", "")
+            or getattr(a, "authorSlug", "")
+            or ""
+        ),
     }
+
 
 def _extract_sa_details_fields(details: dict) -> tuple[str, str, str, str]:
     # returns body_raw, author, title, published_at
@@ -2029,27 +2045,16 @@ def draw_seeking_alpha_news_section() -> None:
                         header_bits = []
                         if title:
                             header_bits.append(title)
-                        # Keep author in the title line too (compact), but ALSO print explicit Author/Published lines below.
                         if author:
                             header_bits.append(f"— {author}")
                         if pub:
                             header_bits.append(f"({pub})")
                         header = " ".join(header_bits).strip()
-
-                        meta_lines = []
-                        if author:
-                            meta_lines.append(f"Author: {author}")
-                        if pub:
-                            meta_lines.append(f"Published: {pub}")
                         if url:
-                            meta_lines.append(f"Source: {url}")
+                            header = f"{header}\nSource: {url}" if header else f"Source: {url}"
 
-                        block_lines = [header] if header else []
-                        block_lines.extend(meta_lines)
-                        header_block = "\n".join([ln for ln in block_lines if ln]).strip()
-
-                        if header_block:
-                            items.append({"text": header_block, "pages": [], "is_header": True})
+                        if header:
+                            items.append({"text": header, "pages": [], "is_header": True})
 
                         # Split into paragraphs; filter tiny fragments
                         paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
