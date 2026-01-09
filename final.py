@@ -2029,16 +2029,27 @@ def draw_seeking_alpha_news_section() -> None:
                         header_bits = []
                         if title:
                             header_bits.append(title)
+                        # Keep author in the title line too (compact), but ALSO print explicit Author/Published lines below.
                         if author:
                             header_bits.append(f"— {author}")
                         if pub:
                             header_bits.append(f"({pub})")
                         header = " ".join(header_bits).strip()
-                        if url:
-                            header = f"{header}\nSource: {url}" if header else f"Source: {url}"
 
-                        if header:
-                            items.append({"text": header, "pages": [], "is_header": True})
+                        meta_lines = []
+                        if author:
+                            meta_lines.append(f"Author: {author}")
+                        if pub:
+                            meta_lines.append(f"Published: {pub}")
+                        if url:
+                            meta_lines.append(f"Source: {url}")
+
+                        block_lines = [header] if header else []
+                        block_lines.extend(meta_lines)
+                        header_block = "\n".join([ln for ln in block_lines if ln]).strip()
+
+                        if header_block:
+                            items.append({"text": header_block, "pages": [], "is_header": True})
 
                         # Split into paragraphs; filter tiny fragments
                         paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
