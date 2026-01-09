@@ -1,7 +1,7 @@
 """
-Public Research Community Extractor
+Cutler Capital — Hedge Fund Letter Scraper
 ------------------------------------------
-Aggregated public investment research — distilled and exportable
+Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
 by fund family and quarter. Uses an external hedge-fund letter database as the
 data source; all branding in the UI is Cutler-only.
 """
@@ -439,7 +439,7 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
                     title = (a.get("title") or "").strip()
                     author = (a.get("author") or "").strip()
                     url = (a.get("url") or "").strip()
-                    published = (a.get("published_date") or a.get("published_at") or a.get("published") or a.get("publishOn") or "").strip()
+                    published = (a.get("published_at") or "").strip()
 
                     header_parts = []
                     if title:
@@ -924,15 +924,8 @@ def run_excerpt_and_build(
 
         excerpt_check.excerpt_pdf_for_tickers(str(pdf_path), debug=False)
 
-        candidate_jsons = [
-            pdf_path.parent / "excerpts_clean.json",
-            out_dir / "excerpts_clean.json",
-            Path.cwd() / "excerpts_clean.json",
-            HERE / "excerpts_clean.json",
-        ]
-        src_json = next((p for p in candidate_jsons if p.exists()), None)
-        if not src_json:
-            # no excerpts produced (or excerpt_check failed silently)
+        src_json = pdf_path.parent / "excerpts_clean.json"
+        if not src_json.exists():
             return None
 
         dst_json = out_dir / "excerpts_clean.json"
@@ -1523,8 +1516,14 @@ def draw_seeking_alpha_news_section() -> None:
             d.setdefault("title", d.get("headline") or d.get("name") or "")
             d.setdefault("url", d.get("link") or d.get("permalink") or "")
             d.setdefault("published_at", d.get("published") or d.get("publishOn") or d.get("date") or "")
-            d.setdefault("author", d.get("author_name") or d.get("author") or d.get("authorName") or "")
+            # Display-friendly publish date (YYYY-MM-DD)
+            if "published_date" not in d:
+                _pd = (d.get("published_at") or "").strip()
+                d["published_date"] = _pd[:10] if _pd else ""
+            d.setdefault("author_name", d.get("author_name") or d.get("authorName") or "")
             d.setdefault("author_slug", d.get("author_slug") or d.get("authorSlug") or "")
+            # Keep a stable display author (prefer name; fallback to slug)
+            d.setdefault("author", d.get("author_name") or d.get("author") or d.get("author_slug") or "")
             return d
 
         # Object / dataclass (patched sa_analysis_api.AnalysisArticle)
@@ -1537,9 +1536,12 @@ def draw_seeking_alpha_news_section() -> None:
             "title": getattr(a, "title", "") or "",
             "url": getattr(a, "url", "") or "",
             "published_at": getattr(a, "published", "") or getattr(a, "published_at", "") or "",
-            # author fields from patched sa_analysis_api.py
-            "author": getattr(a, "author_name", "") or getattr(a, "author", "") or "",
+            "published_date": (getattr(a, "published_date", "") or (getattr(a, "published", "") or "")[:10] or ""),
+            # author fields from sa_analysis_api.AnalysisArticle
+            "author_name": getattr(a, "author_name", "") or "",
             "author_slug": getattr(a, "author_slug", "") or "",
+            # stable display author (prefer name; fallback to slug)
+            "author": getattr(a, "author_name", "") or getattr(a, "author", "") or getattr(a, "author_slug", "") or "",
         }
 
     def _sa_article_row(a) -> dict:
@@ -2017,7 +2019,11 @@ def draw_seeking_alpha_news_section() -> None:
                             continue
 
                         title = (a.get("title") or "").strip()
-                        author = (a.get("author") or a.get("author_name") or "").strip()
+                        # Prefer author_name; fallback to author_slug (some SA payloads only include slug)
+                        author = (a.get("author_name") or a.get("author") or a.get("author_slug") or "").strip()
+                        # Display-friendly publish date (YYYY-MM-DD)
+                        pub = (a.get("published_date") or a.get("published_at") or a.get("published") or "").strip()
+                        pub = pub[:10] if pub else ""
                         url = (a.get("url") or a.get("link") or "").strip()
 
                         header_bits = []
@@ -2025,6 +2031,8 @@ def draw_seeking_alpha_news_section() -> None:
                             header_bits.append(title)
                         if author:
                             header_bits.append(f"— {author}")
+                        if pub:
+                            header_bits.append(f"({pub})")
                         header = " ".join(header_bits).strip()
                         if url:
                             header = f"{header}\nSource: {url}" if header else f"Source: {url}"
@@ -3880,7 +3888,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 # ---------- UI ----------
 
 def main():
-    st.set_page_config(page_title="Public Research Community Extractor", layout="wide")
+    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 
     # Global styling: Cutler purple theme and modernized controls
     st.markdown(
@@ -4135,13 +4143,11 @@ def main():
         if logo_path.exists():
             st.image(str(logo_path), width=260)
 
-        st.markdown(
-            "<div class='app-title'>Public Research Community Extractor</div>"
-            "<div class='app-subtitle'>Aggregated public investment research — distilled and exportable</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
 
-    # Quarter + run settings (main page)
+    # Sidebar: run settings
+    st.sidebar.header("Run settings")
+
     quarter_options = get_available_quarters()
     default_q = choose_default_quarter(quarter_options)
 
@@ -4156,50 +4162,19 @@ def main():
             st.session_state["quarters"] = [default_q]
             st.session_state["auto_default_quarter"] = default_q
 
-    # Sleek quarter selector (single-quarter; preserves st.session_state["quarters"] list)
-    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.markdown("#### Quarter", unsafe_allow_html=True)
-
-    current_q = (st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]))
-    current_q = current_q[0] if current_q else (default_q or (quarter_options[0] if quarter_options else ""))
-
-    if quarter_options:
-        try:
-            cur_idx = quarter_options.index(current_q)
-        except ValueError:
-            cur_idx = 0
-            current_q = quarter_options[0]
-
-        b1, b2, b3 = st.columns([1, 4, 1])
-        with b1:
-            if st.button("◀", use_container_width=True, key="q_prev"):
-                st.session_state["quarters"] = [quarter_options[(cur_idx - 1) % len(quarter_options)]]
-                st.rerun()
-        with b3:
-            if st.button("▶", use_container_width=True, key="q_next"):
-                st.session_state["quarters"] = [quarter_options[(cur_idx + 1) % len(quarter_options)]]
-                st.rerun()
-        with b2:
-            sel_q = st.selectbox(
-                "Selected quarter",
-                options=quarter_options,
-                index=cur_idx,
-                key="quarters_single",
-                label_visibility="collapsed",
-            )
-            st.session_state["quarters"] = [sel_q]
-            quarters = [sel_q]
-    else:
-        quarters = st.session_state.get("quarters") or []
-
-    use_first_word = st.checkbox(
-        "Use first word for search (recommended)",
-        value=bool(st.session_state.get("use_first_word", True)),
-        key="use_first_word",
+    quarters = st.sidebar.multiselect(
+        "Quarters",
+        quarter_options,
+        default=st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]),
+        key="quarters",
     )
-    st.markdown("</div>", unsafe_allow_html=True)
 
-# Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
+    use_first_word = st.sidebar.checkbox(
+        "Use first word for search (recommended)",
+        value=True,
+    )
+
+    # Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
     ai_score_enabled = st.sidebar.checkbox(
         "AI relevance scoring (1–5 highlights)",
         value=False,
@@ -4273,7 +4248,7 @@ def main():
             "config": {
                 "mf_lookback_days": int(ra_mf_days),
                 "sa_max_articles": int(ra_sa_max),
-                "sa_model": str(ra_sa_model),                "podcast_lookback_days": 2,
+                "sa_model": str(ra_sa_model),
             },
             "started_at": _now_et().isoformat(),
         }
@@ -4302,9 +4277,6 @@ def main():
                     )
             except Exception:
                 pass
-
-    else:
-        st.caption("Fund Families: no compiled excerpt PDF to download for this run.")
 
     sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
     if sa_path:
@@ -4385,7 +4357,7 @@ def main():
                 st.rerun()
 
             if step == "podcasts":
-                days_back = int(cfg.get("podcast_lookback_days", 2))
+                days_back = int(cfg.get("mf_lookback_days", 7))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
                 with st.status(f"Run All: Podcasts — building compiled PDF (last {days_back} days)", expanded=True):
                     # Run the existing podcast pipeline (subprocess-based) for ALL configured podcasts
