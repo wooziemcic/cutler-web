@@ -342,42 +342,55 @@ def _make_batches(items: list[str], size: int) -> list[list[str]]:
     return [items[i:i+size] for i in range(0, len(items), size)]
 
 def _sa_article_row_basic(a) -> dict:
-    # Works with RapidAPI list objects or dicts
+    """Normalize a Seeking Alpha list row (dict or object) into a simple dict.
+
+    This helper is intentionally defensive because the RapidAPI payload shape can vary
+    (list endpoint vs cached/serialized dicts). It is used by both the single-ticker
+    Seeking Alpha tab and Run All. Keep it lightweight.
+    """
     if isinstance(a, dict):
         return {
             "id": str(a.get("id") or a.get("article_id") or ""),
             "title": a.get("title") or "",
             "url": a.get("url") or a.get("link") or "",
-            "published_at": a.get("published_at") or a.get("date") or "",
-            "author": a.get("author") or a.get("author_name") or "",
+            # publish timestamps can show up as published_at / published / publishOn / date
+            "published_at": a.get("published_at") or a.get("published") or a.get("publishOn") or a.get("date") or "",
+            # Prefer display author name; fall back to slug/alt keys when name isn't present
+            "author": (
+                a.get("author")
+                or a.get("author_name")
+                or a.get("authorName")
+                or a.get("author_slug")
+                or a.get("authorSlug")
+                or ""
+            ),
         }
-    # object-like
+
+    # object-like (dataclass or similar)
     return {
         "id": str(getattr(a, "id", "") or ""),
         "title": str(getattr(a, "title", "") or ""),
         "url": str(getattr(a, "url", "") or ""),
-        "published_at": str(getattr(a, "published_at", "") or getattr(a, "date", "") or ""),
-        "author": str(getattr(a, "author", "") or getattr(a, "author_name", "") or ""),
+        "published_at": str(
+            getattr(a, "published_at", "")
+            or getattr(a, "published", "")
+            or getattr(a, "publishOn", "")
+            or getattr(a, "date", "")
+            or ""
+        ),
+        "author": str(
+            getattr(a, "author", "")
+            or getattr(a, "author_name", "")
+            or getattr(a, "authorName", "")
+            or getattr(a, "author_slug", "")
+            or getattr(a, "authorSlug", "")
+            or ""
+        ),
     }
 
 def _extract_sa_details_fields(details: dict) -> tuple[str, str, str, str]:
-    """Best-effort extraction of body/author/title/publish timestamp from SA details payload.
-
-    Works across multiple RapidAPI payload shapes:
-    - Flat dicts (older helpers)
-    - JSON:API style {data:{attributes:{...}}, included:[...], relationships:{author:{data:{id}}}}
-    """
+    # returns body_raw, author, title, published_at
     base = details or {}
-
-    def _dget(obj, *keys, default=""):
-        cur = obj
-        for k in keys:
-            if not isinstance(cur, dict):
-                return default
-            cur = cur.get(k)
-        return cur if cur is not None else default
-
-    # --- Body ---
     body = (
         base.get("body_clean")
         or base.get("body_html")
@@ -385,61 +398,11 @@ def _extract_sa_details_fields(details: dict) -> tuple[str, str, str, str]:
         or base.get("body")
         or base.get("html")
         or base.get("text")
-        or _dget(base, "data", "attributes", "content", default="")
-        or _dget(base, "data", "attributes", "body", default="")
-        or _dget(base, "data", "attributes", "bodyHtml", default="")
-        or _dget(base, "data", "attributes", "body_html", default="")
         or ""
     )
-
-    # --- Title ---
-    title = (
-        base.get("title")
-        or _dget(base, "data", "attributes", "title", default="")
-        or _dget(base, "data", "attributes", "headline", default="")
-        or ""
-    )
-
-    # --- Published timestamp ---
-    published = (
-        base.get("published_at")
-        or base.get("published")
-        or base.get("date")
-        or base.get("publishOn")
-        or _dget(base, "data", "attributes", "publishOn", default="")
-        or _dget(base, "data", "attributes", "publishedOn", default="")
-        or _dget(base, "data", "attributes", "published", default="")
-        or ""
-    )
-
-    # --- Author ---
     author = base.get("author") or base.get("author_name") or base.get("authorName") or ""
-    if not author:
-        # JSON:API included author lookup
-        author_id = str(_dget(base, "data", "relationships", "author", "data", "id", default="") or "")
-        included = base.get("included") if isinstance(base.get("included"), list) else []
-        if author_id and included:
-            for inc in included:
-                try:
-                    if str(inc.get("type")) == "author" and str(inc.get("id")) == author_id:
-                        author = (
-                            _dget(inc, "attributes", "name", default="")
-                            or _dget(inc, "attributes", "displayName", default="")
-                            or _dget(inc, "attributes", "slug", default="")
-                            or ""
-                        )
-                        if author:
-                            break
-                except Exception:
-                    continue
-        # Sometimes author info is embedded in attributes
-        if not author:
-            author = (
-                _dget(base, "data", "attributes", "authorName", default="")
-                or _dget(base, "data", "attributes", "author", default="")
-                or ""
-            )
-
+    title = base.get("title") or ""
+    published = base.get("published_at") or base.get("published") or base.get("date") or ""
     return str(body or ""), str(author or ""), str(title or ""), str(published or "")
 
 def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: int, model: str) -> Path:
@@ -4407,7 +4370,7 @@ def main():
                 st.rerun()
 
             if step == "podcasts":
-                days_back = int(cfg.get("mf_lookback_days", 7))
+                days_back = int(cfg.get("podcast_lookback_days", cfg.get("mf_lookback_days", 2)))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
                 with st.status(f"Run All: Podcasts — building compiled PDF (last {days_back} days)", expanded=True):
                     # Run the existing podcast pipeline (subprocess-based) for ALL configured podcasts
