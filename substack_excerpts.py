@@ -43,7 +43,6 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     if value is None:
         return None
 
-    # epoch
     if isinstance(value, (int, float)):
         ts = float(value)
         if ts > 1e12:
@@ -58,7 +57,6 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
         if not s:
             return None
 
-        # numeric epoch in string
         if re.fullmatch(r"\d{10,13}", s):
             try:
                 ts = float(s)
@@ -68,7 +66,6 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
             except Exception:
                 pass
 
-        # ISO
         if s.endswith("Z"):
             s2 = s[:-1] + "+00:00"
         else:
@@ -79,7 +76,6 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
         except Exception:
             pass
 
-        # Fallback: date only
         try:
             return datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except Exception:
@@ -118,11 +114,9 @@ def _request_json(path: str, params: Dict[str, Any]) -> Any:
         try:
             resp = requests.get(url, headers=_headers(), params=params, timeout=DEFAULT_TIMEOUT_S)
 
-            # transient
             if resp.status_code in (429, 503, 504):
                 raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
 
-            # surface errors (helps debugging)
             if resp.status_code >= 400:
                 raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
 
@@ -159,13 +153,11 @@ def _extract_posts_from_search(payload: Any) -> List[Dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
 
-    # 1) direct list keys
     for key in ("results", "items", "posts", "data"):
         v = payload.get(key)
         if isinstance(v, list):
             return [x for x in v if isinstance(x, dict)]
 
-    # 2) nested containers (common in RapidAPI)
     for key in ("data", "response", "result"):
         v = payload.get(key)
         if isinstance(v, dict):
@@ -173,7 +165,6 @@ def _extract_posts_from_search(payload: Any) -> List[Dict[str, Any]]:
             if out:
                 return out
 
-    # 3) nested list keys inside a dict payload
     for key in ("results", "items", "posts", "comments"):
         v = payload.get(key)
         if isinstance(v, dict):
@@ -181,7 +172,6 @@ def _extract_posts_from_search(payload: Any) -> List[Dict[str, Any]]:
             if out:
                 return out
 
-    # 4) last-resort: look for any list-of-dicts that includes a post identifier
     def looks_like_posts(lst: List[Any]) -> bool:
         if not lst:
             return False
@@ -190,9 +180,8 @@ def _extract_posts_from_search(payload: Any) -> List[Dict[str, Any]]:
             return False
         return any(k in sample for k in ("post_id", "postId", "id", "postid"))
 
-    # scan a few levels deep without being expensive
     queue: List[Any] = [payload]
-    for _ in range(60):  # hard cap to prevent runaway
+    for _ in range(60):
         if not queue:
             break
         node = queue.pop(0)
@@ -295,16 +284,20 @@ def _strip_html(text: str) -> str:
 
 def _try_search_endpoint(endpoint_path: str, keyword: str, page: int, limit: int) -> List[Dict[str, Any]]:
     """
-    Internal helper to try a search endpoint with a few param name variants.
+    Internal helper to try a search endpoint using the correct parameter names.
+    Per RapidAPI UI, /search/post requires:
+      - query (required)
+      - page (optional, often 0-based)
     """
     last_err: Optional[Exception] = None
 
+    # The RapidAPI console shows: query (required), page optional (example uses page=0)
+    # We keep a small set of variants for resilience, but keep "query" first.
     for params in (
-        {"keyword": keyword, "page": page, "limit": limit},
-        {"query": keyword, "page": page, "limit": limit},
-        {"q": keyword, "page": page, "limit": limit},
-        {"keyword": keyword, "page": page},
-        {"query": keyword, "page": page},
+        {"query": keyword, "page": page},          # primary (matches UI)
+        {"query": keyword, "page": max(page - 1, 0)},  # in case provider uses 0-based paging
+        {"q": keyword, "page": page},              # fallback
+        {"keyword": keyword, "page": page},        # fallback
     ):
         try:
             payload = _request_json(endpoint_path, params=params)
@@ -324,24 +317,26 @@ def _try_search_endpoint(endpoint_path: str, keyword: str, page: int, limit: int
 def search_posts(keyword: str, *, page: int = 1, limit: int = 20) -> List[Dict[str, Any]]:
     """
     Primary list-stage search.
-    1) Try /search/posts
-    2) If empty, fall back to /search/top (some providers expose results here instead)
+    1) Try /search/post (singular)  <-- correct per RapidAPI
+    2) If empty, fall back to /search/top
     """
     keyword = (keyword or "").strip()
     if not keyword:
         return []
 
-    rows = _try_search_endpoint("/search/posts", keyword, page, limit)
+    # IMPORTANT: endpoint is singular: /search/post
+    rows = _try_search_endpoint("/search/post", keyword, page, limit)
     if rows:
         return rows
 
-    # Fallback (still list-stage; doesn't fetch full bodies)
+    # Fallback list-stage endpoint
     return _try_search_endpoint("/search/top", keyword, page, limit)
 
 
 def fetch_post_details(post_id: str) -> Dict[str, Any]:
     """
     Calls /reader/post to fetch full post data.
+    RapidAPI UI shows the parameter is: postId (required).
     """
     post_id = (post_id or "").strip()
     if not post_id:
@@ -363,7 +358,7 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
     High-level helper used by final.py.
 
     Strategy:
-      1) List stage: /search/posts for keyword=ticker (page 1 only).
+      1) List stage: /search/post for query=ticker (page 1 only).
       2) Filter to lookback window using list-stage timestamps where possible.
       3) Dedupe by post_id.
       4) Fetch full details via /reader/post only for top N candidates.
@@ -421,7 +416,6 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
         if pub_d and not published_raw:
             published_raw = pub_d
 
-        # Prefer details URL if present
         if isinstance(details, dict):
             base = details.get("data") if isinstance(details.get("data"), dict) else details
             u2 = base.get("url") or base.get("canonical_url") or base.get("link")
