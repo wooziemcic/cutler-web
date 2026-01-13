@@ -240,37 +240,72 @@ def _extract_body_from_post_details(payload: Any) -> Tuple[str, str, str, str]:
     if payload is None:
         return "", "", "", ""
 
-    if isinstance(payload, dict):
-        base = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(payload, dict):
+        return "", "", "", ""
 
-        body = (
-            base.get("body")
-            or base.get("text")
-            or base.get("content")
-            or base.get("subtitle")
-            or base.get("description")
-            or ""
-        )
+    base = payload.get("data") if isinstance(payload.get("data"), dict) else payload
 
-        author = (
-            base.get("author")
-            or base.get("author_name")
-            or base.get("authorName")
-            or ((base.get("publication") or {}).get("name") if isinstance(base.get("publication"), dict) else "")
-        )
+    # Substack/RapidAPI often nests the post under "post"
+    post = base.get("post") if isinstance(base.get("post"), dict) else None
+    node = post or base
 
-        title = base.get("title") or base.get("headline") or ""
-        published_raw = (
-            base.get("published_at")
-            or base.get("published")
-            or base.get("date")
-            or base.get("created_at")
-            or ""
-        )
+    # body candidates (HTML first, then text-ish)
+    body = (
+        node.get("body_html")
+        or node.get("bodyHtml")
+        or node.get("html")
+        or node.get("content_html")
+        or node.get("contentHtml")
+        or node.get("raw_body")
+        or node.get("rawBody")
+        or node.get("body")
+        or node.get("text")
+        or node.get("content")
+        or node.get("subtitle")
+        or node.get("description")
+        or ""
+    )
 
-        return str(body or ""), str(author or ""), str(title or ""), str(published_raw or "")
+    # author candidates
+    author = (
+        node.get("author")
+        or node.get("author_name")
+        or node.get("authorName")
+        or node.get("byline")
+        or ""
+    )
 
-    return "", "", "", ""
+    # Sometimes author is a nested object
+    if isinstance(author, dict):
+        author = author.get("name") or author.get("handle") or ""
+
+    # If still blank, try publication / user objects
+    if not author:
+        pub = node.get("publication") if isinstance(node.get("publication"), dict) else None
+        if pub:
+            author = pub.get("name") or ""
+        user = node.get("user") if isinstance(node.get("user"), dict) else None
+        if user and not author:
+            author = user.get("name") or user.get("handle") or ""
+
+    title = (
+        node.get("title")
+        or node.get("headline")
+        or node.get("subject")
+        or ""
+    )
+
+    published_raw = (
+        node.get("published_at")
+        or node.get("publishedAt")
+        or node.get("published")
+        or node.get("created_at")
+        or node.get("createdAt")
+        or node.get("date")
+        or ""
+    )
+
+    return str(body or ""), str(author or ""), str(title or ""), str(published_raw or "")
 
 
 def _strip_html(text: str) -> str:
