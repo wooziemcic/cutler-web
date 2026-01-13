@@ -2263,28 +2263,75 @@ def draw_substack_section():
         st.session_state["substack_pdf_bytes"] = None
         st.session_state["substack_pdf_name"] = None
 
-    export_clicked = st.button(
+    export_clicked = export_clicked = st.button(
         "Build Substack compiled PDF (ALL tickers)",
         use_container_width=True,
         key="substack_export_all_button",
     )
 
-    if export_clicked:
-        try:
-            with st.spinner("Building compiled Substack PDF…"):
-                universe = available_tickers or ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
-                out_pdf = _build_substack_compiled_pdf_for_universe(
-                    universe=universe,
-                    lookback_days=int(lookback_days),
-                    max_posts=int(max_posts),
-                )
-                st.session_state["substack_pdf_bytes"] = Path(out_pdf).read_bytes()
-                st.session_state["substack_pdf_name"] = Path(out_pdf).name
-            st.success("Substack PDF built successfully.")
-        except Exception as e:
-            st.session_state["substack_pdf_bytes"] = None
-            st.session_state["substack_pdf_name"] = None
-            st.error(f"Substack PDF build failed: {e}")
+    # Resumable ALL-tickers Substack build (prevents long runs from resetting)
+    run_key = "substack_all_run_state"
+    state = st.session_state.get(run_key)
+
+    # Show a Resume button if a run is in progress but not actively running (e.g., script reran)
+    resume_clicked = False
+    if state and (not state.get("done")) and (not state.get("running")):
+        resume_clicked = st.button(
+            "Resume Substack build",
+            use_container_width=True,
+            key="substack_export_all_resume_button",
+        )
+
+    # Allow a stop/reset while running
+    stop_clicked = False
+    if state and state.get("running"):
+        stop_clicked = st.button(
+            "Stop / Reset Substack build",
+            use_container_width=True,
+            key="substack_export_all_stop_button",
+        )
+
+    if stop_clicked:
+        st.session_state.pop(run_key, None)
+        st.session_state.pop("substack_pdf_bytes", None)
+        st.success("Stopped Substack build.")
+        _substack_rerun()
+
+    if export_clicked or resume_clicked:
+        universe = available_tickers or ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
+
+        # Start fresh if no state, state is done, or parameters changed
+        if (not state) or state.get("done") or state.get("universe") != list(universe) or int(state.get("lookback_days", -1)) != int(lookback_days) or int(state.get("max_posts", -1)) != int(max_posts):
+            state = _substack_all_run_init(
+                universe=universe,
+                lookback_days=int(lookback_days),
+                max_posts=int(max_posts),
+            )
+            st.session_state[run_key] = state
+        else:
+            state["running"] = True
+
+        _substack_rerun()
+
+    # If running, do small work per rerun and checkpoint progress
+    if state and state.get("running") and (not state.get("done")):
+        prog = st.progress(min(1.0, float(state.get("idx", 0)) / max(1, float(state.get("total", 1)))))
+        status = st.empty()
+        status.info(f"Substack ALL — {state.get('idx', 0)}/{state.get('total', 0)} tickers processed…")
+
+        if state.get("error"):
+            st.warning(state.get("error"))
+
+        with st.spinner("Continuing Substack build…"):
+            _substack_all_run_step(state=state, batch_size=int(st.session_state.get("substack_all_batch_size", 3)), time_budget_s=float(st.session_state.get("substack_all_time_budget_s", 12.0)))
+
+        st.session_state[run_key] = state
+
+        # Keep the run moving until done
+        if not state.get("done"):
+            _substack_rerun()
+
+    # If done, show download button (existing behavior relies on substack_pdf_bytes)
 
     if st.session_state.get("substack_pdf_bytes") and st.session_state.get("substack_pdf_name"):
         st.download_button(
@@ -2418,6 +2465,195 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
         out_path.write_bytes(out_pdf.read_bytes())
 
     return out_path
+
+
+def _substack_rerun():
+    """Compatibility wrapper for Streamlit rerun."""
+    try:
+        st.rerun()
+    except Exception:
+        # older Streamlit
+        st.experimental_rerun()
+
+
+def _render_substack_compiled_pdf_from_combined(*, combined: dict[str, list[dict]], pdf_name: str) -> Path:
+    """Render compiled Substack PDF using make_pdf, returning the final output path."""
+    import tempfile
+    import json as _json
+    from zoneinfo import ZoneInfo
+
+    out_path = Path.cwd() / pdf_name
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        excerpts_path = td_path / "substack_excerpts.json"
+        excerpts_path.write_text(_json.dumps(combined, indent=2), encoding="utf-8")
+        out_pdf = td_path / "substack_compiled.pdf"
+
+        make_pdf.build_pdf(
+            excerpts_json_path=str(excerpts_path),
+            output_pdf_path=str(out_pdf),
+            report_title="Substack Research",
+            source_pdf_name=pdf_name,
+            format_style="compact",
+            ai_score=True,
+            ai_model="heuristic",
+        )
+        out_path.write_bytes(out_pdf.read_bytes())
+
+    return out_path
+
+
+def _substack_all_run_init(*, universe: list[str], lookback_days: int, max_posts: int) -> dict:
+    """Initialize resumable ALL-tickers Substack build state."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now_local = datetime.now(ZoneInfo("America/New_York"))
+    pdf_name = f"{now_local.strftime('%m.%d.%y')} Substack ALL.pdf"
+
+    state = {
+        "running": True,
+        "done": False,
+        "error": "",
+        "universe": list(universe),
+        "lookback_days": int(lookback_days),
+        "max_posts": int(max_posts),
+        "idx": 0,
+        "total": len(universe),
+        "combined": {},          # ticker -> list[dict] paragraphs
+        "seen_post_ids": set(),  # global dedupe across tickers
+        "pdf_name": pdf_name,
+        "started_at": now_local.isoformat(),
+    }
+    return state
+
+
+def _substack_all_run_step(*, state: dict, batch_size: int = 3, time_budget_s: float = 12.0) -> None:
+    """
+    Process a small batch of tickers and checkpoint progress into state.
+    This keeps the Streamlit script responsive and resumable.
+    """
+    import time as _time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    if state.get("done"):
+        state["running"] = False
+        return
+
+    universe: list[str] = state["universe"]
+    total = max(1, int(state.get("total") or len(universe)))
+    idx = int(state.get("idx") or 0)
+
+    # Keep these caps aligned with SA defaults (can be overridden via session_state if needed)
+    max_paras_per_ticker = int(st.session_state.get("substack_pdf_max_paras_per_ticker", 2000))
+    max_paras_per_post = int(st.session_state.get("substack_pdf_max_paras_per_post", 250))
+
+    combined: dict[str, list[dict]] = state.get("combined") or {}
+    seen_post_ids: set = state.get("seen_post_ids") or set()
+
+    start_t = _time.time()
+    processed_this_step = 0
+
+    while idx < len(universe) and processed_this_step < batch_size:
+        if (_time.time() - start_t) > float(time_budget_s):
+            break
+
+        sym = (universe[idx] or "").strip().upper()
+        idx += 1
+
+        if not sym:
+            continue
+
+        try:
+            posts = substack_excerpts.fetch_posts_for_ticker(
+                sym,
+                lookback_days=int(state["lookback_days"]),
+                max_posts=int(state["max_posts"]),
+            ) or []
+        except Exception as e:
+            # Keep going; store error for visibility but do not crash the run.
+            state["error"] = f"{sym}: {e}"
+            posts = []
+
+        items: list[dict] = []
+        for post in posts:
+            pid = str(post.get("post_id") or "").strip()
+            if not pid or pid in seen_post_ids:
+                continue
+            seen_post_ids.add(pid)
+
+            title = (post.get("title") or "").strip()
+            author = (post.get("author") or "").strip()
+            published = (post.get("published_at") or "").strip()
+            url = (post.get("url") or "").strip()
+            body = (post.get("body") or post.get("excerpt") or "").strip()
+
+            header = title or "(Untitled)"
+            meta_lines = []
+            if author:
+                meta_lines.append(f"Author: {author}")
+            if published:
+                meta_lines.append(f"Date: {published[:19]}")
+            if url:
+                meta_lines.append(f"Source: {url}")
+            if meta_lines:
+                header = header + "\n" + "\n".join(meta_lines)
+
+            items.append({"text": header, "pages": [], "is_header": True})
+
+            # paragraphize body
+            if body:
+                paras = [x.strip() for x in re.split(r"\n\s*\n", body) if x.strip()]
+            else:
+                paras = []
+
+            kept = 0
+            for para in paras:
+                if kept >= max_paras_per_post:
+                    break
+                if len(para) < 60:
+                    continue
+                items.append({"text": para, "pages": []})
+                kept += 1
+
+        if items:
+            trimmed: list[dict] = []
+            body_count = 0
+            for it in items:
+                if it.get("is_header"):
+                    trimmed.append(it)
+                    continue
+                if body_count >= max_paras_per_ticker:
+                    break
+                trimmed.append(it)
+                body_count += 1
+
+            combined[sym] = trimmed
+
+        processed_this_step += 1
+
+    # checkpoint back
+    state["idx"] = idx
+    state["combined"] = combined
+    state["seen_post_ids"] = seen_post_ids
+
+    if idx >= len(universe):
+        # render final PDF
+        try:
+            out_path = _render_substack_compiled_pdf_from_combined(
+                combined=combined,
+                pdf_name=state["pdf_name"],
+            )
+            st.session_state["substack_pdf_bytes"] = Path(out_path).read_bytes()
+            st.session_state["substack_pdf_name"] = state.get("pdf_name")
+            state["done"] = True
+            state["running"] = False
+        except Exception as e:
+            state["error"] = f"PDF render failed: {e}"
+            state["done"] = True
+            state["running"] = False
 
 
 def build_podcast_groups(n_groups: int = 9):
