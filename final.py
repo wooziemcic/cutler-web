@@ -210,7 +210,7 @@ def _import(name: str, path: Path):
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
 
-reddit_excerpts = _import("reddit_excerpts", HERE / "reddit_excerpts.py")
+substack_excerpts = _import("substack_excerpts", HERE / "substack_excerpts.py")
 
 excerpt_check = _import("excerpt_check", HERE / "excerpt_check.py")
 make_pdf = _import("make_pdf", HERE / "make_pdf.py")
@@ -2128,157 +2128,297 @@ def draw_seeking_alpha_news_section() -> None:
             use_container_width=True,
         )
 
-def _get_available_tickers_for_reddit() -> list[str]:
+
+def _get_available_tickers_for_substack() -> list[str]:
     """
-    Return available tickers for Reddit analysis.
-    Mirrors v1 behavior: pull from tickers.py.
+    Return available tickers from tickers.py for the Substack segment.
+    Mirrors the prior segment behavior: use the same Cutler universe without hardcoding.
     """
     try:
-        from tickers import tickers  # { "ABBV": [...], "AAPL": [...] }
+        from tickers import tickers  # { "AAPL": {...}, ... }
         if isinstance(tickers, dict):
             return sorted(tickers.keys())
     except Exception:
         pass
-
     return []
 
-def draw_reddit_pulse_section():
-    st.markdown("### Reddit pulse – weekly sentiment snapshot")
+
+def draw_substack_section():
+    """
+    Substack (RapidAPI) segment:
+      - ticker-driven search
+      - strict lookback
+      - per-ticker caps to control cost
+      - compiled PDF export (skimmable, investment-grade) via make_pdf.py
+    """
+    st.markdown("### Substack — recent posts (RapidAPI)")
     st.caption(
-        "Lightweight Reddit snapshot: we pull a small number of high-signal posts from "
-        "the last week in key finance subs, filtered by ticker, to keep API usage under control."
+        "We query Substack for recent, ticker-relevant posts and export a skimmable compiled PDF. "
+        "Cost controls: strict lookback + per-ticker caps + we only fetch full post bodies for candidates "
+        "that pass the list-stage filters."
     )
 
-    # 1) Ticker selection from your real universe
-    available_tickers = _get_available_tickers_for_reddit()
+    # Universe
+    available_tickers = _get_available_tickers_for_substack()
     default_index = available_tickers.index("AMZN") if "AMZN" in available_tickers else 0
 
-    selected_ticker = st.selectbox(
-        "Ticker symbol",
-        options=available_tickers,
-        index=default_index,
-        key="reddit_ticker_select",
-    )
+    # Inputs
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        selected_ticker = st.selectbox(
+            "Ticker symbol",
+            options=available_tickers,
+            index=default_index,
+            key="substack_ticker_select",
+        )
+    with col2:
+        lookback_days = st.selectbox(
+            "Lookback window (days)",
+            options=[2, 7],
+            index=0,
+            key="substack_lookback_days",
+        )
+    with col3:
+        max_posts = st.number_input(
+            "Max posts per ticker",
+            min_value=1,
+            max_value=10,
+            value=int(st.session_state.get("substack_max_posts", 3) or 3),
+            step=1,
+            key="substack_max_posts",
+        )
 
-    # 2) Simple cache so we don't hit the API on every rerun
-    cache_key = "reddit_pulse_cache"
+    # Simple cache (avoid rerun API hits)
+    cache_key = "substack_cache"
     if cache_key not in st.session_state:
         st.session_state[cache_key] = {}
 
-    posts_by_subreddit = st.session_state[cache_key].get(selected_ticker)
+    cached = st.session_state[cache_key].get(selected_ticker)
 
-    # 3) Fetch button – ONLY here do we call the API
+    # Fetch button — only call API here
     run_clicked = st.button(
-        f"Fetch Reddit posts for {selected_ticker}",
+        f"Fetch Substack posts for {selected_ticker}",
         use_container_width=True,
-        key="reddit_fetch_button",
+        key="substack_fetch_button",
     )
 
     if run_clicked:
-        with st.spinner("Querying Reddit…"):
-            posts_by_subreddit = reddit_excerpts.fetch_posts_for_ticker(
-                selected_ticker,
-                time_window="week",  # weekly snapshot
-                max_per_sub=5,       # cost control
-            )
-        # store result in cache
-        st.session_state[cache_key][selected_ticker] = posts_by_subreddit
+        with st.spinner("Querying Substack…"):
+            try:
+                cached = substack_excerpts.fetch_posts_for_ticker(
+                    selected_ticker,
+                    lookback_days=int(lookback_days),
+                    max_posts=int(max_posts),
+                )
+            except Exception as e:
+                cached = []
+                st.error(f"Substack fetch failed: {e}")
+        st.session_state[cache_key][selected_ticker] = cached
 
-    # If we have no data yet (button never clicked, or API returned nothing)
-    if not posts_by_subreddit:
+    if not cached:
         st.info(
-            "No relevant Reddit posts found in the last week for this ticker, "
-            "or the API did not return any results yet."
-        )
-        return
-
-    # 4) Subreddit + extras dropdown (only subs that actually have posts)
-    extras_key = "__extras__"
-    subreddit_labels = []
-    label_to_sub = {}
-
-    # Core finance subs first
-    core_items = [
-        (k, v) for k, v in posts_by_subreddit.items()
-        if k != extras_key
-    ]
-    core_items = sorted(core_items, key=lambda kv: kv[0].lower())
-
-    for sub, posts in core_items:
-        if not posts:
-            continue
-        label = f"r/{sub} ({len(posts)} posts)"
-        subreddit_labels.append(label)
-        label_to_sub[label] = sub
-
-    # Extras bucket if present
-    extras_posts = posts_by_subreddit.get(extras_key)
-    if extras_posts:
-        extras_label = (
-            f"Extras – top cross-subreddit posts mentioning "
-            f"${selected_ticker} ({len(extras_posts)} posts)"
-        )
-        subreddit_labels.append(extras_label)
-        label_to_sub[extras_label] = extras_key
-
-    if not subreddit_labels:
-        st.info(
-            "We fetched data from Reddit, but none of the top posts mentioned this ticker "
-            "explicitly in the last week."
-        )
-        return
-
-    chosen_label = st.selectbox(
-        "Choose a subreddit or extras view",
-        options=subreddit_labels,
-        key="reddit_subreddit_select",
-    )
-    chosen_sub = label_to_sub[chosen_label]
-
-    if chosen_sub == extras_key:
-        st.markdown(
-            f"Showing posts from **all finance subreddits** mentioning `${selected_ticker}` "
-            f"(top {len(posts_by_subreddit.get(chosen_sub, []))} this week):"
+            "No recent Substack posts found for this ticker in the selected lookback window. "
+            "Try 7 days or a higher cap if you want broader coverage."
         )
     else:
-        st.markdown(f"Showing posts for **r/{chosen_sub}**:")
+        st.markdown(f"Showing **{len(cached)}** post(s) for **{selected_ticker}**:")
+        for post in cached:
+            title = (post.get("title") or "(no title)").strip()
+            author = (post.get("author") or "").strip()
+            published = (post.get("published_at") or "").strip()
+            url = (post.get("url") or "").strip()
+            excerpt = (post.get("excerpt") or post.get("body") or "").strip()
 
-    # 5) Render posts for the chosen key
-    for post in posts_by_subreddit.get(chosen_sub, []):
-        title = post.title or "(no title)"
-        permalink = post.permalink or ""
-        score = post.score or 0
-        num_comments = post.num_comments or 0
+            meta = []
+            if author:
+                meta.append(author)
+            if published:
+                meta.append(published[:19])
+            meta_s = " · ".join(meta)
+            header = f"{title}" + (f" — {meta_s}" if meta_s else "")
 
-        body = (
-            getattr(post, "selftext", None)
-            or getattr(post, "body", None)
-            or ""
-        ).strip()
-
-        header = f"{title} – Score {score} · {num_comments} comments"
-
-        with st.expander(header, expanded=False):
-            if permalink:
-                url = f"https://www.reddit.com{permalink}"
-                st.markdown(f"[Open on Reddit]({url})")
-
-            if body:
-                max_chars = 4000
-                if len(body) > max_chars:
-                    st.write(body[:max_chars] + " …")
-                    st.caption(
-                        "Truncated for length – open on Reddit to read the full post."
-                    )
+            with st.expander(header, expanded=False):
+                if url:
+                    st.markdown(f"[Open on Substack]({url})")
+                if excerpt:
+                    max_chars = 4500
+                    if len(excerpt) > max_chars:
+                        st.write(excerpt[:max_chars] + " …")
+                        st.caption("Truncated — open on Substack to read the full post.")
+                    else:
+                        st.write(excerpt)
                 else:
-                    st.write(body)
-            else:
-                st.caption(
-                    "This is a link post with no text body on Reddit. "
-                    "Open on Reddit to read the article and full discussion."
-                )
+                    st.caption("No body text available for this item.")
 
-            st.markdown("---")
+    st.markdown("---")
+
+    # Compiled PDF export (universe-wide, like SA)
+    st.markdown("#### Export compiled Substack PDF")
+    st.caption(
+        "Build one compiled PDF across your full ticker universe. "
+        "This will re-run the Substack search for each ticker using the lookback and caps above."
+    )
+
+    if "substack_pdf_bytes" not in st.session_state:
+        st.session_state["substack_pdf_bytes"] = None
+        st.session_state["substack_pdf_name"] = None
+
+    export_clicked = st.button(
+        "Build Substack compiled PDF (ALL tickers)",
+        use_container_width=True,
+        key="substack_export_all_button",
+    )
+
+    if export_clicked:
+        try:
+            with st.spinner("Building compiled Substack PDF…"):
+                universe = available_tickers or ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
+                out_pdf = _build_substack_compiled_pdf_for_universe(
+                    universe=universe,
+                    lookback_days=int(lookback_days),
+                    max_posts=int(max_posts),
+                )
+                st.session_state["substack_pdf_bytes"] = Path(out_pdf).read_bytes()
+                st.session_state["substack_pdf_name"] = Path(out_pdf).name
+            st.success("Substack PDF built successfully.")
+        except Exception as e:
+            st.session_state["substack_pdf_bytes"] = None
+            st.session_state["substack_pdf_name"] = None
+            st.error(f"Substack PDF build failed: {e}")
+
+    if st.session_state.get("substack_pdf_bytes") and st.session_state.get("substack_pdf_name"):
+        st.download_button(
+            "Download Substack compiled PDF",
+            data=st.session_state["substack_pdf_bytes"],
+            file_name=st.session_state["substack_pdf_name"],
+            mime="application/pdf",
+            use_container_width=True,
+            key="substack_download_button",
+        )
+
+
+def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_days: int, max_posts: int) -> Path:
+    """Build one compiled Substack PDF across the given ticker universe."""
+    import tempfile
+    import json as _json
+    from zoneinfo import ZoneInfo
+
+    combined: dict[str, list[dict]] = {}
+
+    # Keep these caps aligned with SA defaults (can be overridden via session_state if needed)
+    max_paras_per_ticker = int(st.session_state.get("substack_pdf_max_paras_per_ticker", 2000))
+    max_paras_per_post = int(st.session_state.get("substack_pdf_max_paras_per_post", 250))
+
+    prog = st.progress(0.0)
+    status = st.empty()
+
+    total = max(1, len(universe))
+    processed = 0
+    global_seen_post_ids: set[str] = set()
+
+    for sym in universe:
+        status.info(f"Substack — fetching {sym} ({processed+1}/{total}) …")
+        try:
+            posts = substack_excerpts.fetch_posts_for_ticker(
+                sym,
+                lookback_days=int(lookback_days),
+                max_posts=int(max_posts),
+            ) or []
+
+            items: list[dict] = []
+            for p in posts:
+                pid = str(p.get("post_id") or "").strip()
+                if pid:
+                    if pid in global_seen_post_ids:
+                        continue
+                    global_seen_post_ids.add(pid)
+
+                title = (p.get("title") or "").strip()
+                author = (p.get("author") or "").strip()
+                url = (p.get("url") or "").strip()
+                published = (p.get("published_at") or "").strip()
+                body = (p.get("body") or p.get("excerpt") or "").strip()
+
+                if not body and not title:
+                    continue
+
+                header_parts = []
+                if title:
+                    header_parts.append(title)
+                if author:
+                    header_parts.append(f"— {author}")
+                header = " ".join(header_parts).strip()
+
+                meta_lines = []
+                if published:
+                    meta_lines.append(f"Date: {published[:19]}")
+                if url:
+                    meta_lines.append(f"Source: {url}")
+                if meta_lines:
+                    header = (header + "\n" if header else "") + "\n".join(meta_lines)
+
+                if header:
+                    items.append({"text": header, "pages": [], "is_header": True})
+
+                # paragraphize body
+                paras = [x.strip() for x in re.split(r"\n\s*\n", body) if x.strip()]
+                kept = 0
+                for para in paras:
+                    if kept >= max_paras_per_post:
+                        break
+                    if len(para) < 60:
+                        continue
+                    items.append({"text": para, "pages": []})
+                    kept += 1
+
+            if items:
+                trimmed: list[dict] = []
+                body_count = 0
+                for it in items:
+                    if it.get("is_header"):
+                        trimmed.append(it)
+                        continue
+                    if body_count >= max_paras_per_ticker:
+                        break
+                    trimmed.append(it)
+                    body_count += 1
+                combined[sym] = trimmed
+        except Exception:
+            pass
+
+        processed += 1
+        prog.progress(processed / total)
+
+    prog.empty()
+    status.empty()
+
+    if not combined:
+        raise RuntimeError("No Substack posts were available to export for the current universe/config.")
+
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    pdf_name = f"{now_et.strftime('%m.%d.%y')} Substack ALL.pdf"
+    out_path = CP_DIR / pdf_name
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        excerpts_path = td_path / "substack_excerpts.json"
+        excerpts_path.write_text(_json.dumps(combined, indent=2), encoding="utf-8")
+        out_pdf = td_path / "substack_compiled.pdf"
+
+        make_pdf.build_pdf(
+            excerpts_json_path=str(excerpts_path),
+            output_pdf_path=str(out_pdf),
+            report_title="Substack Research",
+            source_pdf_name=pdf_name,
+            format_style="compact",
+            ai_score=True,
+            ai_model="heuristic",
+        )
+        out_path.write_bytes(out_pdf.read_bytes())
+
+    return out_path
+
 
 def build_podcast_groups(n_groups: int = 9):
     """
@@ -4210,7 +4350,7 @@ def main():
     
     # ---------------------- RUN ALL (orchestrator) ----------------------
     st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.markdown("### Run All (Fund Families Latest + Seeking Alpha All + Podcasts All)")
+    st.markdown("### Run All (Fund Families Latest + Seeking Alpha All + Substack + Podcasts All)")
 
     ra_state = _load_run_all_state()
     ra_cfg = ra_state.get("config") or {}
@@ -4233,6 +4373,21 @@ def main():
         options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
         index=0,
         key="run_all_sa_model",
+    )
+
+    ra_substack_days = st.selectbox(
+        "Substack lookback (days)",
+        options=[2, 7],
+        index=[2, 7].index(int(ra_cfg.get("substack_lookback_days", 2))) if int(ra_cfg.get("substack_lookback_days", 2)) in [2, 7] else 0,
+        key="run_all_substack_days",
+    )
+    ra_substack_max = st.number_input(
+        "Substack max posts per ticker",
+        min_value=1,
+        max_value=10,
+        value=int(ra_cfg.get("substack_max_posts", 3)),
+        step=1,
+        key="run_all_substack_max_posts",
     )
 
     c1, c2, c3 = st.columns([1, 1, 2])
@@ -4262,7 +4417,9 @@ def main():
                 "mf_lookback_days": int(ra_mf_days),
                 "sa_max_articles": int(ra_sa_max),
                 "sa_model": str(ra_sa_model),
-            },
+                            "substack_lookback_days": int(ra_substack_days),
+                "substack_max_posts": int(ra_substack_max),
+},
             "started_at": _now_et().isoformat(),
         }
         _save_run_all_state(ra_state)
@@ -4302,6 +4459,23 @@ def main():
                     file_name=fp.name,
                     mime="application/pdf",
                     key=f"ra_dl_sa_{fp.name}",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
+
+
+    sub_path = (outs.get("substack") or {}).get("path") or ""
+    if sub_path:
+        try:
+            fp = Path(sub_path)
+            if fp.exists():
+                st.download_button(
+                    f"Download {fp.name}",
+                    data=fp.read_bytes(),
+                    file_name=fp.name,
+                    mime="application/pdf",
+                    key=f"ra_dl_sub_{fp.name}",
                     use_container_width=True,
                 )
         except Exception:
@@ -4365,6 +4539,34 @@ def main():
                     out_pdf = _build_sa_compiled_pdf_for_universe(universe=universe, max_articles=max_articles, model=model_name)
                     ra_state.setdefault("outputs", {}).setdefault("seeking_alpha", {})["path"] = str(out_pdf)
                 ra_state.setdefault("completed", []).append("seeking_alpha")
+                ra_state["current_step"] = "substack"
+                _save_run_all_state(ra_state)
+                st.rerun()
+
+
+            if step == "substack":
+                days_back = int(cfg.get("substack_lookback_days", 2))
+                max_posts = int(cfg.get("substack_max_posts", 3))
+                with st.status(f"Run All: Substack — building compiled PDF (last {days_back} days)", expanded=True):
+                    # Use the same ticker universe logic as Seeking Alpha (Cutler tickers.py)
+                    try:
+                        from tickers import tickers as _T  # type: ignore
+                        universe = []
+                        if isinstance(_T, dict):
+                            universe = [t for t in _T.keys() if _is_probable_ticker(t)]
+                    except Exception:
+                        universe = []
+                    if not universe:
+                        universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
+
+                    out_pdf = _build_substack_compiled_pdf_for_universe(
+                        universe=universe,
+                        lookback_days=days_back,
+                        max_posts=max_posts,
+                    )
+                    ra_state.setdefault("outputs", {}).setdefault("substack", {})["path"] = str(out_pdf)
+
+                ra_state.setdefault("completed", []).append("substack")
                 ra_state["current_step"] = "podcasts"
                 _save_run_all_state(ra_state)
                 st.rerun()
@@ -4432,8 +4634,8 @@ def main():
 
     st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
-    tab_mf, tab_sa, tab_reddit, tab_podcast = st.tabs(
-        ["Fund Families", "Seeking Alpha", "Reddit", "Podcast"]
+    tab_mf, tab_sa, tab_substack, tab_podcast = st.tabs(
+        ["Fund Families", "Seeking Alpha", "Substack", "Podcast"]
     )
 
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
@@ -4820,16 +5022,16 @@ def main():
                     st.rerun()
     
 
-    with tab_reddit:
-        if st.button("Clean current tab cache", key="clean_reddit_cache", use_container_width=True):
+    with tab_substack:
+        if st.button("Clean current tab cache", key="clean_substack_cache", use_container_width=True):
             _clear_session_keys(
-                exact=["reddit_pulse_cache"],
-                prefixes=["reddit_"],
+                exact=["substack_cache"],
+                prefixes=["substack_"],
             )
             st.rerun()
 
-        # ---------- Reddit pulse (retail sentiment) ----------
-        draw_reddit_pulse_section()
+        # ---------- Substack (research feed) ----------
+        draw_substack_section()
 
 
     with tab_podcast:
