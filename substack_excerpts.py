@@ -29,6 +29,98 @@ DEFAULT_BACKOFF_BASE = float(os.getenv("SUBSTACK_HTTP_BACKOFF_BASE", "0.6"))
 # Opt-in debugging. Set SUBSTACK_DEBUG="1" in Streamlit Secrets to surface request errors.
 SUBSTACK_DEBUG = os.getenv("SUBSTACK_DEBUG", "0").strip() == "1"
 
+# -----------------------------
+# Search + cost-control helpers
+# -----------------------------
+
+# Finance heuristic terms for list-stage filtering (cheap, big cost win).
+# If the list-stage text has *no* finance signal, we avoid /reader/post calls.
+FINANCE_TERMS: List[str] = [
+    "earnings", "guidance", "eps", "revenue", "sales", "margin", "gross margin", "operating margin",
+    "valuation", "multiple", "p/e", "pe", "ev/ebitda", "ebitda", "cash flow", "free cash flow", "fcf",
+    "balance sheet", "debt", "leverage", "liquidity", "downgrade", "upgrade", "rating", "buy", "sell",
+    "hold", "overweight", "underweight", "price target", "pt", "DCF", "discounted cash flow",
+    "10-q", "10k", "10-k", "8-k", "form 4", "sec filing", "quarter", "q1", "q2", "q3", "q4",
+    "portfolio", "position", "allocation", "risk", "macro", "inflation", "rates", "fed", "yield",
+    "dividend", "buyback", "repurchase", "accretion", "dilution", "guidance", "outlook",
+    "bear", "bull", "thesis", "catalyst",
+]
+
+_FINANCE_RE = re.compile(r"\b(" + "|".join(re.escape(t) for t in FINANCE_TERMS) + r")\b", re.IGNORECASE)
+
+def build_search_queries(ticker: str) -> List[str]:
+    """Tighten list-stage search queries to reduce false positives."""
+    t = (ticker or "").strip().upper()
+    if not t:
+        return []
+    # Order matters: most precise first.
+    return [
+        f"${t}",
+        f"NASDAQ:{t}",
+        f"{t} stock",
+        f"{t} shares",
+        f"{t} earnings",
+        f"{t} ({t})",
+    ]
+
+def _candidate_snippet(row: Dict[str, Any]) -> str:
+    for k in ("snippet", "summary", "description", "subtitle", "subTitle", "dek", "excerpt", "text"):
+        v = row.get(k)
+        if v and isinstance(v, str):
+            return v.strip()
+    # Sometimes nested
+    for k in ("publication", "author", "user"):
+        v = row.get(k)
+        if isinstance(v, dict):
+            for kk in ("name", "handle", "subdomain", "title"):
+                vv = v.get(kk)
+                if vv and isinstance(vv, str):
+                    return vv.strip()
+    return ""
+
+def _list_stage_text(row: Dict[str, Any], *, title: str, url: str) -> str:
+    parts: List[str] = []
+    if title:
+        parts.append(title)
+    snip = _candidate_snippet(row)
+    if snip:
+        parts.append(snip)
+    if url:
+        parts.append(url)
+    # common author/publication fields
+    for k in ("author", "author_name", "authorName", "publication", "pub", "publisher"):
+        v = row.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v.strip())
+        elif isinstance(v, dict):
+            for kk in ("name", "handle", "subdomain"):
+                vv = v.get(kk)
+                if isinstance(vv, str) and vv.strip():
+                    parts.append(vv.strip())
+    return " ".join(parts)
+
+def _finance_hits(text: str) -> int:
+    if not text:
+        return 0
+    return len(_FINANCE_RE.findall(text))
+
+def _ticker_signal_score(text: str, ticker: str) -> int:
+    if not text or not ticker:
+        return 0
+    t = ticker.upper()
+    txt_u = text.upper()
+    score = 0
+    if f"${t}" in text:
+        score += 3
+    if f"NASDAQ:{t}" in txt_u:
+        score += 2
+    # keep this small to avoid generic ticker matches dominating
+    if t in txt_u:
+        score += 1
+    return score
+
+
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -388,7 +480,7 @@ def fetch_post_details(post_id: str) -> Dict[str, Any]:
     return {}
 
 
-def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: int = 3) -> List[Dict[str, Any]]:
+def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: int = 3) -> List[Dict[str, Any]]:
     """
     High-level helper used by final.py.
 
@@ -407,12 +499,21 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
 
     cutoff = _now_utc() - timedelta(days=lookback_days)
 
-    candidates = search_posts(ticker, page=1, limit=max(25, max_posts * 5))
+    candidates: List[Dict[str, Any]] = []
+
+    # Tightened multi-query search (reduces false positives)
+    for q in build_search_queries(ticker):
+        rows = search_posts(q, page=1, limit=max(25, max_posts * 5))
+        if rows:
+            candidates.extend(rows)
+        # light early stop if we already have plenty of candidates
+        if len(candidates) >= max(50, max_posts * 12):
+            break
     if not candidates:
         return []
 
     seen: set[str] = set()
-    filtered: List[Dict[str, Any]] = []
+    scored: List[Tuple[Dict[str, Any], Optional[datetime], int, int]] = []
 
     for row in candidates:
         pid = _candidate_post_id(row)
@@ -423,16 +524,41 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
         seen.add(pid)
 
         dt = _candidate_published_at(row)
-        if dt and dt < cutoff:
+        # Strict lookback: if we can't determine recency at list-stage, skip to control cost.
+        if not dt:
+            continue
+        if dt < cutoff:
             continue
 
-        filtered.append(row)
+        title = _candidate_title(row)
+        url = _candidate_url(row)
+        text = _list_stage_text(row, title=title, url=url)
 
-        if len(filtered) >= max_posts * 3:
+        fh = _finance_hits(text)
+        ts = _ticker_signal_score(text, ticker)
+
+        # Finance heuristic BEFORE /reader/post (big cost win)
+        # Only keep candidates that show finance signal or an explicit $TICKER tag.
+        if fh <= 0 and ts < 3:
+            continue
+
+        scored.append((row, dt, fh, ts))
+
+        # Light early stop: we only need a bit more than max_posts to rank
+        if len(scored) >= max(60, max_posts * 20):
             break
 
-    if not filtered:
+    if not scored:
         return []
+
+    # Hard cap + sorting: (a) recency (b) finance keywords (c) $TICKER presence
+    def _sort_key(x: Tuple[Dict[str, Any], Optional[datetime], int, int]) -> Tuple[float, int, int]:
+        _row, _dt, _fh, _ts = x
+        ts_epoch = (_dt.timestamp() if _dt else 0.0)
+        return (ts_epoch, _fh, _ts)
+
+    scored.sort(key=_sort_key, reverse=True)
+    filtered: List[Dict[str, Any]] = [row for (row, _dt, _fh, _ts) in scored[: max_posts * 3]]
 
     results: List[Dict[str, Any]] = []
     for row in filtered[:max_posts]:
