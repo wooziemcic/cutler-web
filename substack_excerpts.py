@@ -11,7 +11,6 @@ This module intentionally exposes a small surface area so final.py can remain st
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 import os
 import time
@@ -27,6 +26,9 @@ DEFAULT_TIMEOUT_S = float(os.getenv("SUBSTACK_HTTP_TIMEOUT", "15"))
 DEFAULT_RETRIES = int(os.getenv("SUBSTACK_HTTP_RETRIES", "2"))
 DEFAULT_BACKOFF_BASE = float(os.getenv("SUBSTACK_HTTP_BACKOFF_BASE", "0.6"))
 
+# Opt-in debugging. Set SUBSTACK_DEBUG="1" in Streamlit Secrets to surface request errors.
+SUBSTACK_DEBUG = os.getenv("SUBSTACK_DEBUG", "0").strip() == "1"
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -41,10 +43,8 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     if value is None:
         return None
 
-    # epoch
     if isinstance(value, (int, float)):
         ts = float(value)
-        # heuristic: ms if very large
         if ts > 1e12:
             ts = ts / 1000.0
         try:
@@ -57,7 +57,6 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
         if not s:
             return None
 
-        # numeric epoch in string
         if re.fullmatch(r"\d{10,13}", s):
             try:
                 ts = float(s)
@@ -67,18 +66,16 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
             except Exception:
                 pass
 
-        # ISO
-        # Handle trailing Z
         if s.endswith("Z"):
             s2 = s[:-1] + "+00:00"
         else:
             s2 = s
-        # Some APIs return "2026-01-13T10:01:02.123Z"
+
         try:
             return datetime.fromisoformat(s2)
         except Exception:
             pass
-        # Fallback: just date
+
         try:
             return datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except Exception:
@@ -96,7 +93,6 @@ def _get_key() -> str:
 
 def _headers() -> Dict[str, str]:
     key = _get_key()
-    # RapidAPI typically accepts just x-rapidapi-key; host header can be optional.
     host = os.getenv("SUBSTACK_RAPIDAPI_HOST", "").strip()
     h = {
         "x-rapidapi-key": key,
@@ -117,38 +113,90 @@ def _request_json(path: str, params: Dict[str, Any]) -> Any:
     for attempt in range(DEFAULT_RETRIES + 1):
         try:
             resp = requests.get(url, headers=_headers(), params=params, timeout=DEFAULT_TIMEOUT_S)
-            # If rate-limited, backoff and retry
+
             if resp.status_code in (429, 503, 504):
-                raise RuntimeError(f"HTTP {resp.status_code}")
-            resp.raise_for_status()
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+
+            if resp.status_code >= 400:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
+
             return resp.json()
+
         except Exception as e:
             last_err = e
             if attempt >= DEFAULT_RETRIES:
                 break
-            # jittered exponential-ish backoff
             sleep_s = (DEFAULT_BACKOFF_BASE * (2 ** attempt)) + random.uniform(0, 0.25)
             time.sleep(sleep_s)
 
-    raise RuntimeError(f"Substack API request failed: {last_err}")
+    raise RuntimeError(f"Substack API request failed for {url} params={params}: {last_err}")
 
 
 def _extract_posts_from_search(payload: Any) -> List[Dict[str, Any]]:
     """
-    RapidAPI payloads vary. We normalize to a list of dicts representing posts/comments.
+    RapidAPI payloads vary and are often nested like:
+      { "data": { "items": [...] } } or { "data": { "posts": [...] } }
+      { "response": { "data": { ... } } }
+
+    This extractor:
+    - checks common top-level keys,
+    - recursively descends into dict containers (data/response/result),
+    - and as a last resort searches a few levels deep for the first list of dicts
+      that looks like "posts" (contains post_id/postId/id).
     """
     if payload is None:
         return []
+
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
-    if isinstance(payload, dict):
-        for key in ("data", "results", "items", "posts"):
-            v = payload.get(key)
-            if isinstance(v, list):
-                return [x for x in v if isinstance(x, dict)]
-        # sometimes nested
-        if "response" in payload and isinstance(payload["response"], dict):
-            return _extract_posts_from_search(payload["response"])
+
+    if not isinstance(payload, dict):
+        return []
+
+    for key in ("results", "items", "posts", "data"):
+        v = payload.get(key)
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, dict)]
+
+    for key in ("data", "response", "result"):
+        v = payload.get(key)
+        if isinstance(v, dict):
+            out = _extract_posts_from_search(v)
+            if out:
+                return out
+
+    for key in ("results", "items", "posts", "comments"):
+        v = payload.get(key)
+        if isinstance(v, dict):
+            out = _extract_posts_from_search(v)
+            if out:
+                return out
+
+    def looks_like_posts(lst: List[Any]) -> bool:
+        if not lst:
+            return False
+        sample = next((x for x in lst if isinstance(x, dict)), None)
+        if not sample:
+            return False
+        return any(k in sample for k in ("post_id", "postId", "id", "postid"))
+
+    queue: List[Any] = [payload]
+    for _ in range(60):
+        if not queue:
+            break
+        node = queue.pop(0)
+
+        if isinstance(node, dict):
+            for vv in node.values():
+                if isinstance(vv, list) and looks_like_posts(vv):
+                    return [x for x in vv if isinstance(x, dict)]
+                if isinstance(vv, (dict, list)):
+                    queue.append(vv)
+        elif isinstance(node, list):
+            for vv in node:
+                if isinstance(vv, (dict, list)):
+                    queue.append(vv)
+
     return []
 
 
@@ -192,43 +240,75 @@ def _extract_body_from_post_details(payload: Any) -> Tuple[str, str, str, str]:
     if payload is None:
         return "", "", "", ""
 
-    if isinstance(payload, dict):
-        base = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(payload, dict):
+        return "", "", "", ""
 
-        # body candidates (rich HTML vs plain)
-        body = (
-            base.get("body")
-            or base.get("text")
-            or base.get("content")
-            or base.get("subtitle")
-            or base.get("description")
-            or ""
-        )
+    base = payload.get("data") if isinstance(payload.get("data"), dict) else payload
 
-        # author
-        author = (
-            base.get("author")
-            or base.get("author_name")
-            or base.get("authorName")
-            or (base.get("publication") or {}).get("name") if isinstance(base.get("publication"), dict) else ""
-        )
+    # Substack/RapidAPI often nests the post under "post"
+    post = base.get("post") if isinstance(base.get("post"), dict) else None
+    node = post or base
 
-        title = base.get("title") or base.get("headline") or ""
-        published_raw = (
-            base.get("published_at")
-            or base.get("published")
-            or base.get("date")
-            or base.get("created_at")
-            or ""
-        )
+    # body candidates (HTML first, then text-ish)
+    body = (
+        node.get("body_html")
+        or node.get("bodyHtml")
+        or node.get("html")
+        or node.get("content_html")
+        or node.get("contentHtml")
+        or node.get("raw_body")
+        or node.get("rawBody")
+        or node.get("body")
+        or node.get("text")
+        or node.get("content")
+        or node.get("subtitle")
+        or node.get("description")
+        or ""
+    )
 
-        return str(body or ""), str(author or ""), str(title or ""), str(published_raw or "")
+    # author candidates
+    author = (
+        node.get("author")
+        or node.get("author_name")
+        or node.get("authorName")
+        or node.get("byline")
+        or ""
+    )
 
-    return "", "", "", ""
+    # Sometimes author is a nested object
+    if isinstance(author, dict):
+        author = author.get("name") or author.get("handle") or ""
+
+    # If still blank, try publication / user objects
+    if not author:
+        pub = node.get("publication") if isinstance(node.get("publication"), dict) else None
+        if pub:
+            author = pub.get("name") or ""
+        user = node.get("user") if isinstance(node.get("user"), dict) else None
+        if user and not author:
+            author = user.get("name") or user.get("handle") or ""
+
+    title = (
+        node.get("title")
+        or node.get("headline")
+        or node.get("subject")
+        or ""
+    )
+
+    published_raw = (
+        node.get("published_at")
+        or node.get("publishedAt")
+        or node.get("published")
+        or node.get("created_at")
+        or node.get("createdAt")
+        or node.get("date")
+        or ""
+    )
+
+    return str(body or ""), str(author or ""), str(title or ""), str(published_raw or "")
 
 
 def _strip_html(text: str) -> str:
-    # very lightweight HTML stripping (keep it dependency-free)
     if "<" not in text:
         return text.strip()
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
@@ -237,44 +317,66 @@ def _strip_html(text: str) -> str:
     return text.strip()
 
 
+def _try_search_endpoint(endpoint_path: str, keyword: str, page: int, limit: int) -> List[Dict[str, Any]]:
+    """
+    Internal helper to try a search endpoint using the correct parameter names.
+    Per RapidAPI UI, /search/post requires:
+      - query (required)
+      - page (optional, often 0-based)
+    """
+    last_err: Optional[Exception] = None
+
+    # The RapidAPI console shows: query (required), page optional (example uses page=0)
+    # We keep a small set of variants for resilience, but keep "query" first.
+    for params in (
+        {"query": keyword, "page": page},          # primary (matches UI)
+        {"query": keyword, "page": max(page - 1, 0)},  # in case provider uses 0-based paging
+        {"q": keyword, "page": page},              # fallback
+        {"keyword": keyword, "page": page},        # fallback
+    ):
+        try:
+            payload = _request_json(endpoint_path, params=params)
+            rows = _extract_posts_from_search(payload)
+            if rows:
+                return rows
+        except Exception as e:
+            last_err = e
+            continue
+
+    if SUBSTACK_DEBUG and last_err:
+        raise RuntimeError(f"{endpoint_path} failed for keyword='{keyword}': {last_err}")
+
+    return []
+
+
 def search_posts(keyword: str, *, page: int = 1, limit: int = 20) -> List[Dict[str, Any]]:
     """
-    Calls /search/posts. We try a couple common param names to be resilient.
+    Primary list-stage search.
+    1) Try /search/post (singular)  <-- correct per RapidAPI
+    2) If empty, fall back to /search/top
     """
     keyword = (keyword or "").strip()
     if not keyword:
         return []
 
-    # Try common query param shapes
-    tried = []
-    for params in (
-        {"keyword": keyword, "page": page, "limit": limit},
-        {"query": keyword, "page": page, "limit": limit},
-        {"q": keyword, "page": page, "limit": limit},
-        {"keyword": keyword, "page": page},
-        {"query": keyword, "page": page},
-    ):
-        try:
-            tried.append(params)
-            payload = _request_json("/search/posts", params=params)
-            rows = _extract_posts_from_search(payload)
-            if rows:
-                return rows
-        except Exception:
-            continue
+    # IMPORTANT: endpoint is singular: /search/post
+    rows = _try_search_endpoint("/search/post", keyword, page, limit)
+    if rows:
+        return rows
 
-    # If everything failed, surface the last attempt so caller can handle
-    return []
+    # Fallback list-stage endpoint
+    return _try_search_endpoint("/search/top", keyword, page, limit)
 
 
 def fetch_post_details(post_id: str) -> Dict[str, Any]:
     """
     Calls /reader/post to fetch full post data.
+    RapidAPI UI shows the parameter is: postId (required).
     """
     post_id = (post_id or "").strip()
     if not post_id:
         return {}
-    # similarly resilient param naming
+
     for params in ({"postId": post_id}, {"post_id": post_id}, {"id": post_id}):
         try:
             payload = _request_json("/reader/post", params=params)
@@ -282,15 +384,16 @@ def fetch_post_details(post_id: str) -> Dict[str, Any]:
                 return payload if isinstance(payload, dict) else {"data": payload}
         except Exception:
             continue
+
     return {}
 
 
-def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: int = 3) -> List[Dict[str, Any]]:
+def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: int = 3) -> List[Dict[str, Any]]:
     """
     High-level helper used by final.py.
 
     Strategy:
-      1) List stage: /search/posts for keyword=ticker (page 1 only).
+      1) List stage: /search/post for query=ticker (page 1 only).
       2) Filter to lookback window using list-stage timestamps where possible.
       3) Dedupe by post_id.
       4) Fetch full details via /reader/post only for top N candidates.
@@ -308,7 +411,6 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
     if not candidates:
         return []
 
-    # Filter + dedupe at list-stage
     seen: set[str] = set()
     filtered: List[Dict[str, Any]] = []
 
@@ -327,7 +429,6 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
         filtered.append(row)
 
         if len(filtered) >= max_posts * 3:
-            # keep a small pool, then we will fetch details for first N
             break
 
     if not filtered:
@@ -350,20 +451,16 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
         if pub_d and not published_raw:
             published_raw = pub_d
 
-        # If details provided a better URL, prefer it
         if isinstance(details, dict):
             base = details.get("data") if isinstance(details.get("data"), dict) else details
             u2 = base.get("url") or base.get("canonical_url") or base.get("link")
             if isinstance(u2, str) and u2.strip():
                 url = u2.strip()
 
-        # Final cutoff check (if only details has timestamp)
         dt2 = _parse_datetime(published_raw) or published_dt
-        # Strict cutoff enforcement: if we can't determine a timestamp, skip the item
-        if not dt2:
+        if dt2 and dt2 < cutoff:
             continue
-        if dt2 < cutoff:
-            continue
+
         excerpt = body_clean[:1600] if body_clean else ""
 
         results.append(
