@@ -537,6 +537,8 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
             format_style="compact",
             ai_score=True,
             ai_model="heuristic",
+            include_index=True,
+            index_label="Index — Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -2104,6 +2106,8 @@ def draw_seeking_alpha_news_section() -> None:
                         format_style="compact",
                         ai_score=True,
                         ai_model="heuristic",
+                        include_index=True,
+                        index_label="Index — Hit Tickers",
                     )
                     st.session_state["sa_pdf_bytes"] = out_pdf.read_bytes()
                     st.session_state["sa_pdf_name"] = pdf_name
@@ -2461,6 +2465,8 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
             format_style="compact",
             ai_score=True,
             ai_model="heuristic",
+            include_index=True,
+            index_label="Index — Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -2498,6 +2504,8 @@ def _render_substack_compiled_pdf_from_combined(*, combined: dict[str, list[dict
             format_style="compact",
             ai_score=True,
             ai_model="heuristic",
+            include_index=True,
+            index_label="Index — Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
