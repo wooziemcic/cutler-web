@@ -805,6 +805,111 @@ def _render_group_block(
     )
 
 
+
+
+# ---------- Index page (optional) ----------
+
+IndexTitle = ParagraphStyle(
+    "IndexTitle",
+    parent=_base["Heading2"],
+    fontSize=14,
+    leading=18,
+    alignment=TA_LEFT,
+    textColor=colors.HexColor("#111827"),
+    spaceAfter=10,
+)
+
+IndexNote = ParagraphStyle(
+    "IndexNote",
+    parent=_base["Normal"],
+    fontSize=9,
+    leading=12,
+    alignment=TA_LEFT,
+    textColor=colors.HexColor("#4b5563"),
+    spaceAfter=8,
+)
+
+IndexCell = ParagraphStyle(
+    "IndexCell",
+    parent=_base["Normal"],
+    fontSize=9.5,
+    leading=12,
+    textColor=colors.HexColor("#111827"),
+)
+
+def _hit_tickers_in_order(groups: List[Group]) -> List[str]:
+    """
+    Return unique tickers in first-appearance order, considering only groups that contain
+    at least one non-header item.
+    """
+    seen: Set[str] = set()
+    out: List[str] = []
+    for g in groups:
+        has_non_header = any((it.get("text") or "").strip() and not bool(it.get("is_header")) for it in (g.items or []))
+        if not has_non_header:
+            continue
+        for t in (g.tickers or ()):
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
+
+
+def _render_index_page(
+    story: List[Any],
+    *,
+    tickers_in_doc: List[str],
+    name_map: Dict[str, str],
+    label: str = "Index",
+) -> None:
+    """
+    Render a simple index page listing tickers included in the document.
+    """
+    if not tickers_in_doc:
+        return
+
+    story.append(Paragraph(f"{escape(label)}", IndexTitle))
+    story.append(Paragraph(f"Hit tickers in this document: {len(tickers_in_doc)}", IndexNote))
+
+    # 2-column table: Ticker | Company
+    rows: List[List[Any]] = []
+    rows.append(
+        [
+            Paragraph("<b>Ticker</b>", IndexCell),
+            Paragraph("<b>Company</b>", IndexCell),
+        ]
+    )
+
+    for t in tickers_in_doc:
+        rows.append(
+            [
+                Paragraph(escape(t), IndexCell),
+                Paragraph(escape(name_map.get(t, t)), IndexCell),
+            ]
+        )
+
+    tbl = Table(
+        rows,
+        colWidths=[1.1 * 72, None],
+        repeatRows=1,
+        style=TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#e5e7eb")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#f3f4f6")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]
+        ),
+    )
+
+    story.append(tbl)
+    story.append(Spacer(1, 10))
+
 # ---------- Main builder ----------
 
 def build_pdf(
@@ -815,6 +920,8 @@ def build_pdf(
     format_style: str = "legacy",
     letter_date: Optional[str] = None,
     source_url: Optional[str] = None,
+    include_index: bool = False,
+    index_label: str = "Index — Hit Tickers",
     *,
     ai_score: bool = False,
     ai_model: str = "gpt-4o-mini",
@@ -874,6 +981,19 @@ def build_pdf(
     if letter_date:
         story.append(Paragraph(f"Letter Date: {letter_date}", MetaX))
     story.append(Spacer(1, 0.25 * 72))
+
+    # Optional index page (lists tickers that have at least one excerpt)
+    if include_index:
+        tickers_in_doc = _hit_tickers_in_order(groups)
+        if tickers_in_doc:
+            story.append(PageBreak())
+            _render_index_page(
+                story,
+                tickers_in_doc=tickers_in_doc,
+                name_map=name_map,
+                label=index_label,
+            )
+            story.append(PageBreak())
 
     for grp in groups:
         _render_group_block(
