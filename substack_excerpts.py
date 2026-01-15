@@ -409,6 +409,74 @@ def _strip_html(text: str) -> str:
     return text.strip()
 
 
+
+# -----------------------------
+# Relevance / noise control
+# -----------------------------
+# Goal: Only include a Substack item for a ticker if there is at least one
+# *substantive* paragraph-level mention (not a drive-by keyword match).
+# These thresholds are intentionally conservative and can be tuned via env vars.
+SUBSTACK_MIN_PARAGRAPH_CHARS = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_CHARS", "180"))
+SUBSTACK_MIN_PARAGRAPH_WORDS = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_WORDS", "30"))
+SUBSTACK_MAX_PARAGRAPHS_PER_ITEM = int(os.getenv("SUBSTACK_MAX_PARAGRAPHS_PER_ITEM", "2"))
+
+
+def _ticker_mention_re(ticker: str) -> re.Pattern:
+    t = (ticker or "").strip().upper()
+    # Match $TICKER, NASDAQ:TICKER, or word-boundary ticker.
+    # Keep this strict to avoid substring noise.
+    return re.compile(rf"(?:\${t}\b|\bNASDAQ:{t}\b|\b{t}\b)", re.IGNORECASE)
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """Split into paragraphs. Prefer existing blank-line paragraphs; otherwise create
+    pseudo-paragraphs by grouping sentences."""
+    if not text:
+        return []
+    # Prefer natural paragraph breaks
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", text) if p and p.strip()]
+    if len(parts) >= 2:
+        return parts
+
+    # Fallback: group sentences into 2–4 sentence chunks
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s and s.strip()]
+    if not sents:
+        return []
+    out = []
+    buf = []
+    for s in sents:
+        buf.append(s)
+        if len(buf) >= 3:
+            out.append(" ".join(buf))
+            buf = []
+    if buf:
+        out.append(" ".join(buf))
+    return out
+
+
+def _select_relevant_paragraphs(body_text: str, ticker: str) -> list[str]:
+    """Return up to N relevant paragraphs that include a substantive ticker mention."""
+    if not body_text:
+        return []
+
+    mention_re = _ticker_mention_re(ticker)
+    paras = _split_paragraphs(body_text)
+
+    selected: list[str] = []
+    for p in paras:
+        if not mention_re.search(p):
+            continue
+        # Must be substantive
+        if len(p) < SUBSTACK_MIN_PARAGRAPH_CHARS:
+            continue
+        if len(p.split()) < SUBSTACK_MIN_PARAGRAPH_WORDS:
+            continue
+        selected.append(p)
+        if len(selected) >= SUBSTACK_MAX_PARAGRAPHS_PER_ITEM:
+            break
+
+    return selected
+
 def _try_search_endpoint(endpoint_path: str, keyword: str, page: int, limit: int) -> List[Dict[str, Any]]:
     """
     Internal helper to try a search endpoint using the correct parameter names.
@@ -572,6 +640,14 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
         body_raw, author, title_d, pub_d = _extract_body_from_post_details(details)
 
         body_clean = _strip_html(body_raw) if body_raw else ""
+
+
+        # Noise control: only include this item if we can extract at least one
+        # substantive paragraph mentioning the ticker.
+        relevant_paras = _select_relevant_paragraphs(body_clean, ticker)
+        if not relevant_paras:
+            continue
+        body_clean = "\n\n".join(relevant_paras)
         if title_d and not title:
             title = title_d
         if pub_d and not published_raw:
