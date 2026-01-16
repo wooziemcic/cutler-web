@@ -2442,9 +2442,8 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
 
     prog.empty()
     status.empty()
-
     if not combined:
-        raise RuntimeError("No Substack posts were available to export for the current universe/config.")
+        combined = {"—": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
 
     now_et = datetime.now(ZoneInfo("America/New_York"))
     pdf_name = f"{now_et.strftime('%m.%d.%y')} Substack ALL.pdf"
@@ -2489,6 +2488,11 @@ def _render_substack_compiled_pdf_from_combined(*, combined: dict[str, list[dict
     from zoneinfo import ZoneInfo
 
     out_path = Path.cwd() / pdf_name
+
+    # If filters are very strict, it's possible to have zero qualifying hits.
+    # We still generate a small PDF so the UI shows a download button (and Run All can proceed).
+    if not combined or not any((v or []) for v in combined.values()):
+        combined = {"—": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
