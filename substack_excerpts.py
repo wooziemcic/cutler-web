@@ -2,7 +2,7 @@
 
 FAST MODE contract (matches your requirements):
 - Exactly 1 search call per ticker via GET /search/post.
-- Strict lookback enforced using list-stage timestamp; if timestamp missing/old, skip WITHOUT calling /reader/post.
+- Strict lookback enforced; if list-stage timestamp is missing, we allow ONE best candidate through to /reader/post to obtain an authoritative timestamp (still max 1 /reader/post call).
 - At most 1 post returned per ticker.
 - At most 1 /reader/post call per ticker (only for the best candidate).
 - Noise control: keep only if at least one substantive paragraph mentions the ticker in-context.
@@ -463,8 +463,10 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
 
     cutoff = _now_utc() - timedelta(days=lookback_days)
 
-    # Single search call, using strong $TICKER query to reduce noise.
-    query = f"${ticker}"
+    # Single search call (FAST MODE): one query string only.
+    # Keep it tight but allow modest recall in one call.
+    # IMPORTANT: still only 1 call to /search/post for the ticker.
+    query = ticker
     try:
         rows = search_posts_fast(query, page=0)
     except Exception:
@@ -475,20 +477,17 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
     if not rows:
         return []
 
-    # Pick the best candidate strictly by: within cutoff AND list-stage promising AND most recent.
+    # Pick the best candidate with minimal risk of extra calls:
+    # - Prefer list-stage items that pass cutoff and look promising.
+    # - If list-stage has no timestamp (common), allow ONE fallback: pick the best promising row
+    #   and enforce cutoff after the single /reader/post call.
     best: Optional[Dict[str, Any]] = None
     best_dt: Optional[datetime] = None
+    best_untimed: Optional[Dict[str, Any]] = None
 
     for row in rows:
         pid = _candidate_post_id(row)
         if not pid:
-            continue
-
-        dt = _candidate_published_at(row)
-        if not dt:
-            # strict: no timestamp, skip (prevents old/unknown content)
-            continue
-        if dt < cutoff:
             continue
 
         title = _candidate_title(row)
@@ -497,9 +496,23 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
         if not _list_stage_is_promising(ticker, title, snippet):
             continue
 
+        dt = _candidate_published_at(row)
+        if not dt:
+            # allow ONE fallback candidate without list-stage timestamp
+            if best_untimed is None:
+                best_untimed = row
+            continue
+
+        if dt < cutoff:
+            continue
+
         if best is None or (best_dt is not None and dt > best_dt) or (best_dt is None):
             best = row
             best_dt = dt
+
+    if not best:
+        best = best_untimed
+        best_dt = None
 
     if not best:
         return []
