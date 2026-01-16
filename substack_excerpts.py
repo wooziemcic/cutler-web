@@ -209,30 +209,37 @@ def _extract_body_from_post_details(payload: Any) -> Tuple[str, str, str, str]:
     if isinstance(payload, dict):
         base = payload.get("data") if isinstance(payload.get("data"), dict) else payload
 
+        # Some responses nest the post under "post"
+        node = base.get("post") if isinstance(base.get("post"), dict) else base
+
         # body candidates (rich HTML vs plain)
         body = (
-            base.get("body")
-            or base.get("text")
-            or base.get("content")
-            or base.get("subtitle")
-            or base.get("description")
+            node.get("body_html")
+            or node.get("bodyHtml")
+            or node.get("body")
+            or node.get("text")
+            or node.get("content")
+            or node.get("subtitle")
+            or node.get("description")
             or ""
         )
 
         # author
         author = (
-            base.get("author")
-            or base.get("author_name")
-            or base.get("authorName")
-            or (base.get("publication") or {}).get("name") if isinstance(base.get("publication"), dict) else ""
+            node.get("author")
+            or node.get("author_name")
+            or node.get("authorName")
+            or (node.get("publication") or {}).get("name") if isinstance(node.get("publication"), dict) else ""
         )
 
-        title = base.get("title") or base.get("headline") or ""
+        title = node.get("title") or node.get("headline") or ""
         published_raw = (
-            base.get("published_at")
-            or base.get("published")
-            or base.get("date")
-            or base.get("created_at")
+            node.get("published_at")
+            or node.get("publishedAt")
+            or node.get("published")
+            or node.get("date")
+            or node.get("created_at")
+            or node.get("post_date")
             or ""
         )
 
@@ -253,23 +260,36 @@ def _strip_html(text: str) -> str:
 
 def search_posts(keyword: str, *, page: int = 1, limit: int = 20) -> List[Dict[str, Any]]:
     """
-    Calls /search/posts. We try a couple common param names to be resilient.
+    Calls Substack search endpoint.
+
+    The RapidAPI "Substack Live" API commonly exposes /search/post (singular). We
+    use that as the primary path, with a small fallback to /search/posts for
+    backwards compatibility.
     """
     keyword = (keyword or "").strip()
     if not keyword:
         return []
 
-    # Try common query param shapes
-    tried = []
+    # Primary: /search/post (singular). Keep it simple; many variants reduce recall.
+    # NOTE: Substack uses 0-based paging in some payloads; "page" is best-effort.
+    primary_params = {"query": keyword, "page": max(0, int(page) - 1)}
+    try:
+        payload = _request_json("/search/post", params=primary_params)
+        rows = _extract_posts_from_search(payload)
+        if rows:
+            return rows
+    except Exception:
+        pass
+
+    # Fallback: /search/posts (plural) with a couple param names.
     for params in (
-        {"keyword": keyword, "page": page, "limit": limit},
         {"query": keyword, "page": page, "limit": limit},
+        {"keyword": keyword, "page": page, "limit": limit},
         {"q": keyword, "page": page, "limit": limit},
-        {"keyword": keyword, "page": page},
         {"query": keyword, "page": page},
+        {"keyword": keyword, "page": page},
     ):
         try:
-            tried.append(params)
             payload = _request_json("/search/posts", params=params)
             rows = _extract_posts_from_search(payload)
             if rows:
@@ -277,7 +297,6 @@ def search_posts(keyword: str, *, page: int = 1, limit: int = 20) -> List[Dict[s
         except Exception:
             continue
 
-    # If everything failed, surface the last attempt so caller can handle
     return []
 
 
@@ -353,7 +372,16 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
         title = _candidate_title(row)
         url = _candidate_url(row)
         published_dt = _candidate_published_at(row)
-        published_raw = row.get("published_at") or row.get("published") or row.get("date") or ""
+        published_raw = (
+            row.get("published_at")
+            or row.get("publishedAt")
+            or row.get("published")
+            or row.get("date")
+            or row.get("created_at")
+            or row.get("createdAt")
+            or row.get("post_date")
+            or ""
+        )
 
         details = fetch_post_details(pid)
         body_raw, author, title_d, pub_d = _extract_body_from_post_details(details)
