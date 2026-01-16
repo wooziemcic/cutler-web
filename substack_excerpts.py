@@ -209,37 +209,30 @@ def _extract_body_from_post_details(payload: Any) -> Tuple[str, str, str, str]:
     if isinstance(payload, dict):
         base = payload.get("data") if isinstance(payload.get("data"), dict) else payload
 
-        # Some responses nest the post under "post"
-        node = base.get("post") if isinstance(base.get("post"), dict) else base
-
         # body candidates (rich HTML vs plain)
         body = (
-            node.get("body_html")
-            or node.get("bodyHtml")
-            or node.get("body")
-            or node.get("text")
-            or node.get("content")
-            or node.get("subtitle")
-            or node.get("description")
+            base.get("body")
+            or base.get("text")
+            or base.get("content")
+            or base.get("subtitle")
+            or base.get("description")
             or ""
         )
 
         # author
         author = (
-            node.get("author")
-            or node.get("author_name")
-            or node.get("authorName")
-            or (node.get("publication") or {}).get("name") if isinstance(node.get("publication"), dict) else ""
+            base.get("author")
+            or base.get("author_name")
+            or base.get("authorName")
+            or (base.get("publication") or {}).get("name") if isinstance(base.get("publication"), dict) else ""
         )
 
-        title = node.get("title") or node.get("headline") or ""
+        title = base.get("title") or base.get("headline") or ""
         published_raw = (
-            node.get("published_at")
-            or node.get("publishedAt")
-            or node.get("published")
-            or node.get("date")
-            or node.get("created_at")
-            or node.get("post_date")
+            base.get("published_at")
+            or base.get("published")
+            or base.get("date")
+            or base.get("created_at")
             or ""
         )
 
@@ -258,36 +251,39 @@ def _strip_html(text: str) -> str:
     return text.strip()
 
 
-def search_posts(keyword: str, *, page: int = 1, limit: int = 20) -> List[Dict[str, Any]]:
-    """
-    Calls Substack search endpoint.
+def search_posts(keyword: str, *, page: int = 0, limit: int = 20) -> List[Dict[str, Any]]:
+    """Search posts for a keyword.
 
-    The RapidAPI "Substack Live" API commonly exposes /search/post (singular). We
-    use that as the primary path, with a small fallback to /search/posts for
-    backwards compatibility.
+    The RapidAPI Substack Live API has used both `/search/post` (singular) and
+    `/search/posts` (plural) over time. In production we prefer `/search/post`
+    because it is the endpoint that currently returns results in the
+    `{"data": {"results": [...]}}` shape.
+
+    We keep a tiny fallback to `/search/posts` purely for resiliency.
     """
     keyword = (keyword or "").strip()
     if not keyword:
         return []
 
-    # Primary: /search/post (singular). Keep it simple; many variants reduce recall.
-    # NOTE: Substack uses 0-based paging in some payloads; "page" is best-effort.
-    primary_params = {"query": keyword, "page": max(0, int(page) - 1)}
-    try:
-        payload = _request_json("/search/post", params=primary_params)
-        rows = _extract_posts_from_search(payload)
-        if rows:
-            return rows
-    except Exception:
-        pass
-
-    # Fallback: /search/posts (plural) with a couple param names.
+    # Prefer the working singular endpoint with the most common params.
     for params in (
-        {"query": keyword, "page": page, "limit": limit},
-        {"keyword": keyword, "page": page, "limit": limit},
-        {"q": keyword, "page": page, "limit": limit},
         {"query": keyword, "page": page},
+        {"query": keyword, "page": page, "limit": limit},
         {"keyword": keyword, "page": page},
+        {"q": keyword, "page": page},
+    ):
+        try:
+            payload = _request_json("/search/post", params=params)
+            rows = _extract_posts_from_search(payload)
+            if rows:
+                return rows
+        except Exception:
+            continue
+
+    # Fallback: plural endpoint (older behavior)
+    for params in (
+        {"query": keyword, "page": max(1, int(page) or 1), "limit": limit},
+        {"keyword": keyword, "page": max(1, int(page) or 1), "limit": limit},
     ):
         try:
             payload = _request_json("/search/posts", params=params)
@@ -298,6 +294,110 @@ def search_posts(keyword: str, *, page: int = 1, limit: int = 20) -> List[Dict[s
             continue
 
     return []
+
+
+_FINANCE_TERMS = [
+    # High-signal finance / investing language
+    "stock",
+    "shares",
+    "earnings",
+    "eps",
+    "revenue",
+    "guidance",
+    "valuation",
+    "multiple",
+    "p/e",
+    "pe ",
+    "ebitda",
+    "margin",
+    "dividend",
+    "buy",
+    "sell",
+    "rating",
+    "upgrade",
+    "downgrade",
+    "target price",
+    "price target",
+    "position",
+    "portfolio",
+    "10-q",
+    "10k",
+    "10-k",
+    "sec",
+    "macro",
+    "ticker",
+]
+
+
+def _iter_paragraphs(text: str) -> List[str]:
+    """Split cleaned text into paragraphs.
+
+    We keep this dependency-free: first try splitting on newlines; if the text
+    is already flattened, fall back to splitting on sentence clusters.
+    """
+    if not text:
+        return []
+
+    # Prefer newline paragraphing when available
+    parts = [p.strip() for p in re.split(r"\n{2,}", text) if p and p.strip()]
+    if len(parts) >= 2:
+        return parts
+
+    # If HTML stripping collapsed whitespace, re-split on " ." clusters.
+    # This is intentionally conservative.
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s{2,}", text) if p and p.strip()]
+    return parts
+
+
+def _paragraph_is_substantive(p: str, *, min_words: int, min_chars: int) -> bool:
+    if not p:
+        return False
+    if len(p) < min_chars:
+        return False
+    words = re.findall(r"[A-Za-z0-9$:_-]+", p)
+    return len(words) >= min_words
+
+
+def _paragraph_mentions_ticker(p: str, ticker: str) -> bool:
+    t = ticker.upper()
+    # Strong patterns first
+    if re.search(rf"\${re.escape(t)}\b", p, flags=re.IGNORECASE):
+        return True
+    if re.search(rf"\b(?:NYSE|NASDAQ|AMEX|OTC|TSX|LSE|ASX)\s*:\s*{re.escape(t)}\b", p, flags=re.IGNORECASE):
+        return True
+    # Weak pattern: bare word match
+    return bool(re.search(rf"\b{re.escape(t)}\b", p, flags=re.IGNORECASE))
+
+
+def _paragraph_has_finance_context(p: str) -> bool:
+    pl = p.lower()
+    return any(term in pl for term in _FINANCE_TERMS)
+
+
+def _select_qualifying_paragraphs(text: str, ticker: str) -> List[str]:
+    """Return only paragraphs that are (a) substantive and (b) ticker-relevant.
+
+    Goal: avoid noise where a company is only mentioned briefly or where the
+    ticker is an ambiguous token (e.g., AGI meaning "artificial general intelligence").
+    We require finance context in the same paragraph.
+    """
+    min_words = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_WORDS", "30"))
+    min_chars = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_CHARS", "180"))
+    max_paras = int(os.getenv("SUBSTACK_MAX_PARAGRAPHS_PER_ITEM", "2"))
+
+    paras = _iter_paragraphs(text)
+    out: List[str] = []
+    for p in paras:
+        if not _paragraph_is_substantive(p, min_words=min_words, min_chars=min_chars):
+            continue
+        if not _paragraph_mentions_ticker(p, ticker):
+            continue
+        if not _paragraph_has_finance_context(p):
+            continue
+        out.append(p.strip())
+        if len(out) >= max_paras:
+            break
+    return out
 
 
 def fetch_post_details(post_id: str) -> Dict[str, Any]:
@@ -318,7 +418,7 @@ def fetch_post_details(post_id: str) -> Dict[str, Any]:
     return {}
 
 
-def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: int = 3) -> List[Dict[str, Any]]:
+def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: int = 1) -> List[Dict[str, Any]]:
     """
     High-level helper used by final.py.
 
@@ -337,7 +437,8 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
 
     cutoff = _now_utc() - timedelta(days=lookback_days)
 
-    candidates = search_posts(ticker, page=1, limit=max(25, max_posts * 5))
+    # Fast-mode defaults: one search call (page=0) and a small pool.
+    candidates = search_posts(ticker, page=0, limit=max(20, max_posts * 5))
     if not candidates:
         return []
 
@@ -372,16 +473,7 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
         title = _candidate_title(row)
         url = _candidate_url(row)
         published_dt = _candidate_published_at(row)
-        published_raw = (
-            row.get("published_at")
-            or row.get("publishedAt")
-            or row.get("published")
-            or row.get("date")
-            or row.get("created_at")
-            or row.get("createdAt")
-            or row.get("post_date")
-            or ""
-        )
+        published_raw = row.get("published_at") or row.get("published") or row.get("date") or ""
 
         details = fetch_post_details(pid)
         body_raw, author, title_d, pub_d = _extract_body_from_post_details(details)
@@ -404,7 +496,13 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
         if dt2 and dt2 < cutoff:
             continue
 
-        excerpt = body_clean[:1600] if body_clean else ""
+        # Only include if there is a substantive, finance-context paragraph mention.
+        qualifying = _select_qualifying_paragraphs(body_clean, ticker)
+        if not qualifying:
+            continue
+
+        selected_text = "\n\n".join(qualifying)
+        excerpt = selected_text[:1600] if selected_text else ""
 
         results.append(
             {
@@ -414,7 +512,7 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
                 "published_at": published_raw or (dt2.isoformat() if dt2 else ""),
                 "url": url,
                 "excerpt": excerpt,
-                "body": body_clean,
+                "body": selected_text,
             }
         )
 
