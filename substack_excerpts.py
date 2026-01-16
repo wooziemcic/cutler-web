@@ -199,6 +199,24 @@ def _split_paragraphs(text: str) -> List[str]:
     parts = [p.strip() for p in re.split(r"(?<=[\.!\?])\s{2,}", t) if p and p.strip()]
     return parts
 
+# Sentence splitter used as a fallback when Substack bodies arrive as single-line or mega-paragraph text.
+_SENT_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9"\(])')
+
+
+def _split_sentences(text: str) -> List[str]:
+    """Split text into sentence-like units (best-effort).
+
+    We keep this lightweight and dependency-free. It is intentionally conservative:
+    it won't be perfect, but it dramatically improves signal when a 'paragraph'
+    contains multiple tickers (e.g., roundup posts).
+    """
+    t = (text or '').strip()
+    if not t:
+        return []
+    t = re.sub(r'\s+', ' ', t).strip()
+    parts = _SENT_SPLIT.split(t)
+    return [p.strip() for p in parts if p and p.strip()]
+
 
 def extract_ticker_paragraphs(
     *,
@@ -240,8 +258,16 @@ def extract_ticker_paragraphs(
     alias_pats = [re.compile(rf"\b{re.escape(a)}\b", re.IGNORECASE) for a in alias_list if len(a) >= 3]
 
     # Common false-positive suppressors (cheap heuristics)
-    # Example: AGI frequently equals “Artificial General Intelligence”
-    suppress_agi_phrase = re.compile(r"\bartificial\s+general\s+intelligence\b", re.IGNORECASE) if t == "AGI" else None
+    suppress_phrases: List[re.Pattern] = []
+    # Example: AGI frequently equals "Artificial General Intelligence"
+    if t == "AGI":
+        suppress_phrases.append(re.compile(r"\bartificial\s+general\s+intelligence\b", re.IGNORECASE))
+    # Example: CTO often equals "Chief Technology Officer"
+    if t == "CTO":
+        suppress_phrases.append(re.compile(r"\bchief\s+technology\s+officer\b", re.IGNORECASE))
+    # Example: AI often equals "Artificial Intelligence"
+    if t == "AI":
+        suppress_phrases.append(re.compile(r"\bartificial\s+intelligence\b", re.IGNORECASE))
 
     paras = _split_paragraphs(body)
     kept: List[str] = []
@@ -251,7 +277,13 @@ def extract_ticker_paragraphs(
         if len(p) < int(min_chars):
             continue
 
-        if suppress_agi_phrase and suppress_agi_phrase.search(p) and (not strong_ticker.search(p)):
+        # If it's clearly the generic meaning (and not finance-anchored), drop it.
+        suppressed = False
+        for sp in suppress_phrases:
+            if sp.search(p) and (not strong_ticker.search(p)):
+                suppressed = True
+                break
+        if suppressed:
             continue
 
         has_strong = bool(strong_ticker.search(p))
@@ -260,14 +292,49 @@ def extract_ticker_paragraphs(
         has_alias = any(ap.search(p) for ap in alias_pats) if alias_pats else False
 
         if ambiguous:
-            # Ambiguous tickers must be anchored by finance context OR company context.
-            if has_strong or has_name or has_alias:
-                kept.append(p)
+            # Tighten: ambiguous tickers should not pass on company name alone.
+            ok = has_strong or (has_weak and (has_name or has_alias))
         else:
-            # Non-ambiguous: allow weak ticker mentions, but still drop obvious noise by requiring
-            # either the ticker itself or the company name.
-            if has_strong or has_weak or has_name or has_alias:
-                kept.append(p)
+            ok = has_strong or has_weak or has_name or has_alias
+
+        if not ok:
+            continue
+
+        # If a paragraph is huge, keep only the sentences that mention the ticker
+        # (plus 1 sentence of context on each side).
+        if len(p) > 900:
+            sents = _split_sentences(p)
+            keep_idx: List[int] = []
+            for i, s in enumerate(sents):
+                s_has_strong = bool(strong_ticker.search(s))
+                s_has_weak = bool(weak_ticker.search(s))
+                s_has_name = bool(name_pat.search(s)) if name_pat else False
+                s_has_alias = any(ap.search(s) for ap in alias_pats) if alias_pats else False
+
+                if ambiguous:
+                    s_ok = s_has_strong or (s_has_weak and (s_has_name or s_has_alias))
+                else:
+                    s_ok = s_has_strong or s_has_weak
+
+                if s_ok:
+                    keep_idx.append(i)
+
+            if not keep_idx:
+                continue
+
+            idx_set = set()
+            for i in keep_idx:
+                idx_set.add(i)
+                if i - 1 >= 0:
+                    idx_set.add(i - 1)
+                if i + 1 < len(sents):
+                    idx_set.add(i + 1)
+
+            clipped = " ".join(sents[i] for i in sorted(idx_set)).strip()
+            if len(clipped) >= int(min_chars):
+                kept.append(clipped)
+        else:
+            kept.append(p)
 
     return kept
 
