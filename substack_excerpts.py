@@ -330,6 +330,7 @@ def _ticker_patterns(ticker: str) -> Tuple[re.Pattern, re.Pattern, re.Pattern]:
 def _list_stage_is_promising(ticker: str, title: str, snippet: str) -> bool:
     """Gate BEFORE /reader/post to minimize detail calls."""
     p_dollar, p_exch, p_word = _ticker_patterns(ticker)
+    # Include a bit more list-stage context (author/publication fields may carry the ticker symbols).
     text = f"{title} {snippet}".strip()
 
     strong = bool(p_dollar.search(text) or p_exch.search(text))
@@ -339,8 +340,10 @@ def _list_stage_is_promising(ticker: str, title: str, snippet: str) -> bool:
         # For ambiguous tickers, require strong signal AND finance context.
         return strong and _finance_hits(text) > 0
 
-    # For normal tickers, require either strong signal OR (word + finance context)
-    return strong or (word and _finance_hits(text) > 0)
+    # For normal tickers, keep FAST MODE recall high:
+    # - If the ticker appears as a word in the list-stage text, allow it through.
+    # - Noise is still controlled later by the substantive paragraph gate on the full body.
+    return strong or word
 
 
 def search_posts_fast(keyword: str, *, page: int = 0) -> List[Dict[str, Any]]:
@@ -492,8 +495,15 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
 
         title = _candidate_title(row)
         snippet = _candidate_snippet(row)
+        # Some list results carry useful context in author/publication fields; include lightly for gating.
+        author_hint = row.get("author") or row.get("author_name") or row.get("authorName") or ""
+        pub_hint = ""
+        pub = row.get("publication")
+        if isinstance(pub, dict):
+            pub_hint = pub.get("name") or pub.get("subdomain") or ""
+        snippet_gate = f"{snippet} {author_hint} {pub_hint}".strip()
 
-        if not _list_stage_is_promising(ticker, title, snippet):
+        if not _list_stage_is_promising(ticker, title, snippet_gate):
             continue
 
         dt = _candidate_published_at(row)
