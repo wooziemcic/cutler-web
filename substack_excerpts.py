@@ -28,6 +28,14 @@ DEFAULT_RETRIES = int(os.getenv("SUBSTACK_HTTP_RETRIES", "2"))
 DEFAULT_BACKOFF_BASE = float(os.getenv("SUBSTACK_HTTP_BACKOFF_BASE", "0.6"))
 
 
+class SubstackHTTPError(RuntimeError):
+    """HTTP error with status code attached (used for targeted fallbacks)."""
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = int(status_code)
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -120,7 +128,9 @@ def _request_json(path: str, params: Dict[str, Any]) -> Any:
             # If rate-limited, backoff and retry
             if resp.status_code in (429, 503, 504):
                 raise RuntimeError(f"HTTP {resp.status_code}")
-            resp.raise_for_status()
+            if 400 <= int(resp.status_code) < 600:
+                # Preserve status code so callers can do a *single* targeted fallback (e.g., $TICKER -> TICKER on 500).
+                raise SubstackHTTPError(int(resp.status_code), f"HTTP {resp.status_code}")
             return resp.json()
         except Exception as e:
             last_err = e
@@ -131,6 +141,135 @@ def _request_json(path: str, params: Dict[str, Any]) -> Any:
             time.sleep(sleep_s)
 
     raise RuntimeError(f"Substack API request failed: {last_err}")
+
+
+def _get_company_context(ticker: str) -> Tuple[str, List[str]]:
+    """Best-effort company name/aliases from tickers.py (if available).
+
+    This stays optional so the module remains portable.
+    """
+    t = (ticker or "").strip().upper()
+    if not t:
+        return "", []
+    try:
+        from tickers import tickers as _T  # type: ignore
+
+        row = (_T or {}).get(t) if isinstance(_T, dict) else None
+        if isinstance(row, dict):
+            name = str(row.get("name") or row.get("company") or row.get("long_name") or "").strip()
+            aliases = row.get("aliases") or row.get("alias") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            aliases = [str(a).strip() for a in (aliases or []) if str(a).strip()]
+            return name, aliases
+    except Exception:
+        pass
+    return "", []
+
+
+def _is_ambiguous_ticker(ticker: str) -> bool:
+    """Tickers that are short/word-like produce noisy matches on Substack."""
+    t = (ticker or "").strip().upper()
+    if not t:
+        return True
+    if len(t) <= 2:
+        return True
+    # Known common collisions in your universe (can expand later without changing callers)
+    if t in {"AI", "AGI", "F", "T", "IT", "ON", "OR", "CAT", "C", "A"}:
+        return True
+    return False
+
+
+def _normalize_text(s: str) -> str:
+    s = (s or "").replace("\r", "\n")
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+def _split_paragraphs(text: str) -> List[str]:
+    """Split into paragraphs with a conservative heuristic."""
+    t = _normalize_text(text)
+    if not t:
+        return []
+    # Primary: blank-line paragraphs
+    parts = [p.strip() for p in re.split(r"\n\s*\n", t) if p and p.strip()]
+    if len(parts) >= 2:
+        return parts
+    # Fallback: sentence-ish chunks (rare when body was single-line)
+    parts = [p.strip() for p in re.split(r"(?<=[\.!\?])\s{2,}", t) if p and p.strip()]
+    return parts
+
+
+def extract_ticker_paragraphs(
+    *,
+    body_text: str,
+    ticker: str,
+    company_name: str = "",
+    aliases: Optional[List[str]] = None,
+    min_chars: int = 80,
+) -> List[str]:
+    """Return ONLY paragraphs that credibly mention the ticker (and/or company context).
+
+    - For ambiguous tickers, require strong finance-oriented patterns ($TICKER, NYSE:TICKER, etc.),
+      OR company-name/alias co-occurrence.
+    - For non-ambiguous tickers, accept word-boundary ticker mentions, but still prefer strong patterns.
+    """
+    t = (ticker or "").strip().upper()
+    if not t:
+        return []
+
+    body = _normalize_text(body_text)
+    if not body:
+        return []
+
+    name = (company_name or "").strip()
+    alias_list = [a.strip() for a in (aliases or []) if a and a.strip()]
+    if not name and not alias_list:
+        n2, a2 = _get_company_context(t)
+        name = name or n2
+        alias_list = alias_list or a2
+
+    # Patterns
+    strong_ticker = re.compile(
+        rf"(?:\${re.escape(t)}\b|\b(?:NYSE|NASDAQ|AMEX)\s*:\s*{re.escape(t)}\b|\b{re.escape(t)}\s*\([A-Z]{2,6}:\s*{re.escape(t)}\)\b)",
+        re.IGNORECASE,
+    )
+    weak_ticker = re.compile(rf"\b{re.escape(t)}\b")
+
+    name_pat = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE) if name else None
+    alias_pats = [re.compile(rf"\b{re.escape(a)}\b", re.IGNORECASE) for a in alias_list if len(a) >= 3]
+
+    # Common false-positive suppressors (cheap heuristics)
+    # Example: AGI frequently equals “Artificial General Intelligence”
+    suppress_agi_phrase = re.compile(r"\bartificial\s+general\s+intelligence\b", re.IGNORECASE) if t == "AGI" else None
+
+    paras = _split_paragraphs(body)
+    kept: List[str] = []
+    ambiguous = _is_ambiguous_ticker(t)
+
+    for p in paras:
+        if len(p) < int(min_chars):
+            continue
+
+        if suppress_agi_phrase and suppress_agi_phrase.search(p) and (not strong_ticker.search(p)):
+            continue
+
+        has_strong = bool(strong_ticker.search(p))
+        has_weak = bool(weak_ticker.search(p))
+        has_name = bool(name_pat.search(p)) if name_pat else False
+        has_alias = any(ap.search(p) for ap in alias_pats) if alias_pats else False
+
+        if ambiguous:
+            # Ambiguous tickers must be anchored by finance context OR company context.
+            if has_strong or has_name or has_alias:
+                kept.append(p)
+        else:
+            # Non-ambiguous: allow weak ticker mentions, but still drop obvious noise by requiring
+            # either the ticker itself or the company name.
+            if has_strong or has_weak or has_name or has_alias:
+                kept.append(p)
+
+    return kept
 
 
 def _extract_posts_from_search(payload: Any) -> List[Dict[str, Any]]:
@@ -370,15 +509,31 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
     cutoff = _now_utc() - timedelta(days=lookback_days)
 
     # Substack search is far more consistent for tickers when using the cashtag form ($TICKER).
-    # Keep this as a single list-stage call per ticker for cost control.
+    # Cost rule: 1 search call per ticker ideally; allow EXACTLY ONE fallback call when the $TICKER
+    # query triggers an upstream 500 for that symbol.
     keyword = f"${ticker}"
-    candidates = search_posts(keyword, page=1, limit=max(25, max_posts * 5))
+    try:
+        candidates = search_posts(keyword, page=1, limit=max(25, max_posts * 5))
+    except SubstackHTTPError as e:
+        if int(getattr(e, "status_code", 0)) == 500:
+            candidates = search_posts(ticker, page=1, limit=max(25, max_posts * 5))
+        else:
+            raise
     if not candidates:
         return []
 
     # Filter + dedupe at list-stage
     seen: set[str] = set()
     filtered: List[Dict[str, Any]] = []
+
+    company_name, aliases = _get_company_context(ticker)
+    ambiguous = _is_ambiguous_ticker(ticker)
+    strong_list_pat = re.compile(
+        rf"(?:\${re.escape(ticker)}\b|\b(?:NYSE|NASDAQ|AMEX)\s*:\s*{re.escape(ticker)}\b)",
+        re.IGNORECASE,
+    )
+    name_pat = re.compile(rf"\b{re.escape(company_name)}\b", re.IGNORECASE) if company_name else None
+    alias_pats = [re.compile(rf"\b{re.escape(a)}\b", re.IGNORECASE) for a in (aliases or []) if len(str(a)) >= 3]
 
     for row in candidates:
         pid = _candidate_post_id(row)
@@ -392,6 +547,25 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
         if dt and dt < cutoff:
             continue
 
+        # For ambiguous tickers, require a list-stage anchor in title/description to avoid
+        # burning /reader/post calls on obvious acronym collisions.
+        if ambiguous:
+            title = _candidate_title(row)
+            desc = ""
+            for k in ("description", "summary", "subtitle", "excerpt", "text"):
+                v = row.get(k)
+                if isinstance(v, str) and v.strip():
+                    desc = v.strip()
+                    break
+            blob = f"{title}\n{desc}".strip()
+            has_anchor = bool(strong_list_pat.search(blob))
+            if not has_anchor and name_pat and name_pat.search(blob):
+                has_anchor = True
+            if not has_anchor and alias_pats and any(ap.search(blob) for ap in alias_pats):
+                has_anchor = True
+            if not has_anchor:
+                continue
+
         filtered.append(row)
 
         if len(filtered) >= max_posts * 3:
@@ -402,6 +576,7 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
         return []
 
     results: List[Dict[str, Any]] = []
+
     for row in filtered[:max_posts]:
         pid = _candidate_post_id(row)
         title = _candidate_title(row)
@@ -430,7 +605,31 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
         if dt2 and dt2 < cutoff:
             continue
 
-        excerpt = body_clean[:1600] if body_clean else ""
+        # If /reader/post yielded an empty body (common), fall back to list-stage description
+        # WITHOUT making extra calls.
+        if not body_clean:
+            list_desc = ""
+            for k in ("description", "summary", "subtitle", "excerpt", "text"):
+                v = row.get(k)
+                if isinstance(v, str) and v.strip():
+                    list_desc = v.strip()
+                    break
+            body_clean = _strip_html(list_desc) if list_desc else ""
+
+        # Paragraph-only extraction (quality gate). If no qualifying paragraphs remain, drop the post.
+        hit_paras = extract_ticker_paragraphs(
+            body_text=body_clean,
+            ticker=ticker,
+            company_name=company_name,
+            aliases=aliases,
+        )
+        if not hit_paras:
+            continue
+
+        # Provide a short excerpt for UI expanders (first few hit paragraphs only).
+        excerpt = "\n\n".join(hit_paras[:3]).strip()
+        if len(excerpt) > 1800:
+            excerpt = excerpt[:1800].rstrip() + " …"
 
         results.append(
             {
@@ -441,6 +640,7 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
                 "url": url,
                 "excerpt": excerpt,
                 "body": body_clean,
+                "hit_paragraphs": hit_paras,
             }
         )
 
