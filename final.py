@@ -2411,8 +2411,23 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
                 if header:
                     items.append({"text": header, "pages": [], "is_header": True})
 
-                # paragraphize body
-                paras = [x.strip() for x in re.split(r"\n\s*\n", body) if x.strip()]
+                # Paragraph-only extraction: include ONLY paragraphs that credibly mention the ticker.
+                # Prefer the precomputed hit_paragraphs from substack_excerpts (cost-controlled);
+                # fall back to local extraction if needed.
+                hit_paras = p.get("hit_paragraphs")
+                if not isinstance(hit_paras, list):
+                    hit_paras = None
+
+                if hit_paras is None and body:
+                    try:
+                        hit_paras = substack_excerpts.extract_ticker_paragraphs(
+                            body_text=body,
+                            ticker=str(sym),
+                        )
+                    except Exception:
+                        hit_paras = None
+
+                paras = [str(x).strip() for x in (hit_paras or []) if str(x).strip()] if hit_paras else []
                 kept = 0
                 for para in paras:
                     if kept >= max_paras_per_post:
@@ -2615,11 +2630,21 @@ def _substack_all_run_step(*, state: dict, batch_size: int = 3, time_budget_s: f
 
             items.append({"text": header, "pages": [], "is_header": True})
 
-            # paragraphize body
-            if body:
-                paras = [x.strip() for x in re.split(r"\n\s*\n", body) if x.strip()]
-            else:
-                paras = []
+            # Paragraph-only extraction: include ONLY paragraphs that credibly mention the ticker.
+            hit_paras = post.get("hit_paragraphs")
+            if not isinstance(hit_paras, list):
+                hit_paras = None
+
+            if hit_paras is None and body:
+                try:
+                    hit_paras = substack_excerpts.extract_ticker_paragraphs(
+                        body_text=body,
+                        ticker=str(sym),
+                    )
+                except Exception:
+                    hit_paras = None
+
+            paras = [str(x).strip() for x in (hit_paras or []) if str(x).strip()] if hit_paras else []
 
             kept = 0
             for para in paras:
