@@ -438,7 +438,16 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
     cutoff = _now_utc() - timedelta(days=lookback_days)
 
     # Fast-mode defaults: one search call (page=0) and a small pool.
-    candidates = search_posts(ticker, page=0, limit=max(20, max_posts * 5))
+    # IMPORTANT: Substack search is materially better for tickers when using the "$TICKER" pattern.
+    # This keeps recall high without adding extra API calls.
+    keyword = f"${ticker}"
+    candidates = search_posts(keyword, page=0, limit=max(20, max_posts * 5))
+
+    # Optional (disabled by default): allow a second search call using the bare ticker if desired.
+    # Keep this OFF to preserve the "1 list-stage call per ticker" cost guarantee.
+    if not candidates and os.getenv("SUBSTACK_ALLOW_BARE_TICKER_FALLBACK", "0") == "1":
+        candidates = search_posts(ticker, page=0, limit=max(20, max_posts * 5))
+
     if not candidates:
         return []
 
