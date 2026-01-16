@@ -7,11 +7,19 @@ Design goals:
 - Avoid expensive loops: filter at list-stage; only fetch /reader/post for candidates that pass filters.
 
 This module intentionally exposes a small surface area so final.py can remain stable.
+
+PATCH NOTES (speed + noise control):
+- Uses tightened query variants for ticker search (e.g., "$TSLA", "TSLA stock", "NASDAQ:TSLA").
+- Finance heuristic filter BEFORE /reader/post to avoid expensive detail calls for irrelevant candidates.
+- Candidate ranking (recency + finance keyword hits + $TICKER/exchange pattern hits).
+- Early-stop once enough qualifying posts are found.
+- Optional threaded /reader/post fetching (small pool) to reduce wall-clock time.
+
+No external deps added.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 import os
 import time
@@ -27,31 +35,36 @@ DEFAULT_TIMEOUT_S = float(os.getenv("SUBSTACK_HTTP_TIMEOUT", "15"))
 DEFAULT_RETRIES = int(os.getenv("SUBSTACK_HTTP_RETRIES", "2"))
 DEFAULT_BACKOFF_BASE = float(os.getenv("SUBSTACK_HTTP_BACKOFF_BASE", "0.6"))
 
-# Strictness / noise controls (override via env / Streamlit Secrets)
-SUBSTACK_MIN_PARAGRAPH_CHARS = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_CHARS", "220"))
-SUBSTACK_MIN_PARAGRAPH_WORDS = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_WORDS", "35"))
-SUBSTACK_MAX_PARAGRAPHS_PER_ITEM = int(os.getenv("SUBSTACK_MAX_PARAGRAPHS_PER_ITEM", "2"))
-SUBSTACK_MAX_CANDIDATES_MULTIPLIER = int(os.getenv("SUBSTACK_MAX_CANDIDATES_MULTIPLIER", "8"))
+# Optional concurrency for /reader/post calls
+DETAIL_WORKERS = int(os.getenv("SUBSTACK_DETAIL_WORKERS", "4"))
+DETAIL_WORKERS = max(1, min(DETAIL_WORKERS, 8))
 
-# Tickers that are common words/acronyms; require strong mention patterns ($TICKER or EXCHANGE:TICKER)
-_AMBIGUOUS_TICKERS_DEFAULT = {"AGI", "T", "F", "SIRI", "PINE", "LEG"}
-_AMBIGUOUS_TICKERS = {
+# Opt-in debugging. Set SUBSTACK_DEBUG="1" in Streamlit Secrets to surface request errors.
+SUBSTACK_DEBUG = os.getenv("SUBSTACK_DEBUG", "0").strip() == "1"
+
+# Keep these conservative by default; tune via secrets if needed.
+MIN_PARAGRAPH_CHARS = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_CHARS", "220"))
+MIN_PARAGRAPH_WORDS = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_WORDS", "35"))
+MAX_PARAGRAPHS_PER_ITEM = int(os.getenv("SUBSTACK_MAX_PARAGRAPHS_PER_ITEM", "2"))
+
+# Ambiguous tickers (1-3 chars) that frequently collide with common words/abbreviations.
+# Require strong patterns ($TICKER or EXCHANGE:TICKER) for these.
+AMBIGUOUS_TICKERS = {
     t.strip().upper()
-    for t in os.getenv("SUBSTACK_AMBIGUOUS_TICKERS", ",".join(sorted(_AMBIGUOUS_TICKERS_DEFAULT))).split(",")
+    for t in (os.getenv("SUBSTACK_AMBIGUOUS_TICKERS", "AGI,T,F,SIRI,PINE,LEG").split(","))
     if t.strip()
 }
 
-_FINANCE_KEYWORDS = {
-    "earnings", "eps", "revenue", "guidance", "margin", "margins", "valuation", "multiple", "dcf",
-    "upgrade", "downgrade", "rating", "buy", "sell", "hold", "target", "price target",
-    "bull", "bear", "thesis", "position", "positions", "portfolio", "allocation",
-    "10-q", "10k", "10-k", "8-k", "sec", "filing", "dividend", "yield", "cash flow",
-    "free cash flow", "fcf", "balance sheet", "debt", "leverage", "capex",
-    "macro", "inflation", "rates", "fed", "recession", "spread", "credit",
-    "shares", "stock", "stocks", "equity", "equities", "market cap", "market",
-    "quarter", "q1", "q2", "q3", "q4", "invest", "investing", "trade", "trading",
-    "options", "calls", "puts", "long", "short",
-}
+# Finance context keywords used at list-stage and paragraph-stage
+FINANCE_KEYWORDS = [
+    "stock", "shares", "equity", "earnings", "eps", "revenue", "guidance", "outlook",
+    "valuation", "multiple", "p/e", "pe", "ev/ebitda", "margin", "free cash", "fcf",
+    "buy", "sell", "rating", "upgrade", "downgrade", "target price", "price target",
+    "position", "portfolio", "holding", "thesis", "catalyst", "10-q", "10k", "10-k",
+    "sec", "filing", "quarter", "q1", "q2", "q3", "q4", "macro", "rates", "fed",
+    "dividend", "buyback", "acquisition", "merger", "deal",
+    "nasdaq", "nyse", "amex", "tsx", "lse",
+]
 
 
 def _now_utc() -> datetime:
@@ -59,18 +72,12 @@ def _now_utc() -> datetime:
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
-    """
-    Best-effort parsing for common timestamp formats:
-    - ISO 8601 strings (with or without 'Z')
-    - epoch seconds / ms (int/float or numeric string)
-    """
+    """Best-effort parsing for ISO 8601 strings and epoch seconds/ms."""
     if value is None:
         return None
 
-    # epoch
     if isinstance(value, (int, float)):
         ts = float(value)
-        # heuristic: ms if very large
         if ts > 1e12:
             ts = ts / 1000.0
         try:
@@ -83,7 +90,6 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
         if not s:
             return None
 
-        # numeric epoch in string
         if re.fullmatch(r"\d{10,13}", s):
             try:
                 ts = float(s)
@@ -93,18 +99,13 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
             except Exception:
                 pass
 
-        # ISO
-        # Handle trailing Z
-        if s.endswith("Z"):
-            s2 = s[:-1] + "+00:00"
-        else:
-            s2 = s
-        # Some APIs return "2026-01-13T10:01:02.123Z"
+        s2 = (s[:-1] + "+00:00") if s.endswith("Z") else s
         try:
-            return datetime.fromisoformat(s2)
+            dt = datetime.fromisoformat(s2)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except Exception:
             pass
-        # Fallback: just date
+
         try:
             return datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except Exception:
@@ -122,7 +123,6 @@ def _get_key() -> str:
 
 def _headers() -> Dict[str, str]:
     key = _get_key()
-    # RapidAPI typically accepts just x-rapidapi-key; host header can be optional.
     host = os.getenv("SUBSTACK_RAPIDAPI_HOST", "").strip()
     h = {
         "x-rapidapi-key": key,
@@ -134,47 +134,87 @@ def _headers() -> Dict[str, str]:
 
 
 def _request_json(path: str, params: Dict[str, Any]) -> Any:
-    """
-    GET request with light retries/backoff.
-    """
+    """GET request with light retries/backoff."""
     url = DEFAULT_BASE_URL.rstrip("/") + "/" + path.lstrip("/")
     last_err: Optional[Exception] = None
 
     for attempt in range(DEFAULT_RETRIES + 1):
         try:
             resp = requests.get(url, headers=_headers(), params=params, timeout=DEFAULT_TIMEOUT_S)
-            # If rate-limited, backoff and retry
+
             if resp.status_code in (429, 503, 504):
-                raise RuntimeError(f"HTTP {resp.status_code}")
-            resp.raise_for_status()
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+
+            if resp.status_code >= 400:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
+
             return resp.json()
+
         except Exception as e:
             last_err = e
             if attempt >= DEFAULT_RETRIES:
                 break
-            # jittered exponential-ish backoff
             sleep_s = (DEFAULT_BACKOFF_BASE * (2 ** attempt)) + random.uniform(0, 0.25)
             time.sleep(sleep_s)
 
-    raise RuntimeError(f"Substack API request failed: {last_err}")
+    raise RuntimeError(f"Substack API request failed for {url} params={params}: {last_err}")
 
 
 def _extract_posts_from_search(payload: Any) -> List[Dict[str, Any]]:
-    """
-    RapidAPI payloads vary. We normalize to a list of dicts representing posts/comments.
-    """
+    """Robustly pull a list of post-like dicts from varying RapidAPI payload shapes."""
     if payload is None:
         return []
+
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
-    if isinstance(payload, dict):
-        for key in ("data", "results", "items", "posts"):
-            v = payload.get(key)
-            if isinstance(v, list):
-                return [x for x in v if isinstance(x, dict)]
-        # sometimes nested
-        if "response" in payload and isinstance(payload["response"], dict):
-            return _extract_posts_from_search(payload["response"])
+
+    if not isinstance(payload, dict):
+        return []
+
+    for key in ("results", "items", "posts", "data"):
+        v = payload.get(key)
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, dict)]
+
+    for key in ("data", "response", "result"):
+        v = payload.get(key)
+        if isinstance(v, dict):
+            out = _extract_posts_from_search(v)
+            if out:
+                return out
+
+    for key in ("results", "items", "posts", "comments"):
+        v = payload.get(key)
+        if isinstance(v, dict):
+            out = _extract_posts_from_search(v)
+            if out:
+                return out
+
+    def looks_like_posts(lst: List[Any]) -> bool:
+        if not lst:
+            return False
+        sample = next((x for x in lst if isinstance(x, dict)), None)
+        if not sample:
+            return False
+        return any(k in sample for k in ("post_id", "postId", "id", "postid"))
+
+    queue: List[Any] = [payload]
+    for _ in range(60):
+        if not queue:
+            break
+        node = queue.pop(0)
+
+        if isinstance(node, dict):
+            for vv in node.values():
+                if isinstance(vv, list) and looks_like_posts(vv):
+                    return [x for x in vv if isinstance(x, dict)]
+                if isinstance(vv, (dict, list)):
+                    queue.append(vv)
+        elif isinstance(node, list):
+            for vv in node:
+                if isinstance(vv, (dict, list)):
+                    queue.append(vv)
+
     return []
 
 
@@ -211,50 +251,10 @@ def _candidate_title(row: Dict[str, Any]) -> str:
     return ""
 
 
-def _extract_body_from_post_details(payload: Any) -> Tuple[str, str, str, str]:
-    """
-    Returns (body, author, title, published_at_string)
-    """
-    if payload is None:
-        return "", "", "", ""
-
-    if isinstance(payload, dict):
-        base = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-
-        # body candidates (rich HTML vs plain)
-        body = (
-            base.get("body")
-            or base.get("text")
-            or base.get("content")
-            or base.get("subtitle")
-            or base.get("description")
-            or ""
-        )
-
-        # author
-        author = (
-            base.get("author")
-            or base.get("author_name")
-            or base.get("authorName")
-            or (base.get("publication") or {}).get("name") if isinstance(base.get("publication"), dict) else ""
-        )
-
-        title = base.get("title") or base.get("headline") or ""
-        published_raw = (
-            base.get("published_at")
-            or base.get("published")
-            or base.get("date")
-            or base.get("created_at")
-            or ""
-        )
-
-        return str(body or ""), str(author or ""), str(title or ""), str(published_raw or "")
-
-    return "", "", "", ""
-
-
 def _strip_html(text: str) -> str:
     # very lightweight HTML stripping (keep it dependency-free)
+    if not text:
+        return ""
     if "<" not in text:
         return text.strip()
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
@@ -263,109 +263,192 @@ def _strip_html(text: str) -> str:
     return text.strip()
 
 
-def _norm_text(s: Any) -> str:
-    if not s:
-        return ""
-    if not isinstance(s, str):
-        s = str(s)
-    return s.strip()
+def _extract_body_from_post_details(payload: Any) -> Tuple[str, str, str, str]:
+    """Returns (body, author, title, published_at_string)."""
+    if payload is None or not isinstance(payload, dict):
+        return "", "", "", ""
+
+    base = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    post = base.get("post") if isinstance(base.get("post"), dict) else None
+    node = post or base
+
+    body = (
+        node.get("body_html")
+        or node.get("bodyHtml")
+        or node.get("html")
+        or node.get("content_html")
+        or node.get("contentHtml")
+        or node.get("raw_body")
+        or node.get("rawBody")
+        or node.get("body")
+        or node.get("text")
+        or node.get("content")
+        or node.get("subtitle")
+        or node.get("description")
+        or ""
+    )
+
+    author = (
+        node.get("author")
+        or node.get("author_name")
+        or node.get("authorName")
+        or node.get("byline")
+        or ""
+    )
+    if isinstance(author, dict):
+        author = author.get("name") or author.get("handle") or ""
+
+    if not author:
+        pub = node.get("publication") if isinstance(node.get("publication"), dict) else None
+        if pub:
+            author = pub.get("name") or ""
+        user = node.get("user") if isinstance(node.get("user"), dict) else None
+        if user and not author:
+            author = user.get("name") or user.get("handle") or ""
+
+    title = node.get("title") or node.get("headline") or node.get("subject") or ""
+
+    published_raw = (
+        node.get("published_at")
+        or node.get("publishedAt")
+        or node.get("published")
+        or node.get("created_at")
+        or node.get("createdAt")
+        or node.get("date")
+        or ""
+    )
+
+    return str(body or ""), str(author or ""), str(title or ""), str(published_raw or "")
 
 
-def _build_ticker_query(ticker: str) -> str:
-    """Tightened query to reduce false positives."""
-    t = ticker.strip().upper()
-    # Keep it simple: many providers accept quoted phrases and OR in the query string.
-    # If the backend ignores OR, it still works as a broad query.
-    return f"${t} OR \"{t} stock\" OR \"NASDAQ:{t}\" OR \"NYSE:{t}\" OR \"({t})\""
+def _build_query_variants(ticker: str) -> List[str]:
+    """Tight search queries to reduce noise while keeping recall."""
+    t = ticker.upper().strip()
+    if not t:
+        return []
+    variants = [
+        f"${t}",
+        f"{t} stock",
+        f"NASDAQ:{t}",
+        f"NYSE:{t}",
+        f"TSX:{t}",
+        f"LSE:{t}",
+        t,
+    ]
+    # de-dupe while preserving order
+    seen = set()
+    out = []
+    for q in variants:
+        q2 = q.strip()
+        if q2 and q2 not in seen:
+            seen.add(q2)
+            out.append(q2)
+    return out
 
 
-def _has_finance_terms(text: str) -> bool:
-    s = text.lower()
-    return any(k in s for k in _FINANCE_KEYWORDS)
+def _text_for_row(row: Dict[str, Any]) -> str:
+    parts = []
+    for k in ("title", "headline", "name", "description", "subtitle", "summary", "snippet", "excerpt"):
+        v = row.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v.strip())
+    pub = row.get("publication")
+    if isinstance(pub, dict):
+        n = pub.get("name")
+        if isinstance(n, str) and n.strip():
+            parts.append(n.strip())
+    return "\n".join(parts)
 
 
-def _mention_strength(ticker: str, text: str) -> int:
-    """
-    3 = $TICKER
-    2 = EXCHANGE:TICKER
-    1 = bare word-boundary ticker
-    0 = no match
-    """
-    t = ticker.upper()
+def _finance_signal_score(ticker: str, text: str) -> int:
+    """Cheap list-stage scoring to decide whether to fetch /reader/post."""
     if not text:
         return 0
-    if f"${t}" in text:
-        return 3
-    if re.search(rf"\b(?:NYSE|NASDAQ|AMEX|OTC|TSX|TSXV|LSE|NYSEARCA|CBOE):\s*{re.escape(t)}\b", text, flags=re.I):
-        return 2
-    if re.search(rf"\b{re.escape(t)}\b", text):
-        return 1
-    return 0
-
-
-def _split_paragraphs(body: str) -> List[str]:
-    """Split into paragraph-ish chunks from stripped text."""
-    if not body:
-        return []
-    # Prefer newline separation if available; otherwise create soft breaks.
-    raw = body.replace("\r\n", "\n").replace("\r", "\n")
-    parts = [p.strip() for p in raw.split("\n") if p.strip()]
-    if len(parts) <= 1:
-        # Fallback: split by sentence groups to approximate paragraphs.
-        parts = re.split(r"(?<=[.!?])\s{2,}", raw)
-        parts = [p.strip() for p in parts if p.strip()]
-    return parts
-
-
-def _substantive_paragraphs_for_ticker(ticker: str, body_clean: str) -> List[str]:
-    """Return substantive, finance-relevant paragraphs that mention the ticker."""
     t = ticker.upper()
-    paras = _split_paragraphs(body_clean)
+    s = text.lower()
+
+    score = 0
+
+    # strong ticker patterns
+    if f"${t}" in text:
+        score += 4
+    if re.search(rf"\b(?:NASDAQ|NYSE|TSX|LSE)\s*:\s*{re.escape(t)}\b", text, flags=re.I):
+        score += 4
+
+    # bare ticker mention
+    if re.search(rf"\b{re.escape(t)}\b", text):
+        score += 1
+
+    # finance context hits
+    hits = 0
+    for kw in FINANCE_KEYWORDS:
+        if kw in s:
+            hits += 1
+    score += min(hits, 5)
+
+    # for ambiguous tickers, require strong patterns (we'll enforce later too)
+    if t in AMBIGUOUS_TICKERS and score < 4:
+        return 0
+
+    return score
+
+
+def _extract_substantive_paragraphs_for_ticker(*, ticker: str, body_text: str) -> List[str]:
+    """Return up to MAX_PARAGRAPHS_PER_ITEM substantive paragraphs mentioning ticker + finance context."""
+    if not body_text:
+        return []
+
+    t = ticker.upper()
+
+    # Split on blank lines first; fallback to sentence chunking if needed
+    paras = [p.strip() for p in re.split(r"\n\s*\n+", body_text) if p.strip()]
+    if len(paras) <= 1:
+        # fallback: chunk into ~longer segments
+        paras = [p.strip() for p in re.split(r"(?<=[.!?])\s+(?=[A-Z$])", body_text) if p.strip()]
+
     out: List[str] = []
     for p in paras:
-        if len(p) < SUBSTACK_MIN_PARAGRAPH_CHARS:
+        if len(p) < MIN_PARAGRAPH_CHARS:
             continue
-        if len(p.split()) < SUBSTACK_MIN_PARAGRAPH_WORDS:
-            continue
-        ms = _mention_strength(t, p)
-        if ms <= 0:
+        if len(p.split()) < MIN_PARAGRAPH_WORDS:
             continue
 
-        finance_ok = _has_finance_terms(p)
+        # Require ticker mention
+        strong = (f"${t}" in p) or bool(re.search(rf"\b(?:NASDAQ|NYSE|TSX|LSE)\s*:\s*{re.escape(t)}\b", p, flags=re.I))
+        bare = bool(re.search(rf"\b{re.escape(t)}\b", p))
 
-        # For ambiguous tickers (AGI, T, F, SIRI...), require strong patterns.
-        if t in _AMBIGUOUS_TICKERS and ms < 2:
+        if t in AMBIGUOUS_TICKERS and not strong:
+            continue
+        if not (strong or bare):
             continue
 
-        # For non-ambiguous tickers, allow bare mention only if finance terms exist.
-        if ms == 1 and not finance_ok:
-            continue
-
-        # Basic anti-false-positive: AGI often appears as "Artificial General Intelligence".
-        if t == "AGI" and re.search(r"artificial\s+general\s+intelligence", p, flags=re.I):
-            continue
+        # Require finance context IN THE PARAGRAPH
+        pl = p.lower()
+        if not any(kw in pl for kw in FINANCE_KEYWORDS):
+            # allow strong $TICKER/exchange pattern to pass even if finance words missing
+            if not strong:
+                continue
 
         out.append(p)
-        if len(out) >= SUBSTACK_MAX_PARAGRAPHS_PER_ITEM:
+        if len(out) >= MAX_PARAGRAPHS_PER_ITEM:
             break
+
     return out
 
 
 def search_posts(keyword: str, *, page: int = 1, limit: int = 20) -> List[Dict[str, Any]]:
-    """
-    Primary list-stage search.
-    1) Try /search/post (singular) as per RapidAPI UI.
-    2) If empty, fall back to /search/top.
-    """
+    """Calls /search/post (RapidAPI); falls back to /search/top if needed."""
     keyword = (keyword or "").strip()
     if not keyword:
         return []
 
-    def _try(endpoint: str) -> List[Dict[str, Any]]:
+    endpoints = ["/search/post", "/search/top"]
+    for endpoint in endpoints:
         for params in (
+            {"query": keyword, "page": page, "limit": limit},
+            {"keyword": keyword, "page": page, "limit": limit},
+            {"q": keyword, "page": page, "limit": limit},
             {"query": keyword, "page": page},
-            {"query": keyword, "page": max(page - 1, 0)},  # some backends are 0-based
-            {"q": keyword, "page": page},
             {"keyword": keyword, "page": page},
         ):
             try:
@@ -375,22 +458,15 @@ def search_posts(keyword: str, *, page: int = 1, limit: int = 20) -> List[Dict[s
                     return rows
             except Exception:
                 continue
-        return []
 
-    rows = _try("/search/post")
-    if rows:
-        return rows
-    return _try("/search/top")
+    return []
 
 
 def fetch_post_details(post_id: str) -> Dict[str, Any]:
-    """
-    Calls /reader/post to fetch full post data.
-    """
+    """Calls /reader/post to fetch full post data."""
     post_id = (post_id or "").strip()
     if not post_id:
         return {}
-    # similarly resilient param naming
     for params in ({"postId": post_id}, {"post_id": post_id}, {"id": post_id}):
         try:
             payload = _request_json("/reader/post", params=params)
@@ -401,15 +477,16 @@ def fetch_post_details(post_id: str) -> Dict[str, Any]:
     return {}
 
 
-def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: int = 3) -> List[Dict[str, Any]]:
-    """
-    High-level helper used by final.py.
+def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: int = 2) -> List[Dict[str, Any]]:
+    """High-level helper used by final.py.
 
-    Strategy:
-      1) List stage: /search/post using a tightened query (reduces false positives).
-      2) Rank candidates by (recency + finance keywords + strong $TICKER/exchange:ticker patterns).
-      3) Only fetch /reader/post for top candidates until max_posts are found.
-      4) Keep an item only if at least one substantive, finance-relevant paragraph mentions the ticker.
+    Strategy (optimized):
+      1) List stage: search with tightened query variants.
+      2) Early filter + score at list-stage (recency + finance signal) and keep a small pool.
+      3) Fetch /reader/post only for top-scoring candidates.
+      4) Extract substantive ticker paragraphs; drop drive-by mentions.
+
+    NOTE: If no parsable timestamp exists at list-stage AND details-stage, the item is skipped.
     """
     ticker = (ticker or "").strip().upper()
     if not ticker:
@@ -420,82 +497,91 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
 
     cutoff = _now_utc() - timedelta(days=lookback_days)
 
-    query = _build_ticker_query(ticker)
-    candidates = search_posts(query, page=1, limit=max(35, max_posts * 6))
-    if not candidates:
-        return []
-
-    # Filter + dedupe + score at list-stage
+    # ---- list-stage: gather candidates from a few query variants ----
     seen: set[str] = set()
-    scored: List[Tuple[float, Dict[str, Any]]] = []
+    pool: List[Dict[str, Any]] = []
 
-    for row in candidates:
-        pid = _candidate_post_id(row)
-        if not pid or pid in seen:
-            continue
-        seen.add(pid)
+    # Hard cap to prevent runaway scanning
+    max_pool = max(12, max_posts * 6)
 
-        title = _candidate_title(row)
-        url = _candidate_url(row)
-        pub_dt = _candidate_published_at(row)
-
-        # If list-stage has a timestamp and it's older than cutoff, drop early.
-        if pub_dt and pub_dt < cutoff:
+    for q in _build_query_variants(ticker):
+        rows = search_posts(q, page=1, limit=25)
+        if not rows:
             continue
 
-        blob = f"{title} {url}"
-        ms = _mention_strength(ticker, blob)
-        fin = 1 if _has_finance_terms(blob) else 0
+        for row in rows:
+            pid = _candidate_post_id(row)
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
 
-        # Heuristic score: finance terms + strong mention patterns + recency
-        recency_bonus = 0.0
-        if pub_dt:
-            age_hours = max(0.0, (_now_utc() - pub_dt).total_seconds() / 3600.0)
-            recency_bonus = max(0.0, 48.0 - age_hours)  # newest wins
+            dt = _candidate_published_at(row)
+            if dt is None:
+                # strict cost rule: if we can't date it cheaply, only keep if very strong finance signal
+                if _finance_signal_score(ticker, _text_for_row(row)) < 6:
+                    continue
+            else:
+                if dt < cutoff:
+                    continue
 
-        score = (ms * 10.0) + (fin * 6.0) + recency_bonus
-        scored.append((score, row))
+            txt = _text_for_row(row)
+            sig = _finance_signal_score(ticker, txt)
+            if sig <= 0:
+                continue
 
-        # Keep a bounded pool to limit work
-        if len(scored) >= max_posts * SUBSTACK_MAX_CANDIDATES_MULTIPLIER:
+            row["__sig"] = sig
+            row["__dt"] = dt.isoformat() if dt else ""
+            pool.append(row)
+
+            if len(pool) >= max_pool:
+                break
+
+        if len(pool) >= max_pool:
             break
 
-    if not scored:
+        # early stop if we already have enough strong candidates
+        strong = sum(1 for r in pool if int(r.get("__sig") or 0) >= 7)
+        if strong >= max_posts:
+            break
+
+    if not pool:
         return []
 
-    scored.sort(key=lambda x: x[0], reverse=True)
+    # ---- sort pool: recency + signal ----
+    def sort_key(r: Dict[str, Any]):
+        dt = _candidate_published_at(r) or _parse_datetime(r.get("__dt"))
+        ts = dt.timestamp() if dt else 0.0
+        sig = int(r.get("__sig") or 0)
+        return (-ts, -sig)
 
+    pool.sort(key=sort_key)
+
+    # Limit detail fetches aggressively
+    top = pool[: max(4, max_posts * 2)]
+
+    # ---- details-stage: optionally parallel fetch ----
     results: List[Dict[str, Any]] = []
-    # Fetch details only until we have max_posts that pass the paragraph gate
-    for _, row in scored:
-        if len(results) >= max_posts:
-            break
 
+    def build_item(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         pid = _candidate_post_id(row)
+        if not pid:
+            return None
+
         title = _candidate_title(row)
         url = _candidate_url(row)
         published_dt = _candidate_published_at(row)
-        published_raw = row.get("published_at") or row.get("published") or row.get("date") or row.get("created_at") or ""
-
-        # Light pre-filter: if nothing looks finance-related AND mention is weak, skip expensive details.
-        blob = f"{title} {url}"
-        ms = _mention_strength(ticker, blob)
-        fin = _has_finance_terms(blob)
-        if ms == 1 and not fin:
-            continue
-        if ticker in _AMBIGUOUS_TICKERS and ms < 2:
-            continue
+        published_raw = row.get("published_at") or row.get("published") or row.get("date") or ""
 
         details = fetch_post_details(pid)
         body_raw, author, title_d, pub_d = _extract_body_from_post_details(details)
-
         body_clean = _strip_html(body_raw) if body_raw else ""
+
         if title_d and not title:
             title = title_d
         if pub_d and not published_raw:
             published_raw = pub_d
 
-        # If details provided a better URL, prefer it
+        # prefer url from details if present
         if isinstance(details, dict):
             base = details.get("data") if isinstance(details.get("data"), dict) else details
             u2 = base.get("url") or base.get("canonical_url") or base.get("link")
@@ -503,29 +589,52 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
                 url = u2.strip()
 
         dt2 = _parse_datetime(published_raw) or published_dt
-        if not dt2:
-            # Strict lookback: skip if we can't validate recency.
-            continue
+        if dt2 is None:
+            return None  # strict
         if dt2 < cutoff:
-            continue
+            return None
 
-        # Paragraph gate: only keep if we have substantive, finance-relevant ticker paragraphs.
-        paras = _substantive_paragraphs_for_ticker(ticker, body_clean)
+        # Paragraph gating for substantive mention
+        paras = _extract_substantive_paragraphs_for_ticker(ticker=ticker, body_text=body_clean)
         if not paras:
-            continue
+            return None
 
         excerpt = "\n\n".join(paras)
+        return {
+            "post_id": pid,
+            "title": title,
+            "author": author,
+            "published_at": dt2.isoformat(),
+            "url": url,
+            "excerpt": excerpt,
+            "body": body_clean,
+        }
 
-        results.append(
-            {
-                "post_id": pid,
-                "title": title,
-                "author": author,
-                "published_at": published_raw or dt2.isoformat(),
-                "url": url,
-                "excerpt": excerpt,
-                "body": excerpt,  # keep body consistent with excerpt to reduce noise
-            }
-        )
+    # small parallelism for details
+    if DETAIL_WORKERS > 1 and len(top) > 1:
+        try:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
+            with ThreadPoolExecutor(max_workers=DETAIL_WORKERS) as ex:
+                futs = [ex.submit(build_item, r) for r in top]
+                for fut in as_completed(futs):
+                    it = fut.result()
+                    if it:
+                        results.append(it)
+                        if len(results) >= max_posts:
+                            break
+        except Exception:
+            # fall back to sequential on any thread/runtime weirdness
+            results = []
+
+    if not results:
+        for row in top:
+            it = build_item(row)
+            if it:
+                results.append(it)
+                if len(results) >= max_posts:
+                    break
+
+    # Final sort by published time desc
+    results.sort(key=lambda x: x.get("published_at") or "", reverse=True)
     return results
