@@ -228,9 +228,10 @@ def extract_ticker_paragraphs(
 ) -> List[str]:
     """Return ONLY paragraphs that credibly mention the ticker (and/or company context).
 
-    - For ambiguous tickers, require strong finance-oriented patterns ($TICKER, NYSE:TICKER, etc.),
-      OR company-name/alias co-occurrence.
-    - For non-ambiguous tickers, accept word-boundary ticker mentions, but still prefer strong patterns.
+    Patch goals:
+    - Reduce acronym collisions by requiring finance context for weak ticker hits.
+    - Keep cost controls (pure text processing).
+    - Preserve existing behavior for strong finance anchors ($TICKER, NYSE:TICKER, etc.).
     """
     t = (ticker or "").strip().upper()
     if not t:
@@ -249,7 +250,7 @@ def extract_ticker_paragraphs(
 
     # Patterns
     strong_ticker = re.compile(
-        rf"(?:\${re.escape(t)}\b|\b(?:NYSE|NASDAQ|AMEX)\s*:\s*{re.escape(t)}\b|\b{re.escape(t)}\s*\([A-Z]{2,6}:\s*{re.escape(t)}\)\b)",
+        rf"(?:\${re.escape(t)}\b|\b(?:NYSE|NASDAQ|AMEX)\s*:\s*{re.escape(t)}\b|\b{re.escape(t)}\s*\([A-Z]{{2,6}}:\s*{re.escape(t)}\)\b)",
         re.IGNORECASE,
     )
     weak_ticker = re.compile(rf"\b{re.escape(t)}\b")
@@ -257,66 +258,102 @@ def extract_ticker_paragraphs(
     name_pat = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE) if name else None
     alias_pats = [re.compile(rf"\b{re.escape(a)}\b", re.IGNORECASE) for a in alias_list if len(a) >= 3]
 
+    # Finance-context: required for weak ticker-only hits to reduce acronym collisions.
+    finance_ctx = re.compile(
+        r"\b("
+        r"stock|stocks|share|shares|equity|equities|bond|bonds|"
+        r"earnings|eps|revenue|guidance|outlook|"
+        r"dividend|buyback|split|"
+        r"market\s*cap|valuation|price\s*target|rating|upgrade|downgrade|"
+        r"analyst|wall\s*street|sec|10-?k|10-?q|8-?k|"
+        r"nasdaq|nyse|amex|ticker|"
+        r"q[1-4]\b|fiscal|yoy|qoq|"
+        r"options?|calls?|puts?|iv\b|"
+        r"etf|fund|portfolio|holdings?"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    # Handle/@mention noise (e.g., @CTOAdvisor) should not count as a ticker hit unless anchored.
+    handle_noise = re.compile(rf"@\w*{re.escape(t)}\w*", re.IGNORECASE)
+    url_noise = re.compile(r"https?://\S+", re.IGNORECASE)
+
     # Common false-positive suppressors (cheap heuristics)
     suppress_phrases: List[re.Pattern] = []
-    # Example: AGI frequently equals "Artificial General Intelligence"
+
+    # Existing generic suppressors
     if t == "AGI":
         suppress_phrases.append(re.compile(r"\bartificial\s+general\s+intelligence\b", re.IGNORECASE))
-    # Example: CTO often equals "Chief Technology Officer"
     if t == "CTO":
         suppress_phrases.append(re.compile(r"\bchief\s+technology\s+officer\b", re.IGNORECASE))
-    # Example: AI often equals "Artificial Intelligence"
     if t == "AI":
         suppress_phrases.append(re.compile(r"\bartificial\s+intelligence\b", re.IGNORECASE))
+
+    # Targeted collision suppressors based on what’s showing in your PDFs
+    if t == "CNH":
+        suppress_phrases.append(re.compile(r"\b(?:usd\s*/\s*cnh|cnh\s*/\s*usd|cny|offshore\s+yuan|yuan)\b", re.IGNORECASE))
+    if t == "MTB":
+        suppress_phrases.append(re.compile(r"\bmountain\s+bik(e|ing|es)\b", re.IGNORECASE))
+    if t == "EPR":
+        suppress_phrases.append(re.compile(r"\b(?:epr\s+reactor|european\s+pressur(?:i|e)zed\s+reactor|nuclear)\b", re.IGNORECASE))
+    if t == "AEM":
+        suppress_phrases.append(re.compile(r"\badobe\s+experience\s+manager\b", re.IGNORECASE))
+    if t == "ABCB":
+        suppress_phrases.append(re.compile(r"\brhyme\s+scheme\b", re.IGNORECASE))
+    if t == "PTBS":
+        suppress_phrases.append(re.compile(r"\b(?:ptsd|post[-\s]?traumatic|diagnos(?:is|e))\b", re.IGNORECASE))
 
     paras = _split_paragraphs(body)
     kept: List[str] = []
     ambiguous = _is_ambiguous_ticker(t)
 
-    for p in paras:
-        if len(p) < int(min_chars):
-            continue
+    def _has_company_ctx(txt: str) -> bool:
+        if name_pat and name_pat.search(txt):
+            return True
+        if alias_pats and any(ap.search(txt) for ap in alias_pats):
+            return True
+        return False
 
-        # If it's clearly the generic meaning (and not finance-anchored), drop it.
-        suppressed = False
+    def _ok_text_unit(txt: str) -> bool:
+        """Apply acceptance rules to a paragraph or sentence unit."""
+        if len(txt) < int(min_chars):
+            return False
+
+        # Suppress clear generic meanings unless finance-anchored
         for sp in suppress_phrases:
-            if sp.search(p) and (not strong_ticker.search(p)):
-                suppressed = True
-                break
-        if suppressed:
-            continue
+            if sp.search(txt) and (not strong_ticker.search(txt)):
+                return False
 
-        has_strong = bool(strong_ticker.search(p))
-        has_weak = bool(weak_ticker.search(p))
-        has_name = bool(name_pat.search(p)) if name_pat else False
-        has_alias = any(ap.search(p) for ap in alias_pats) if alias_pats else False
+        # Handle/URL-only matches are noise unless finance-anchored
+        if (handle_noise.search(txt) or url_noise.search(txt)) and (not strong_ticker.search(txt)):
+            # If it contains a ticker but only as part of a handle/url and no finance anchor, drop.
+            # (Company context can rescue it if present.)
+            if not _has_company_ctx(txt):
+                return False
+
+        has_strong = bool(strong_ticker.search(txt))
+        has_weak = bool(weak_ticker.search(txt))
+        has_company = _has_company_ctx(txt)
+        has_finance = bool(finance_ctx.search(txt))
 
         if ambiguous:
-            # Tighten: ambiguous tickers should not pass on company name alone.
-            ok = has_strong or (has_weak and (has_name or has_alias))
+            # Ambiguous: must be finance-anchored OR (ticker + company context).
+            return has_strong or (has_weak and has_company)
         else:
-            ok = has_strong or has_weak or has_name or has_alias
+            # Non-ambiguous: weak ticker alone is NOT enough anymore.
+            # Require finance context or company context unless it’s a strong anchor.
+            return has_strong or (has_weak and (has_finance or has_company)) or (has_company and has_finance)
 
-        if not ok:
+    for p in paras:
+        if not _ok_text_unit(p):
             continue
 
-        # If a paragraph is huge, keep only the sentences that mention the ticker
-        # (plus 1 sentence of context on each side).
+        # If a paragraph is huge, keep only the sentences that match (plus 1 neighbor sentence for readability).
         if len(p) > 900:
             sents = _split_sentences(p)
             keep_idx: List[int] = []
             for i, s in enumerate(sents):
-                s_has_strong = bool(strong_ticker.search(s))
-                s_has_weak = bool(weak_ticker.search(s))
-                s_has_name = bool(name_pat.search(s)) if name_pat else False
-                s_has_alias = any(ap.search(s) for ap in alias_pats) if alias_pats else False
-
-                if ambiguous:
-                    s_ok = s_has_strong or (s_has_weak and (s_has_name or s_has_alias))
-                else:
-                    s_ok = s_has_strong or s_has_weak
-
-                if s_ok:
+                if _ok_text_unit(s):
                     keep_idx.append(i)
 
             if not keep_idx:
