@@ -143,23 +143,21 @@ def _extract_posts_from_search(payload: Any) -> List[Dict[str, Any]]:
         return [x for x in payload if isinstance(x, dict)]
     if isinstance(payload, dict):
         # Common shapes:
-        #   {"data": {"results": [ ... ]}}
-        #   {"data": [ ... ]}
-        #   {"results": [ ... ]}
-        #   {"items": [ ... ]}
+        # 1) {"data": {"results": [ ... ]}}
+        # 2) {"results": [ ... ]}
+        # 3) {"data": [ ... ]}
+
         for key in ("results", "items", "posts"):
             v = payload.get(key)
             if isinstance(v, list):
                 return [x for x in v if isinstance(x, dict)]
 
-        vdata = payload.get("data")
-        if isinstance(vdata, list):
-            return [x for x in vdata if isinstance(x, dict)]
-        if isinstance(vdata, dict):
-            out = _extract_posts_from_search(vdata)
-            if out:
-                return out
-
+        v = payload.get("data")
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, dict)]
+        if isinstance(v, dict):
+            # recurse into nested data payload
+            return _extract_posts_from_search(v)
         # sometimes nested
         if "response" in payload and isinstance(payload["response"], dict):
             return _extract_posts_from_search(payload["response"])
@@ -206,34 +204,78 @@ def _extract_body_from_post_details(payload: Any) -> Tuple[str, str, str, str]:
     if payload is None:
         return "", "", "", ""
 
+    def _find_first_text(obj: Any, keys: Tuple[str, ...]) -> str:
+        """Depth-first search for the first non-empty string value for any of the given keys."""
+        if obj is None:
+            return ""
+        if isinstance(obj, dict):
+            # direct hit
+            for k in keys:
+                v = obj.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v
+            # recurse
+            for v in obj.values():
+                out = _find_first_text(v, keys)
+                if out:
+                    return out
+        elif isinstance(obj, list):
+            for v in obj:
+                out = _find_first_text(v, keys)
+                if out:
+                    return out
+        return ""
+
     if isinstance(payload, dict):
-        base = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        # Some endpoints return {"data": {...}}, others return {...}. Keep both.
+        base = payload.get("data") if isinstance(payload.get("data"), (dict, list)) else payload
 
-        # body candidates (rich HTML vs plain)
-        body = (
-            base.get("body")
-            or base.get("text")
-            or base.get("content")
-            or base.get("subtitle")
-            or base.get("description")
-            or ""
+        # body candidates (prefer HTML). Many /reader/post responses nest this under "post" or similar.
+        body = _find_first_text(
+            base,
+            (
+                "body_html",
+                "bodyHtml",
+                "body",
+                "body_text",
+                "bodyText",
+                "text",
+                "content",
+                "content_html",
+                "contentHtml",
+                "description",
+                "subtitle",
+                "summary",
+            ),
         )
 
-        # author
-        author = (
-            base.get("author")
-            or base.get("author_name")
-            or base.get("authorName")
-            or (base.get("publication") or {}).get("name") if isinstance(base.get("publication"), dict) else ""
+        # author candidates (often nested in publishedBylines[0].name)
+        author = _find_first_text(
+            base,
+            (
+                "author",
+                "author_name",
+                "authorName",
+                "name",
+                "handle",
+            ),
         )
 
-        title = base.get("title") or base.get("headline") or ""
-        published_raw = (
-            base.get("published_at")
-            or base.get("published")
-            or base.get("date")
-            or base.get("created_at")
-            or ""
+        # title
+        title = _find_first_text(base, ("title", "headline", "name"))
+
+        # published timestamp
+        published_raw = _find_first_text(
+            base,
+            (
+                "published_at",
+                "publishedAt",
+                "published",
+                "date",
+                "created_at",
+                "createdAt",
+                "post_date",
+            ),
         )
 
         return str(body or ""), str(author or ""), str(title or ""), str(published_raw or "")
@@ -252,152 +294,30 @@ def _strip_html(text: str) -> str:
 
 
 def search_posts(keyword: str, *, page: int = 0, limit: int = 20) -> List[Dict[str, Any]]:
-    """Search posts for a keyword.
+    """Search Substack posts.
 
-    The RapidAPI Substack Live API has used both `/search/post` (singular) and
-    `/search/posts` (plural) over time. In production we prefer `/search/post`
-    because it is the endpoint that currently returns results in the
-    `{"data": {"results": [...]}}` shape.
+    IMPORTANT: Substack Live uses the **singular** endpoint `/search/post`.
+    The plural `/search/posts` is not available for this API and will 404.
 
-    We keep a tiny fallback to `/search/posts` purely for resiliency.
+    We keep this as a list-stage call and avoid variants/fallbacks to preserve
+    the "1 search call per ticker" cost rule.
     """
     keyword = (keyword or "").strip()
     if not keyword:
         return []
 
-    # Prefer the working singular endpoint with the most common params.
-    for params in (
-        {"query": keyword, "page": page},
-        {"query": keyword, "page": page, "limit": limit},
-        {"keyword": keyword, "page": page},
-        {"q": keyword, "page": page},
-    ):
-        try:
-            payload = _request_json("/search/post", params=params)
-            rows = _extract_posts_from_search(payload)
-            if rows:
-                return rows
-        except Exception:
-            continue
+    # Normalize page: API accepts 0-based pages; callers may pass 1.
+    try:
+        p = int(page)
+    except Exception:
+        p = 0
+    if p >= 1:
+        p = p - 1
 
-    # Fallback: plural endpoint (older behavior)
-    for params in (
-        {"query": keyword, "page": max(1, int(page) or 1), "limit": limit},
-        {"keyword": keyword, "page": max(1, int(page) or 1), "limit": limit},
-    ):
-        try:
-            payload = _request_json("/search/posts", params=params)
-            rows = _extract_posts_from_search(payload)
-            if rows:
-                return rows
-        except Exception:
-            continue
-
-    return []
-
-
-_FINANCE_TERMS = [
-    # High-signal finance / investing language
-    "stock",
-    "shares",
-    "earnings",
-    "eps",
-    "revenue",
-    "guidance",
-    "valuation",
-    "multiple",
-    "p/e",
-    "pe ",
-    "ebitda",
-    "margin",
-    "dividend",
-    "buy",
-    "sell",
-    "rating",
-    "upgrade",
-    "downgrade",
-    "target price",
-    "price target",
-    "position",
-    "portfolio",
-    "10-q",
-    "10k",
-    "10-k",
-    "sec",
-    "macro",
-    "ticker",
-]
-
-
-def _iter_paragraphs(text: str) -> List[str]:
-    """Split cleaned text into paragraphs.
-
-    We keep this dependency-free: first try splitting on newlines; if the text
-    is already flattened, fall back to splitting on sentence clusters.
-    """
-    if not text:
-        return []
-
-    # Prefer newline paragraphing when available
-    parts = [p.strip() for p in re.split(r"\n{2,}", text) if p and p.strip()]
-    if len(parts) >= 2:
-        return parts
-
-    # If HTML stripping collapsed whitespace, re-split on " ." clusters.
-    # This is intentionally conservative.
-    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s{2,}", text) if p and p.strip()]
-    return parts
-
-
-def _paragraph_is_substantive(p: str, *, min_words: int, min_chars: int) -> bool:
-    if not p:
-        return False
-    if len(p) < min_chars:
-        return False
-    words = re.findall(r"[A-Za-z0-9$:_-]+", p)
-    return len(words) >= min_words
-
-
-def _paragraph_mentions_ticker(p: str, ticker: str) -> bool:
-    t = ticker.upper()
-    # Strong patterns first
-    if re.search(rf"\${re.escape(t)}\b", p, flags=re.IGNORECASE):
-        return True
-    if re.search(rf"\b(?:NYSE|NASDAQ|AMEX|OTC|TSX|LSE|ASX)\s*:\s*{re.escape(t)}\b", p, flags=re.IGNORECASE):
-        return True
-    # Weak pattern: bare word match
-    return bool(re.search(rf"\b{re.escape(t)}\b", p, flags=re.IGNORECASE))
-
-
-def _paragraph_has_finance_context(p: str) -> bool:
-    pl = p.lower()
-    return any(term in pl for term in _FINANCE_TERMS)
-
-
-def _select_qualifying_paragraphs(text: str, ticker: str) -> List[str]:
-    """Return only paragraphs that are (a) substantive and (b) ticker-relevant.
-
-    Goal: avoid noise where a company is only mentioned briefly or where the
-    ticker is an ambiguous token (e.g., AGI meaning "artificial general intelligence").
-    We require finance context in the same paragraph.
-    """
-    min_words = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_WORDS", "30"))
-    min_chars = int(os.getenv("SUBSTACK_MIN_PARAGRAPH_CHARS", "180"))
-    max_paras = int(os.getenv("SUBSTACK_MAX_PARAGRAPHS_PER_ITEM", "2"))
-
-    paras = _iter_paragraphs(text)
-    out: List[str] = []
-    for p in paras:
-        if not _paragraph_is_substantive(p, min_words=min_words, min_chars=min_chars):
-            continue
-        if not _paragraph_mentions_ticker(p, ticker):
-            continue
-        if not _paragraph_has_finance_context(p):
-            continue
-        out.append(p.strip())
-        if len(out) >= max_paras:
-            break
-    return out
+    # Use the param name that the API actually expects: `query`.
+    params = {"query": keyword, "page": p}
+    payload = _request_json("/search/post", params=params)
+    return _extract_posts_from_search(payload)
 
 
 def fetch_post_details(post_id: str) -> Dict[str, Any]:
@@ -407,8 +327,20 @@ def fetch_post_details(post_id: str) -> Dict[str, Any]:
     post_id = (post_id or "").strip()
     if not post_id:
         return {}
-    # similarly resilient param naming
-    for params in ({"postId": post_id}, {"post_id": post_id}, {"id": post_id}):
+    # similarly resilient param naming; some endpoints are picky about numeric IDs
+    post_id_int: Optional[int] = None
+    try:
+        post_id_int = int(str(post_id))
+    except Exception:
+        post_id_int = None
+
+    param_variants = [
+        {"postId": post_id_int if post_id_int is not None else post_id},
+        {"post_id": post_id_int if post_id_int is not None else post_id},
+        {"id": post_id_int if post_id_int is not None else post_id},
+    ]
+
+    for params in param_variants:
         try:
             payload = _request_json("/reader/post", params=params)
             if payload:
@@ -418,7 +350,7 @@ def fetch_post_details(post_id: str) -> Dict[str, Any]:
     return {}
 
 
-def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: int = 1) -> List[Dict[str, Any]]:
+def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: int = 3) -> List[Dict[str, Any]]:
     """
     High-level helper used by final.py.
 
@@ -437,17 +369,10 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
 
     cutoff = _now_utc() - timedelta(days=lookback_days)
 
-    # Fast-mode defaults: one search call (page=0) and a small pool.
-    # IMPORTANT: Substack search is materially better for tickers when using the "$TICKER" pattern.
-    # This keeps recall high without adding extra API calls.
+    # Substack search is far more consistent for tickers when using the cashtag form ($TICKER).
+    # Keep this as a single list-stage call per ticker for cost control.
     keyword = f"${ticker}"
-    candidates = search_posts(keyword, page=0, limit=max(20, max_posts * 5))
-
-    # Optional (disabled by default): allow a second search call using the bare ticker if desired.
-    # Keep this OFF to preserve the "1 list-stage call per ticker" cost guarantee.
-    if not candidates and os.getenv("SUBSTACK_ALLOW_BARE_TICKER_FALLBACK", "0") == "1":
-        candidates = search_posts(ticker, page=0, limit=max(20, max_posts * 5))
-
+    candidates = search_posts(keyword, page=1, limit=max(25, max_posts * 5))
     if not candidates:
         return []
 
@@ -505,13 +430,7 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
         if dt2 and dt2 < cutoff:
             continue
 
-        # Only include if there is a substantive, finance-context paragraph mention.
-        qualifying = _select_qualifying_paragraphs(body_clean, ticker)
-        if not qualifying:
-            continue
-
-        selected_text = "\n\n".join(qualifying)
-        excerpt = selected_text[:1600] if selected_text else ""
+        excerpt = body_clean[:1600] if body_clean else ""
 
         results.append(
             {
@@ -521,7 +440,7 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 1, max_posts: in
                 "published_at": published_raw or (dt2.isoformat() if dt2 else ""),
                 "url": url,
                 "excerpt": excerpt,
-                "body": selected_text,
+                "body": body_clean,
             }
         )
 
