@@ -228,10 +228,12 @@ def extract_ticker_paragraphs(
 ) -> List[str]:
     """Return ONLY paragraphs that credibly mention the ticker (and/or company context).
 
-    Patch goals:
-    - Reduce acronym collisions by requiring finance context for weak ticker hits.
-    - Keep cost controls (pure text processing).
-    - Preserve existing behavior for strong finance anchors ($TICKER, NYSE:TICKER, etc.).
+    Surgical improvements included:
+    - Sentence-level fallback for mega-paragraphs (roundup posts).
+    - Stricter rules for ambiguous tickers (must be finance-anchored OR (ticker + company context)).
+    - Finance-context gating for non-ambiguous tickers (weak ticker alone is insufficient).
+    - Targeted suppressors for common collisions (CNH currency, MTB bikes, EPR reactor, etc.).
+    - Footer/link-farm suppression (Institutional holders / Also see / Options chain, etc.).
     """
     t = (ticker or "").strip().upper()
     if not t:
@@ -274,6 +276,42 @@ def extract_ticker_paragraphs(
         re.IGNORECASE,
     )
 
+    # Footer / link-farm patterns that should NOT count as "ticker-relevant content"
+    footer_noise = re.compile(
+        r"\b("
+        r"also\s+see|see\s+also|read\s+more|click\s+here|subscribe|"
+        r"institutional\s+holders?\s+of|holders?\s+of|top\s+holders?|"
+        r"options?\s+chain|options?\s+data|"
+        r"dividend\s+history|split\s+history|short\s+interest|"
+        r"earnings\s+calendar|upcoming\s+earnings|"
+        r"quote|quotes|related\s+quotes|view\s+quote|"
+        r"chart|price\s+chart|technical\s+analysis|"
+        r"zacks\s+rank|zacks\b|style\s+scores?|"
+        r"ratings?|analyst\s+ratings?|price\s+target(s)?|"
+        r"key\s+metrics|financial\s+statements?|balance\s+sheet|cash\s+flow|"
+        r"market\s+cap|pe\s+ratio|p\/e|eps\s+estimates?|revenue\s+estimates?|"
+        r"competitors?|peers?|compare(d)?\s+to|"
+        r"tickers?\s*:|symbols?\s*:|"
+        r"disclosure|disclaimer|terms\s+of\s+use"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    # If a sentence is primarily a footer, only allow it if it also contains a "real content" signal.
+    real_content = re.compile(
+        r"\b("
+        r"reported|results|beat|miss(ed)?|guidance|outlook|raised|lowered|"
+        r"reiterated|announced|acquired|merger|approved|fda|trial|"
+        r"margin(s)?|free\s+cash\s+flow|fcf|"
+        r"segment|pipeline|launch|contract|backlog|"
+        r"earnings\s+call|quarter|q[1-4]\b|fiscal|yoy|qoq"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    # Detect common "ticker list / tag cloud" formatting: lots of symbols separated by commas/pipes
+    ticker_listy = re.compile(r"(?:\b[A-Z]{1,5}\b[\s,|/]{1,3}){3,}\b[A-Z]{1,5}\b")
+
     # Handle/@mention noise (e.g., @CTOAdvisor) should not count as a ticker hit unless anchored.
     handle_noise = re.compile(rf"@\w*{re.escape(t)}\w*", re.IGNORECASE)
     url_noise = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -281,7 +319,7 @@ def extract_ticker_paragraphs(
     # Common false-positive suppressors (cheap heuristics)
     suppress_phrases: List[re.Pattern] = []
 
-    # Existing generic suppressors
+    # Generic suppressors
     if t == "AGI":
         suppress_phrases.append(re.compile(r"\bartificial\s+general\s+intelligence\b", re.IGNORECASE))
     if t == "CTO":
@@ -289,19 +327,27 @@ def extract_ticker_paragraphs(
     if t == "AI":
         suppress_phrases.append(re.compile(r"\bartificial\s+intelligence\b", re.IGNORECASE))
 
-    # Targeted collision suppressors based on what’s showing in your PDFs
+    # Targeted collision suppressors based on observed failures
     if t == "CNH":
-        suppress_phrases.append(re.compile(r"\b(?:usd\s*/\s*cnh|cnh\s*/\s*usd|cny|offshore\s+yuan|yuan)\b", re.IGNORECASE))
+        suppress_phrases.append(
+            re.compile(r"\b(?:usd\s*/\s*cnh|cnh\s*/\s*usd|cny|offshore\s+yuan|yuan)\b", re.IGNORECASE)
+        )
     if t == "MTB":
         suppress_phrases.append(re.compile(r"\bmountain\s+bik(e|ing|es)\b", re.IGNORECASE))
     if t == "EPR":
-        suppress_phrases.append(re.compile(r"\b(?:epr\s+reactor|european\s+pressur(?:i|e)zed\s+reactor|nuclear)\b", re.IGNORECASE))
+        suppress_phrases.append(
+            re.compile(r"\b(?:epr\s+reactor|european\s+pressur(?:i|e)zed\s+reactor|nuclear)\b", re.IGNORECASE)
+        )
     if t == "AEM":
         suppress_phrases.append(re.compile(r"\badobe\s+experience\s+manager\b", re.IGNORECASE))
     if t == "ABCB":
         suppress_phrases.append(re.compile(r"\brhyme\s+scheme\b", re.IGNORECASE))
     if t == "PTBS":
         suppress_phrases.append(re.compile(r"\b(?:ptsd|post[-\s]?traumatic|diagnos(?:is|e))\b", re.IGNORECASE))
+    if t == "GBX":
+        suppress_phrases.append(re.compile(r"\bgbp\b|\bgbx\b.*\bpence\b|\bpence\b", re.IGNORECASE))
+    if t == "GLPI":
+        suppress_phrases.append(re.compile(r"\bglpi\b.*\b(it|helpdesk|service\s*desk|asset)\b", re.IGNORECASE))
 
     paras = _split_paragraphs(body)
     kept: List[str] = []
@@ -324,23 +370,27 @@ def extract_ticker_paragraphs(
             if sp.search(txt) and (not strong_ticker.search(txt)):
                 return False
 
-        # Handle/URL-only matches are noise unless finance-anchored
-        if (handle_noise.search(txt) or url_noise.search(txt)) and (not strong_ticker.search(txt)):
-            # If it contains a ticker but only as part of a handle/url and no finance anchor, drop.
-            # (Company context can rescue it if present.)
-            if not _has_company_ctx(txt):
-                return False
-
         has_strong = bool(strong_ticker.search(txt))
         has_weak = bool(weak_ticker.search(txt))
         has_company = _has_company_ctx(txt)
         has_finance = bool(finance_ctx.search(txt))
 
+        # Handle/URL-only matches are noise unless anchored or company context exists.
+        if (handle_noise.search(txt) or url_noise.search(txt)) and (not has_strong):
+            if not has_company:
+                return False
+
+        # ---- Footer/link-farm suppression ----
+        if (footer_noise.search(txt) or ticker_listy.search(txt)):
+            # Allow only if we have strong anchor OR company context OR real content signals.
+            if (not has_strong) and (not has_company) and (not real_content.search(txt)):
+                return False
+
         if ambiguous:
             # Ambiguous: must be finance-anchored OR (ticker + company context).
             return has_strong or (has_weak and has_company)
         else:
-            # Non-ambiguous: weak ticker alone is NOT enough anymore.
+            # Non-ambiguous: weak ticker alone is NOT enough.
             # Require finance context or company context unless it’s a strong anchor.
             return has_strong or (has_weak and (has_finance or has_company)) or (has_company and has_finance)
 
@@ -348,7 +398,7 @@ def extract_ticker_paragraphs(
         if not _ok_text_unit(p):
             continue
 
-        # If a paragraph is huge, keep only the sentences that match (plus 1 neighbor sentence for readability).
+        # If a paragraph is huge, keep only the sentences that match (plus 1 neighbor sentence).
         if len(p) > 900:
             sents = _split_sentences(p)
             keep_idx: List[int] = []
