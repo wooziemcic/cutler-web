@@ -104,4 +104,5 @@ tickers = {
     "VZ": ['Verizon'],
     "WY": ['Weyerhaeuser'],
     "XOM": ['ExxonMobil'],
+    "FOUR": ['Shift4 Payments'],
 }
