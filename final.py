@@ -2647,24 +2647,74 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
 
                 if header:
                     items.append({"text": header, "pages": [], "is_header": True})
-
                 # Paragraph-only extraction: include ONLY paragraphs that credibly mention the ticker.
-                # Prefer the precomputed hit_paragraphs from substack_excerpts (cost-controlled);
-                # fall back to local extraction if needed.
+                # Always run a second-pass filter/rerank at render time to avoid low-signal upstream
+                # hit_paragraphs (event calendars, tag blocks, leaderboards, etc.).
                 hit_paras = p.get("hit_paragraphs")
                 if not isinstance(hit_paras, list):
-                    hit_paras = None
+                    hit_paras = []
 
-                if hit_paras is None and body:
+                # Candidate text for extraction: prefer full body, but also include any upstream
+                # hit snippets (some feeds truncate body fields).
+                candidate_parts = []
+                if body:
+                    candidate_parts.append(body)
+                if hit_paras:
+                    candidate_parts.append("\n\n".join([str(x) for x in hit_paras if str(x).strip()]))
+
+                candidate_text = "\n\n".join([x for x in candidate_parts if x]).strip()
+
+                paras = []
+                if candidate_text:
                     try:
-                        hit_paras = substack_excerpts.extract_ticker_paragraphs(
-                            body_text=body,
+                        paras = substack_excerpts.extract_ticker_paragraphs(
+                            body_text=candidate_text,
                             ticker=str(sym),
-                        )
+                        ) or []
                     except Exception:
-                        hit_paras = None
+                        paras = hit_paras or []
+                else:
+                    paras = hit_paras or []
 
-                paras = [str(x).strip() for x in (hit_paras or []) if str(x).strip()] if hit_paras else []
+                # Final safety filters (best-effort) for common Substack noise patterns
+                import re as _re
+                cleaned_paras = []
+                for _p in paras:
+                    _t = str(_p).strip()
+                    if not _t:
+                        continue
+                    _low = _t.lower()
+
+                    if (
+                        ("asset-types:" in _low)
+                        or ("entropy:" in _low)
+                        or ("staleness:" in _low)
+                        or ("uncertainty:" in _low)
+                        or ("sentiment:" in _low)
+                    ):
+                        continue
+
+                    if (
+                        ("subscribe" in _low)
+                        or ("share" in _low)
+                        or ("read original article" in _low)
+                        or ("full analysis" in _low and len(_t) < 250)
+                    ):
+                        continue
+
+                    if ("this week" in _low and "events" in _low) or (_t.count("■") + _t.count("❤") >= 4):
+                        continue
+                    if len(_re.findall(r"(?:mon|tue|wed|thu|fri|sat|sun)", _low)) >= 3 and "feb" in _low:
+                        continue
+
+                    if _t.count("$") >= 3 and (
+                        ("relative volume" in _low) or ("52-week" in _low) or ("peak gain" in _low)
+                    ):
+                        continue
+
+                    cleaned_paras.append(_t)
+
+                paras = cleaned_paras
                 kept = 0
                 for para in paras:
                     if kept >= max_paras_per_post:
@@ -2722,7 +2772,6 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
         out_path.write_bytes(out_pdf.read_bytes())
 
     return out_path
-
 
 def _substack_rerun():
     """Compatibility wrapper for Streamlit rerun."""
