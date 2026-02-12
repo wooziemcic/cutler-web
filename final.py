@@ -5209,6 +5209,67 @@ def main():
     if ra_state.get("status") == "running":
         step = ra_state.get("current_step")
         cfg = ra_state.get("config") or {}
+
+        # Auto-skip completed steps (prevents download_button reruns from restarting work)
+        # If an output path is already persisted and the file exists on disk, mark the step complete and advance.
+        _advance_guard = 0
+        while _advance_guard < 6 and ra_state.get("status") == "running":
+            _advance_guard += 1
+            step = ra_state.get("current_step")
+            outs = ra_state.get("outputs") or {}
+            completed = ra_state.get("completed") or []
+            if not isinstance(completed, list):
+                completed = []
+
+            def _mark_done(_step: str, _next: str):
+                if _step not in completed:
+                    completed.append(_step)
+                ra_state["completed"] = completed
+                ra_state["current_step"] = _next
+                _save_run_all_state(ra_state)
+
+            if step == "fund_families":
+                mf_paths = (outs.get("fund_families") or {}).get("paths") or []
+                ok = False
+                try:
+                    for pinfo in mf_paths:
+                        fp = Path((pinfo or {}).get("path") or "")
+                        if fp and fp.exists():
+                            ok = True
+                            break
+                except Exception:
+                    ok = False
+                if ok:
+                    _mark_done("fund_families", "seeking_alpha")
+                    continue
+
+            if step == "seeking_alpha":
+                sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
+                if sa_path and Path(sa_path).exists():
+                    _mark_done("seeking_alpha", "substack")
+                    continue
+
+            if step == "substack":
+                sub_path = (outs.get("substack") or {}).get("path") or ""
+                if sub_path and Path(sub_path).exists():
+                    _mark_done("substack", "podcasts")
+                    continue
+
+            if step == "podcasts":
+                pod_path = (outs.get("podcasts") or {}).get("path") or ""
+                if pod_path and Path(pod_path).exists():
+                    # If podcasts already exist, finalize Run All state.
+                    if "podcasts" not in completed:
+                        completed.append("podcasts")
+                    ra_state["completed"] = completed
+                    ra_state["current_step"] = "done"
+                    ra_state["status"] = "complete"
+                    ra_state["completed_at"] = _now_et().isoformat()
+                    _save_run_all_state(ra_state)
+                    break
+
+            break
+
         try:
             if step == "fund_families":
                 days = int(cfg.get("mf_lookback_days", 7))
@@ -5336,6 +5397,14 @@ def main():
                         break
                 else:
                     group_index = total_groups
+
+                # Progress bar for Run All podcasts (group-level)
+                _completed_groups_n = len(completed_set)
+                _prog_den = max(1, int(total_groups))
+                _prog_num = min(_prog_den, int(_completed_groups_n))
+                st.progress(float(_prog_num) / float(_prog_den))
+                st.caption(f"Run All: Podcasts progress — {_prog_num}/{_prog_den} groups complete")
+
 
 
                 if not groups or total_groups == 0:
