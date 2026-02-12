@@ -218,6 +218,88 @@ def _split_sentences(text: str) -> List[str]:
     return [p.strip() for p in parts if p and p.strip()]
 
 
+
+# -------------------------------------------------------------------
+#  Content cleanup + scoring (Substack signal quality improvements)
+# -------------------------------------------------------------------
+
+# Boilerplate / promo blocks that frequently appear in Substack bodies.
+_PROMO_NOISE = re.compile(
+    r"\b("
+    r"subscribe(\s+now)?|share\b|forward\b|comments?\b|like\b|repost\b|"
+    r"click\s+here|read\s+more|support\s+my\s+work|paid\s+subscription|"
+    r"this\s+post\s+is\s+for\s+subscribers|unlock\b|"
+    r"disclaimer|terms\s+of\s+use|privacy\s+policy|"
+    r"follow\s+me\b|follow\s+us\b|"
+    r"icymi\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Tag clouds / metadata blobs (common in scraped finance-content syndication on Substack)
+_META_NOISE_LINE = re.compile(
+    r"^(?:asset-types\s*:|rwa\s*:|entropy\s*:|sentiment\s*:|staleness\s*:|relevance\s*:|uncertainty\s*:|#\w+)",
+    re.IGNORECASE,
+)
+
+# Event-calendar / bulletin style lines (low-signal when a ticker is just in an event title)
+_EVENT_BULLET = re.compile(
+    r"\b("
+    r"mon|tue|wed|thu|fri|sat|sun"
+    r")\b\s*,?\s+"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b",
+    re.IGNORECASE,
+)
+
+def _clean_substack_text(raw: str) -> str:
+    """Lightweight cleanup to reduce obvious boilerplate before paragraph splitting."""
+    t = (raw or "")
+    # Normalize whitespace early
+    t = t.replace("\r", "\n")
+    # Remove obvious metadata/tag lines
+    lines = []
+    for ln in t.split("\n"):
+        if _META_NOISE_LINE.match(ln.strip()):
+            continue
+        lines.append(ln)
+    t = "\n".join(lines)
+    # Collapse excessive blank lines
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+def _score_text_unit(txt: str) -> int:
+    """Heuristic scoring for research-value."""
+    s = 0
+    t = txt.lower()
+
+    # Positive signals
+    if re.search(r"\b(earnings|eps|revenue|guidance|outlook|quarter|q[1-4]|fiscal|yoy|qoq)\b", t):
+        s += 3
+    if re.search(r"\b(valuation|multiple|p/?e|ev/?ebitda|market\s*cap|price\s*target|upgrade|downgrade|rating)\b", t):
+        s += 2
+    if re.search(r"\b(acquire|acquisition|merger|deal|contract|backlog|pipeline|fda|trial|approval)\b", t):
+        s += 2
+    if re.search(r"\b(beat|miss|raised|lowered|reiterated|announced|reported)\b", t):
+        s += 1
+    # Numbers often correlate with real commentary (but avoid rewarding raw ticker tables)
+    if re.search(r"\b\d+(?:\.\d+)?%\b", t) or re.search(r"\$\s*\d", t):
+        s += 1
+
+    # Negative signals
+    if _PROMO_NOISE.search(txt):
+        s -= 3
+    if _EVENT_BULLET.search(txt):
+        s -= 2
+    # Looks like a ticker/performance list with little prose
+    if re.search(r"(?:\b[A-Z]{1,5}\b\s*\(\+?[-\d\.]+%\)\s*:){2,}", txt):
+        s -= 4
+    if re.search(r"\b(relative\s+volume|from\s+prior\s+close|from\s+open|52-?week)\b", t) and len(txt) < 220:
+        s -= 3
+
+    # Very short items are rarely useful
+    if len(txt) < 120:
+        s -= 1
+    return s
 def extract_ticker_paragraphs(
     *,
     body_text: str,
@@ -225,6 +307,7 @@ def extract_ticker_paragraphs(
     company_name: str = "",
     aliases: Optional[List[str]] = None,
     min_chars: int = 80,
+    max_units: int = 6,
 ) -> List[str]:
     """Return ONLY paragraphs that credibly mention the ticker (and/or company context).
 
@@ -239,7 +322,7 @@ def extract_ticker_paragraphs(
     if not t:
         return []
 
-    body = _normalize_text(body_text)
+    body = _normalize_text(_clean_substack_text(body_text))
     if not body:
         return []
 
@@ -350,7 +433,7 @@ def extract_ticker_paragraphs(
         suppress_phrases.append(re.compile(r"\bglpi\b.*\b(it|helpdesk|service\s*desk|asset)\b", re.IGNORECASE))
 
     paras = _split_paragraphs(body)
-    kept: List[str] = []
+    scored: List[Tuple[int, str]] = []
     ambiguous = _is_ambiguous_ticker(t)
 
     def _has_company_ctx(txt: str) -> bool:
@@ -386,6 +469,11 @@ def extract_ticker_paragraphs(
             if (not has_strong) and (not has_company) and (not real_content.search(txt)):
                 return False
 
+
+        # Promo/calendar heavy blocks are rarely useful unless strongly anchored.
+        if (_PROMO_NOISE.search(txt) or _EVENT_BULLET.search(txt)) and (not has_strong) and (not real_content.search(txt)):
+            return False
+
         if ambiguous:
             # Ambiguous: must be finance-anchored OR (ticker + company context).
             return has_strong or (has_weak and has_company)
@@ -419,11 +507,23 @@ def extract_ticker_paragraphs(
 
             clipped = " ".join(sents[i] for i in sorted(idx_set)).strip()
             if len(clipped) >= int(min_chars):
-                kept.append(clipped)
+                scored.append((_score_text_unit(clipped), clipped))
         else:
-            kept.append(p)
+            scored.append((_score_text_unit(p), p))
 
-    return kept
+    # Deduplicate (case/space-insensitive) and keep top-scoring units.
+    seen_norm: set[str] = set()
+    uniq: List[Tuple[int, str]] = []
+    for sc, txt in sorted(scored, key=lambda x: x[0], reverse=True):
+        norm = re.sub(r"\s+", " ", (txt or "").strip().lower())
+        if not norm or norm in seen_norm:
+            continue
+        seen_norm.add(norm)
+        uniq.append((sc, txt.strip()))
+        if len(uniq) >= max(1, int(max_units)):
+            break
+    return [t for _, t in uniq]
+
 
 
 def _extract_posts_from_search(payload: Any) -> List[Dict[str, Any]]:
@@ -776,8 +876,15 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
             ticker=ticker,
             company_name=company_name,
             aliases=aliases,
+            min_chars=100,
+            max_units=6,
         )
         if not hit_paras:
+            continue
+
+        # Minimum-context rule: drop single shallow mentions
+        # Keep if we have >=2 hit units OR one substantial unit.
+        if len(hit_paras) == 1 and len(hit_paras[0]) < 220:
             continue
 
         # Provide a short excerpt for UI expanders (first few hit paragraphs only).
