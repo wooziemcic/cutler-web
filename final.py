@@ -2645,8 +2645,10 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
                 if meta_lines:
                     header = (header + "\n" if header else "") + "\n".join(meta_lines)
 
+                header_added = False
                 if header:
                     items.append({"text": header, "pages": [], "is_header": True})
+                header_added = True
                 # Paragraph-only extraction: include ONLY paragraphs that credibly mention the ticker.
                 # Always run a second-pass filter/rerank at render time to avoid low-signal upstream
                 # hit_paragraphs (event calendars, tag blocks, leaderboards, etc.).
@@ -2715,6 +2717,11 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
                     cleaned_paras.append(_t)
 
                 paras = cleaned_paras
+                # Skip empty posts (no qualifying paragraphs after filters)
+                if not paras:
+                    if header_added and items and items[-1].get('is_header'):
+                        items.pop()
+                    continue
                 kept = 0
                 for para in paras:
                     if kept >= max_paras_per_post:
@@ -2723,19 +2730,25 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
                         continue
                     items.append({"text": para, "pages": []})
                     kept += 1
+                if kept == 0:
+                    if header_added and items and items[-1].get('is_header'):
+                        items.pop()
+                    continue
 
             if items:
                 trimmed: list[dict] = []
                 body_count = 0
                 for it in items:
-                    if it.get("is_header"):
+                    if it.get('is_header'):
                         trimmed.append(it)
                         continue
                     if body_count >= max_paras_per_ticker:
                         break
                     trimmed.append(it)
                     body_count += 1
-                combined[sym] = trimmed
+                # Only include tickers that contributed at least one body paragraph
+                if body_count > 0:
+                    combined[sym] = trimmed
         except Exception:
             pass
 
