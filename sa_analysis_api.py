@@ -13,8 +13,7 @@ import os
 import logging
 from datetime import datetime, timezone, timedelta, date
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
-
+from typing import List, Optional, Tuple, Any, Dict
 import requests
 from dotenv import load_dotenv
 import openai
@@ -83,6 +82,11 @@ class AnalysisArticle:
     # Optional author fields (may be blank depending on API payload / plan)
     author_name: str = ""
     author_slug: str = ""
+
+    # Optional author credibility signals (may be blank depending on API payload / plan)
+    author_followers: Optional[int] = None
+    author_rating: Optional[float] = None
+    author_articles_count: Optional[int] = None
 
     # Filled after get-details
     body_html: Optional[str] = None
@@ -329,6 +333,91 @@ def fetch_author_details(author_slug: str) -> dict:
         return {}
 
 
+# -------------------------------------------------------------------
+#  Author enrichment (followers / rating / etc.)
+# -------------------------------------------------------------------
+
+def _extract_author_attributes(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize the authors/get-details payload into an attributes dict.
+
+    Handles variants where payload["data"] is a dict or a single-item list.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    data = payload.get("data")
+    main = None
+    if isinstance(data, list) and data:
+        main = data[0]
+    elif isinstance(data, dict):
+        main = data
+    if not isinstance(main, dict):
+        return {}
+    attrs = main.get("attributes") or {}
+    return attrs if isinstance(attrs, dict) else {}
+
+
+def _parse_author_metrics(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort mapping for common metric keys.
+
+    RapidAPI payloads can differ by version/plan. We probe several candidate keys.
+    """
+    attrs = _extract_author_attributes(payload)
+
+    def pick_int(*keys: str) -> Optional[int]:
+        for k in keys:
+            v = attrs.get(k)
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                return int(v)
+        return None
+
+    def pick_float(*keys: str) -> Optional[float]:
+        for k in keys:
+            v = attrs.get(k)
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                return float(v)
+        return None
+
+    return {
+        "author_followers": pick_int(
+            "followersCount", "followerCount", "followers", "followers_count", "numFollowers"
+        ),
+        "author_articles_count": pick_int(
+            "articlesCount", "articleCount", "postsCount", "contributionsCount"
+        ),
+        "author_rating": pick_float(
+            "rating", "authorRating", "contributorRating", "score", "authorScore"
+        ),
+    }
+
+
+def enrich_articles_with_author_metrics(articles: List[AnalysisArticle]) -> List[AnalysisArticle]:
+    """Populate author_* metrics for each article based on author_slug.
+
+    Uses an in-memory cache per run to avoid repeated calls.
+    """
+    cache: Dict[str, Dict[str, Any]] = {}
+
+    for art in articles:
+        slug = (art.author_slug or "").strip()
+        if not slug:
+            continue
+
+        if slug not in cache:
+            payload = fetch_author_details(slug)
+            cache[slug] = _parse_author_metrics(payload)
+
+        metrics = cache.get(slug) or {}
+        art.author_followers = metrics.get("author_followers")
+        art.author_rating = metrics.get("author_rating")
+        art.author_articles_count = metrics.get("author_articles_count")
+
+    return articles
+
+
 def build_sa_analysis_digest(
     symbol: str,
     articles: List[AnalysisArticle],
@@ -429,6 +518,13 @@ def analyse_symbol_with_digest(
     Returns (articles, digest_text)
     """
     articles = fetch_analysis_list(symbol, size=list_size)
+
+    # Enrich with author credibility signals (followers / rating / etc.)
+    try:
+        articles = enrich_articles_with_author_metrics(articles)
+    except Exception:
+        pass
+
 
     # Pre-fill body_html for a few of the top ones to avoid repeat calls later
     for art in articles[:4]:
