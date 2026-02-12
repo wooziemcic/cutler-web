@@ -364,10 +364,6 @@ def _sa_article_row_basic(a) -> dict:
                 or a.get("authorSlug")
                 or ""
             ),
-            "author_slug": a.get("author_slug") or a.get("authorSlug") or "",
-            "author_followers": a.get("author_followers") or a.get("followers") or a.get("followersCount"),
-            "author_rating": a.get("author_rating") or a.get("rating") or a.get("authorRating"),
-            "author_articles_count": a.get("author_articles_count") or a.get("articlesCount") or a.get("articleCount"),
         }
 
     # object-like (dataclass or similar)
@@ -390,10 +386,6 @@ def _sa_article_row_basic(a) -> dict:
             or getattr(a, "authorSlug", "")
             or ""
         ),
-        "author_slug": str(getattr(a, "author_slug", "") or getattr(a, "authorSlug", "") or ""),
-        "author_followers": getattr(a, "author_followers", None),
-        "author_rating": getattr(a, "author_rating", None),
-        "author_articles_count": getattr(a, "author_articles_count", None),
     }
 
 def _extract_sa_details_fields(details: dict) -> tuple[str, str, str, str]:
@@ -444,6 +436,38 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
                         raw_list = sa_api.enrich_articles_with_author_metrics(raw_list)
                 except Exception:
                     pass
+                _sa_metrics_by_id = {}
+                try:
+                    for _art in raw_list or []:
+                        _aid = str(getattr(_art, "id", "") or "")
+                        if not _aid:
+                            continue
+                        _sa_metrics_by_id[_aid] = {
+                            "followers": getattr(_art, "author_followers", None),
+                            "rating": getattr(_art, "author_rating", None),
+                            "articles": getattr(_art, "author_articles_count", None),
+                        }
+                except Exception:
+                    _sa_metrics_by_id = {}
+                # Enrich with author credibility signals (followers / rating / etc.)
+                try:
+                    if hasattr(sa_api, "enrich_articles_with_author_metrics"):
+                        raw_list = sa_api.enrich_articles_with_author_metrics(raw_list)
+                except Exception:
+                    pass
+                _sa_metrics_by_id = {}
+                try:
+                    for _art in raw_list or []:
+                        _aid = str(getattr(_art, "id", "") or "")
+                        if not _aid:
+                            continue
+                        _sa_metrics_by_id[_aid] = {
+                            "followers": getattr(_art, "author_followers", None),
+                            "rating": getattr(_art, "author_rating", None),
+                            "articles": getattr(_art, "author_articles_count", None),
+                        }
+                except Exception:
+                    _sa_metrics_by_id = {}
                 rows = [_sa_article_row_basic(x) for x in raw_list]
                 rows = [r for r in rows if r.get("id")]
 
@@ -496,10 +520,14 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
                     if url:
                         meta_lines.append(f"Source: {url}")
                     # Credibility line (best-effort)
+                    try:
+                        _m = _sa_metrics_by_id.get(str(a.get("id") or ""), {})
+                    except Exception:
+                        _m = {}
                     cred_parts = []
-                    af = a.get("author_followers")
-                    ar = a.get("author_rating")
-                    ac = a.get("author_articles_count")
+                    af = _m.get("followers")
+                    ar = _m.get("rating")
+                    ac = _m.get("articles")
                     try:
                         if isinstance(af, (int, float)):
                             cred_parts.append(f"{int(af):,} followers")
@@ -1073,22 +1101,123 @@ def _build_compiled_filename(batch: str, *, incremental: bool = False, dt: Optio
     suffix = "Incremental Excerpt" if incremental else "Excerpt"
     return f"{date_str} {batch} {suffix}.pdf"
 
+# ---------- Batch-level ticker index (Fund Families compiled PDFs) ----------
+def _collect_hit_tickers_from_excerpts_json(path: Path) -> List[str]:
+    """Return tickers (keys) that have at least one kept excerpt."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: List[str] = []
+    for tkr, items in data.items():
+        try:
+            if items and isinstance(items, list):
+                out.append(str(tkr).strip())
+        except Exception:
+            continue
+    return [t for t in out if t]
+
+
+def _batch_hit_tickers_in_order(collected_pdfs: List[Path]) -> List[str]:
+    """
+    Collect hit tickers across a batch (first-appearance order) by reading the
+    sibling excerpts_clean.json next to each excerpted PDF.
+    """
+    seen = set()
+    ordered: List[str] = []
+    for pdf_path in collected_pdfs:
+        j = pdf_path.parent / "excerpts_clean.json"
+        if not j.exists():
+            # fallback for older layouts
+            j = pdf_path.parent / "excerpts.json"
+        if not j.exists():
+            continue
+        for t in _collect_hit_tickers_from_excerpts_json(j):
+            if t not in seen:
+                seen.add(t)
+                ordered.append(t)
+    return ordered
+
+
+def _build_batch_index_pdf(*, tickers_in_doc: List[str], out_pdf: Path, label: str) -> Optional[Path]:
+    """Render a 1+ page index PDF listing all hit tickers in the compiled batch."""
+    if not tickers_in_doc:
+        return None
+    try:
+        # Local import to keep global imports minimal in Streamlit
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.platypus import SimpleDocTemplate
+
+        name_map = {}
+        try:
+            # Reuse make_pdf's ticker display-name loader (reads tickers.py if present)
+            name_map = make_pdf._load_ticker_display_names(Path(".").resolve())  # type: ignore[attr-defined]
+        except Exception:
+            name_map = {}
+
+        doc = SimpleDocTemplate(
+            str(out_pdf),
+            pagesize=LETTER,
+            leftMargin=0.75 * 72,
+            rightMargin=0.75 * 72,
+            topMargin=0.75 * 72,
+            bottomMargin=0.75 * 72,
+        )
+        story: List[Any] = []
+        # Reuse make_pdf's index renderer for identical look-and-feel.
+        make_pdf._render_index_page(  # type: ignore[attr-defined]
+            story,
+            tickers_in_doc=tickers_in_doc,
+            name_map=name_map,
+            label=label,
+        )
+        doc.build(story)
+        return out_pdf if out_pdf.exists() else None
+    except Exception:
+        traceback.print_exc()
+        return None
 
 def compile_merged(batch: str, quarter: str, collected: List[Path], *, incremental: bool = False) -> Optional[Path]:
     if not collected:
         return None
 
     # File name now matches your convention:
-    #   BatchN_YYYY-MM-DD_Excerpt.pdf
-    #   BatchN_YYYY-MM-DD_Incremental_Excerpt.pdf
+    #   12.8.25 Batch 1 Excerpt.pdf
+    #   12.8.25 Batch 1 Incremental Excerpt.pdf
     out_name = _build_compiled_filename(batch, incremental=incremental)
     out = CP_DIR / out_name
 
     m = PdfMerger()
     added = 0
+
+    # --- NEW: prepend a batch-level ticker index page (Fund Families) ---
+    try:
+        tickers_in_doc = _batch_hit_tickers_in_order(collected)
+        if tickers_in_doc:
+            idx_pdf = CP_DIR / f"_{_safe(batch.replace('—', '-').replace('  ', ' ').strip())}_{quarter}_Index.pdf"
+            built = _build_batch_index_pdf(
+                tickers_in_doc=tickers_in_doc,
+                out_pdf=idx_pdf,
+                label="Index — Hit Tickers",
+            )
+            if built and built.exists():
+                stamped_idx = _stamp_pdf(
+                    built,
+                    left=batch,
+                    mid="Index — Hit Tickers",
+                    right=f"Run {_now_et():%Y-%m-%d %H:%M} ET",
+                )
+                m.append(str(stamped_idx))
+                added += 1
+    except Exception:
+        # Index is best-effort; compilation should still succeed without it.
+        pass
+
     for p in collected:
         try:
-            title = p.stem.replace('_', ' ').replace('-', ' ')
+            title = p.stem.replace("_", " ").replace("-", " ")
             stamped = _stamp_pdf(
                 p,
                 left=batch,
@@ -1110,7 +1239,6 @@ def compile_merged(batch: str, quarter: str, collected: List[Path], *, increment
         m.close()
 
     return out
-
 
 # -------------------------------------------------------------------
 # Seeking Alpha Analysis API helpers (RapidAPI)
@@ -1614,9 +1742,6 @@ def draw_seeking_alpha_news_section() -> None:
                     "published_at": a.get("published_at") or a.get("published") or a.get("date") or "",
                     "author": a.get("author") or a.get("author_name") or a.get("authorName") or "",
                     "author_slug": a.get("author_slug") or a.get("authorSlug") or "",
-                    "author_followers": a.get("author_followers") or a.get("followers") or a.get("followersCount"),
-                    "author_rating": a.get("author_rating") or a.get("rating") or a.get("authorRating"),
-                    "author_articles_count": a.get("author_articles_count") or a.get("articlesCount") or a.get("articleCount"),
                 }
             if isinstance(a, (str, int)):
                 return {"id": str(a)}
@@ -2033,6 +2158,19 @@ def draw_seeking_alpha_news_section() -> None:
                                     raw_list = sa_api.enrich_articles_with_author_metrics(raw_list or [])
                             except Exception:
                                 pass
+                            _sa_metrics_by_id = {}
+                            try:
+                                for _art in raw_list or []:
+                                    _aid = str(getattr(_art, "id", "") or "")
+                                    if not _aid:
+                                        continue
+                                    _sa_metrics_by_id[_aid] = {
+                                        "followers": getattr(_art, "author_followers", None),
+                                        "rating": getattr(_art, "author_rating", None),
+                                        "articles": getattr(_art, "author_articles_count", None),
+                                    }
+                            except Exception:
+                                _sa_metrics_by_id = {}
                             rows = [_sa_article_row(x) for x in (raw_list or [])]
                             rows = [r for r in rows if r.get("id")]
 
@@ -2098,10 +2236,41 @@ def draw_seeking_alpha_news_section() -> None:
                             header = f"{header}\nSource: {url}" if header else f"Source: {url}"
 
                         # Credibility line (best-effort)
+                        try:
+                            _m = _sa_metrics_by_id.get(str(a.get("id") or ""), {})
+                        except Exception:
+                            _m = {}
                         cred_parts = []
-                        af = a.get("author_followers")
-                        ar = a.get("author_rating")
-                        ac = a.get("author_articles_count")
+                        af = _m.get("followers")
+                        ar = _m.get("rating")
+                        ac = _m.get("articles")
+                        try:
+                            if isinstance(af, (int, float)):
+                                cred_parts.append(f"{int(af):,} followers")
+                        except Exception:
+                            pass
+                        try:
+                            if isinstance(ar, (int, float)):
+                                cred_parts.append(f"{float(ar):.1f} rating")
+                        except Exception:
+                            pass
+                        try:
+                            if isinstance(ac, (int, float)):
+                                cred_parts.append(f"{int(ac):,} articles")
+                        except Exception:
+                            pass
+                        if cred_parts:
+                            header = f"{header}\nCredibility: " + " | ".join(cred_parts) if header else "Credibility: " + " | ".join(cred_parts)
+
+                        # Credibility line (best-effort)
+                        try:
+                            _m = _sa_metrics_by_id.get(str(a.get("id") or ""), {})
+                        except Exception:
+                            _m = {}
+                        cred_parts = []
+                        af = _m.get("followers")
+                        ar = _m.get("rating")
+                        ac = _m.get("articles")
                         try:
                             if isinstance(af, (int, float)):
                                 cred_parts.append(f"{int(af):,} followers")
@@ -3910,7 +4079,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 # ---------- NEW: incremental per-batch updater ----------
 
 
-def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_word: bool):
+def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_word: bool, *, ensure_compiled_index: bool = False):
     """
     Batch 8 — Latest:
     - Ignore quarter selection; scan the BSD database table for anything published within the last N days.
@@ -3976,6 +4145,32 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
 
     # cache reuse (session-only)
     if cache_entry and cache_entry.get("lookback_days") == lookback_days:
+        # In Run All, we want to ensure the compiled PDF includes the ticker index page.
+        # If results are cached, we can rebuild the compiled PDF from the already-produced excerpt PDFs
+        # without re-scraping any websites.
+        if ensure_compiled_index:
+            try:
+                by_q = cache_entry.get("by_quarter") or {}
+                for q, qd in (by_q or {}).items():
+                    manifest_items = (qd or {}).get("manifest_items") or []
+                    excerpt_pdfs = []
+                    for row in manifest_items:
+                        ep = row.get("excerpt_pdf") or ""
+                        if ep:
+                            p = Path(ep)
+                            if p.exists():
+                                excerpt_pdfs.append(p)
+                    if excerpt_pdfs:
+                        compiled = compile_merged(BATCH8_NAME, q, excerpt_pdfs, incremental=False)
+                        if compiled:
+                            (qd or {})["compiled"] = str(compiled)
+                cache_entry["by_quarter"] = by_q
+                cache_all = st.session_state.get("batch_cache", {}) or {}
+                cache_all[cache_key] = cache_entry
+                st.session_state["batch_cache"] = cache_all
+            except Exception:
+                pass
+
         st.info("Using cached results for this latest run in this session (no new scraping).")
         _render_latest_results(cache_entry.get("by_quarter") or {})
         return
@@ -4848,7 +5043,7 @@ def main():
                 # NOTE: Do not wrap Fund Families in st.status(expanded=True) because Fund Families uses expanders internally.
                 st.info(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
                 quarter_options = get_available_quarters()
-                run_batch8_latest(quarter_options, days, use_first_word)
+                run_batch8_latest(quarter_options, days, use_first_word, ensure_compiled_index=True)
                 cache_all = st.session_state.get("batch_cache", {}) or {}
                 cache_key = f"{BATCH8_NAME}|{days}d"
                 by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
