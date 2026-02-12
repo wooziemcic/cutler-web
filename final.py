@@ -1037,22 +1037,123 @@ def _build_compiled_filename(batch: str, *, incremental: bool = False, dt: Optio
     suffix = "Incremental Excerpt" if incremental else "Excerpt"
     return f"{date_str} {batch} {suffix}.pdf"
 
+# ---------- Batch-level ticker index (Fund Families compiled PDFs) ----------
+def _collect_hit_tickers_from_excerpts_json(path: Path) -> List[str]:
+    """Return tickers (keys) that have at least one kept excerpt."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: List[str] = []
+    for tkr, items in data.items():
+        try:
+            if items and isinstance(items, list):
+                out.append(str(tkr).strip())
+        except Exception:
+            continue
+    return [t for t in out if t]
+
+
+def _batch_hit_tickers_in_order(collected_pdfs: List[Path]) -> List[str]:
+    """
+    Collect hit tickers across a batch (first-appearance order) by reading the
+    sibling excerpts_clean.json next to each excerpted PDF.
+    """
+    seen = set()
+    ordered: List[str] = []
+    for pdf_path in collected_pdfs:
+        j = pdf_path.parent / "excerpts_clean.json"
+        if not j.exists():
+            # fallback for older layouts
+            j = pdf_path.parent / "excerpts.json"
+        if not j.exists():
+            continue
+        for t in _collect_hit_tickers_from_excerpts_json(j):
+            if t not in seen:
+                seen.add(t)
+                ordered.append(t)
+    return ordered
+
+
+def _build_batch_index_pdf(*, tickers_in_doc: List[str], out_pdf: Path, label: str) -> Optional[Path]:
+    """Render a 1+ page index PDF listing all hit tickers in the compiled batch."""
+    if not tickers_in_doc:
+        return None
+    try:
+        # Local import to keep global imports minimal in Streamlit
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.platypus import SimpleDocTemplate
+
+        name_map = {}
+        try:
+            # Reuse make_pdf's ticker display-name loader (reads tickers.py if present)
+            name_map = make_pdf._load_ticker_display_names(Path(".").resolve())  # type: ignore[attr-defined]
+        except Exception:
+            name_map = {}
+
+        doc = SimpleDocTemplate(
+            str(out_pdf),
+            pagesize=LETTER,
+            leftMargin=0.75 * 72,
+            rightMargin=0.75 * 72,
+            topMargin=0.75 * 72,
+            bottomMargin=0.75 * 72,
+        )
+        story: List[Any] = []
+        # Reuse make_pdf's index renderer for identical look-and-feel.
+        make_pdf._render_index_page(  # type: ignore[attr-defined]
+            story,
+            tickers_in_doc=tickers_in_doc,
+            name_map=name_map,
+            label=label,
+        )
+        doc.build(story)
+        return out_pdf if out_pdf.exists() else None
+    except Exception:
+        traceback.print_exc()
+        return None
 
 def compile_merged(batch: str, quarter: str, collected: List[Path], *, incremental: bool = False) -> Optional[Path]:
     if not collected:
         return None
 
     # File name now matches your convention:
-    #   BatchN_YYYY-MM-DD_Excerpt.pdf
-    #   BatchN_YYYY-MM-DD_Incremental_Excerpt.pdf
+    #   12.8.25 Batch 1 Excerpt.pdf
+    #   12.8.25 Batch 1 Incremental Excerpt.pdf
     out_name = _build_compiled_filename(batch, incremental=incremental)
     out = CP_DIR / out_name
 
     m = PdfMerger()
     added = 0
+
+    # --- NEW: prepend a batch-level ticker index page (Fund Families) ---
+    try:
+        tickers_in_doc = _batch_hit_tickers_in_order(collected)
+        if tickers_in_doc:
+            idx_pdf = CP_DIR / f"_{_safe(batch.replace('—', '-').replace('  ', ' ').strip())}_{quarter}_Index.pdf"
+            built = _build_batch_index_pdf(
+                tickers_in_doc=tickers_in_doc,
+                out_pdf=idx_pdf,
+                label="Index — Hit Tickers",
+            )
+            if built and built.exists():
+                stamped_idx = _stamp_pdf(
+                    built,
+                    left=batch,
+                    mid="Index — Hit Tickers",
+                    right=f"Run {_now_et():%Y-%m-%d %H:%M} ET",
+                )
+                m.append(str(stamped_idx))
+                added += 1
+    except Exception:
+        # Index is best-effort; compilation should still succeed without it.
+        pass
+
     for p in collected:
         try:
-            title = p.stem.replace('_', ' ').replace('-', ' ')
+            title = p.stem.replace("_", " ").replace("-", " ")
             stamped = _stamp_pdf(
                 p,
                 left=batch,
@@ -1074,7 +1175,6 @@ def compile_merged(batch: str, quarter: str, collected: List[Path], *, increment
         m.close()
 
     return out
-
 
 # -------------------------------------------------------------------
 # Seeking Alpha Analysis API helpers (RapidAPI)
