@@ -3106,6 +3106,116 @@ def run_podcast_pipeline_from_ui(
         "insights_stdout": insights_proc.stdout,
     }
 
+# -------------------------------------------------------------------
+#  Podcast Run-All helpers (merge group outputs + avoid long blocking runs)
+# -------------------------------------------------------------------
+
+def _load_json_safe(path: Path, default):
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+    return default
+
+
+def _save_json_safe(path: Path, payload) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        # Best-effort persistence; do not fail the run.
+        return
+
+
+def _merge_podcast_excerpts_dict(dest: dict, src: dict) -> dict:
+    """Merge excerpt dicts of the form {ticker: [snips...], '_episodes': [...]}"""
+    if not isinstance(dest, dict):
+        dest = {}
+    if not isinstance(src, dict):
+        return dest
+
+    # merge episodes
+    eps_dest = dest.get("_episodes") if isinstance(dest.get("_episodes"), list) else []
+    eps_src = src.get("_episodes") if isinstance(src.get("_episodes"), list) else []
+    seen_ep = set()
+    merged_eps = []
+    for e in (eps_dest + eps_src):
+        if not isinstance(e, dict):
+            continue
+        # prefer stable identifiers if present
+        key = (
+            str(e.get("episode_id") or e.get("id") or "")
+            + "|"
+            + str(e.get("podcast_id") or "")
+            + "|"
+            + str(e.get("url") or e.get("link") or "")
+        ).strip("|")
+        if not key or key in seen_ep:
+            continue
+        seen_ep.add(key)
+        merged_eps.append(e)
+    if merged_eps:
+        dest["_episodes"] = merged_eps
+
+    # merge tickers
+    for k, v in src.items():
+        if k == "_episodes":
+            continue
+        if not isinstance(v, list):
+            continue
+        cur = dest.get(k)
+        if not isinstance(cur, list):
+            cur = []
+        # simple dedupe by normalized string form
+        seen = set()
+        merged = []
+        for item in (cur + v):
+            s = None
+            if isinstance(item, str):
+                s = item.strip()
+            elif isinstance(item, dict):
+                s = json.dumps(item, sort_keys=True, ensure_ascii=False)
+            if not s:
+                continue
+            if s in seen:
+                continue
+            seen.add(s)
+            merged.append(item)
+        if merged:
+            dest[k] = merged
+    return dest
+
+
+def _merge_podcast_insights_list(dest, src):
+    """Merge insights lists (list[dict]) via stable JSON string dedupe."""
+    if not isinstance(dest, list):
+        dest = []
+    if not isinstance(src, list):
+        return dest
+    seen = set()
+    out = []
+    for item in (dest + src):
+        if not isinstance(item, dict):
+            continue
+        key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _podcast_run_all_group_ids(n_groups: int = 9) -> list[list[str]]:
+    """Return podcast_id groups similar to the Podcast tab grouping."""
+    try:
+        groups = build_podcast_groups(n_groups=n_groups)
+        return [list(v or []) for _, v in groups.items()]
+    except Exception:
+        return []
+
+
+
 def draw_podcast_intelligence_section():
     st.subheader("Podcast Intelligence – Company mentions across finance podcasts")
 
@@ -5172,37 +5282,137 @@ def main():
             if step == "podcasts":
                 days_back = int(cfg.get("podcast_lookback_days", cfg.get("mf_lookback_days", 2)))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
-                with st.status(f"Run All: Podcasts — building compiled PDF (last {days_back} days)", expanded=True):
-                    # Run the existing podcast pipeline (subprocess-based) for ALL configured podcasts
+
+                # Run podcasts in small groups to avoid long blocking runs in Streamlit.
+                run_dir = BASE / "Podcasts" / "_run_all"
+                run_dir.mkdir(parents=True, exist_ok=True)
+
+                pr = ra_state.get("podcasts_runall") or {}
+                if not isinstance(pr, dict):
+                    pr = {}
+                group_index = int(pr.get("group_index", 0))
+
+                # Prefer the same grouping logic used in the Podcast tab (9 buckets).
+                groups = _podcast_run_all_group_ids(n_groups=9)
+                if not groups:
+                    # Fallback: single group from podcasts_config
                     try:
                         from podcasts_config import PODCASTS as _PODCASTS  # type: ignore
-                        podcast_ids = []
+                        fallback_ids = []
                         for p in (_PODCASTS or []):
                             pid = getattr(p, "podcast_id", None) or getattr(p, "id", None) or getattr(p, "pod_id", None)
                             if pid:
-                                podcast_ids.append(str(pid))
+                                fallback_ids.append(str(pid))
+                        groups = [fallback_ids] if fallback_ids else []
                     except Exception:
-                        podcast_ids = []
-                    if not podcast_ids:
-                        st.warning("No podcast IDs found in podcasts_config.py; skipping podcasts.")
-                        out_pdf = None
-                    else:
-                        run_dir = BASE / "Podcasts" / "_run_all"
-                        podcasts_root = run_dir / "transcripts"
+                        groups = []
+
+                total_groups = len(groups)
+
+                # Persistent checkpointing for Run All podcasts (survives reloads/timeouts)
+                ckpt_path = (BASE / "Podcasts" / "runall_podcasts_state.json")
+                run_sig = {
+                    "date": str(_now_et().date()),
+                    "days_back": days_back,
+                    "model_name": model_name,
+                    "total_groups": total_groups,
+                }
+                ckpt = _load_json_safe(ckpt_path, {})
+                if not isinstance(ckpt, dict):
+                    ckpt = {}
+                # If the signature changed (new day/params), reset checkpoint.
+                if ckpt.get("sig") != run_sig:
+                    ckpt = {"sig": run_sig, "completed_groups": []}
+                    _save_json_safe(ckpt_path, ckpt)
+
+                completed_groups = ckpt.get("completed_groups") or []
+                if not isinstance(completed_groups, list):
+                    completed_groups = []
+                completed_set = {int(x) for x in completed_groups if str(x).isdigit()}
+                # Resume from first incomplete group, regardless of session_state value.
+                for gi in range(total_groups):
+                    if gi not in completed_set:
+                        group_index = gi
+                        break
+                else:
+                    group_index = total_groups
+
+
+                if not groups or total_groups == 0:
+                    st.warning("No podcast IDs found; skipping podcasts.")
+                    out_pdf = None
+                else:
+                    # Process one group per rerun for stability
+                    if group_index < total_groups:
+                        with st.status(
+                            f"Run All: Podcasts — processing group {group_index + 1}/{total_groups} (last {days_back} days)",
+                            expanded=True,
+                        ):
+                            podcast_ids = groups[group_index] or []
+                            if not podcast_ids:
+                                st.info("Empty podcast group; skipping.")
+                            else:
+                                group_dir = run_dir / f"g{group_index + 1:02d}"
+                                podcasts_root = group_dir / "transcripts"
+                                excerpts_path = group_dir / "podcast_excerpts.json"
+                                insights_path = group_dir / "podcast_insights.json"
+                                group_dir.mkdir(parents=True, exist_ok=True)
+
+                                _ = run_podcast_pipeline_from_ui(
+                                    days_back=days_back,
+                                    podcast_ids=podcast_ids,
+                                    podcasts_root=podcasts_root,
+                                    excerpts_path=excerpts_path,
+                                    insights_path=insights_path,
+                                    model_name=model_name,
+                                )
+
+                        # Mark this group completed and persist progress
+                        try:
+                            ckpt = _load_json_safe(ckpt_path, {})
+                            if not isinstance(ckpt, dict):
+                                ckpt = {"sig": run_sig, "completed_groups": []}
+                            cg = ckpt.get("completed_groups") or []
+                            if not isinstance(cg, list):
+                                cg = []
+                            if group_index not in cg:
+                                cg.append(group_index)
+                            ckpt["sig"] = run_sig
+                            ckpt["completed_groups"] = cg
+                            _save_json_safe(ckpt_path, ckpt)
+                        except Exception:
+                            pass
+
+                        pr["group_index"] = group_index + 1
+                        pr["total_groups"] = total_groups
+                        ra_state["podcasts_runall"] = pr
+                        _save_run_all_state(ra_state)
+                        st.rerun()
+
+                    # All groups done -> merge and build final PDF once
+                    with st.status(
+                        f"Run All: Podcasts — merging groups and building compiled PDF (last {days_back} days)",
+                        expanded=True,
+                    ):
+                        merged_excerpts: dict = {}
+                        merged_insights = []
+
+                        for gi in range(total_groups):
+                            group_dir = run_dir / f"g{gi + 1:02d}"
+                            ep = group_dir / "podcast_excerpts.json"
+                            ip = group_dir / "podcast_insights.json"
+                            merged_excerpts = _merge_podcast_excerpts_dict(
+                                merged_excerpts, _load_json_safe(ep, {})
+                            )
+                            merged_insights = _merge_podcast_insights_list(
+                                merged_insights, _load_json_safe(ip, [])
+                            )
+
                         excerpts_path = run_dir / "podcast_excerpts.json"
                         insights_path = run_dir / "podcast_insights.json"
-                        run_dir.mkdir(parents=True, exist_ok=True)
+                        excerpts_path.write_text(json.dumps(merged_excerpts, ensure_ascii=False, indent=2), encoding="utf-8")
+                        insights_path.write_text(json.dumps(merged_insights, ensure_ascii=False, indent=2), encoding="utf-8")
 
-                        _ = run_podcast_pipeline_from_ui(
-                            days_back=days_back,
-                            podcast_ids=podcast_ids,
-                            podcasts_root=podcasts_root,
-                            excerpts_path=excerpts_path,
-                            insights_path=insights_path,
-                            model_name=model_name,
-                        )
-
-                        # Build a single skimmable PDF across all tickers with mentions
                         now_et = _now_et()
                         out_name = f"{now_et:%m.%d.%y} Podcast ALL.pdf"
                         out_path = (BASE / "Podcasts" / out_name)
@@ -5214,14 +5424,23 @@ def main():
                             output_path=out_path,
                             days_back=days_back,
                         )
+                        # Cleanup checkpoint on successful completion
+                        try:
+                            if ckpt_path.exists():
+                                ckpt_path.unlink()
+                        except Exception:
+                            pass
 
-                    if out_pdf:
-                        ra_state.setdefault("outputs", {}).setdefault("podcasts", {})["path"] = str(out_pdf)
+
+                if out_pdf:
+                    ra_state.setdefault("outputs", {}).setdefault("podcasts", {})["path"] = str(out_pdf)
+
                 ra_state.setdefault("completed", []).append("podcasts")
                 ra_state["current_step"] = "done"
                 ra_state["status"] = "complete"
                 ra_state["completed_at"] = _now_et().isoformat()
                 _save_run_all_state(ra_state)
+                st.rerun()
         except Exception as e:
             ra_state["status"] = "error"
             ra_state["error"] = str(e)
