@@ -888,7 +888,15 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
             continue
 
         # Provide a short excerpt for UI expanders (first few hit paragraphs only).
-        excerpt = "\n\n".join(hit_paras[:3]).strip()
+        # Clean visual structure (Layer 4): numbered highlights for fast scanning.
+        excerpt_units = hit_paras[:3]
+        excerpt_lines: List[str] = []
+        for j, unit in enumerate(excerpt_units, start=1):
+            unit = (unit or '').strip()
+            if not unit:
+                continue
+            excerpt_lines.append(f"{j}. {unit}")
+        excerpt = "Key ticker mentions:\n\n" + "\n\n".join(excerpt_lines)
         if len(excerpt) > 1800:
             excerpt = excerpt[:1800].rstrip() + " …"
 
