@@ -5648,6 +5648,30 @@ def main():
 
     # Existing outputs (persisted)
     outs = ra_state.get("outputs") or {}
+
+    # Download-button helper: cache PDF bytes so reruns (e.g., while Run All is running)
+    # do not repeatedly re-read large files from disk. This prevents downloads from
+    # "stalling" other steps when the app reruns.
+    def _dl_bytes_cached(fp: Path) -> bytes:
+        try:
+            st_ = fp.stat()
+            cache_key = f"{str(fp)}::{st_.st_size}::{st_.st_mtime_ns}"
+        except Exception:
+            cache_key = str(fp)
+        cache = st.session_state.setdefault("_dl_cache_pdf_bytes", {})
+        if cache_key in cache:
+            return cache[cache_key]
+        data = fp.read_bytes()
+        # Keep cache bounded to avoid memory growth
+        if isinstance(cache, dict) and len(cache) > 8:
+            try:
+                cache.clear()
+            except Exception:
+                pass
+        cache[cache_key] = data
+        return data
+
+
     mf_paths = (outs.get("fund_families") or {}).get("paths") or []
     if mf_paths:
         st.markdown("**Fund Families outputs:**")
@@ -5657,7 +5681,7 @@ def main():
                 if fp.exists():
                     st.download_button(
                         f"Download {fp.name}",
-                        data=fp.read_bytes(),
+                        data=_dl_bytes_cached(fp),
                         file_name=fp.name,
                         mime="application/pdf",
                         key=f"ra_dl_mf_{fp.name}",
@@ -5673,7 +5697,7 @@ def main():
             if fp.exists():
                 st.download_button(
                     f"Download {fp.name}",
-                    data=fp.read_bytes(),
+                    data=_dl_bytes_cached(fp),
                     file_name=fp.name,
                     mime="application/pdf",
                     key=f"ra_dl_sa_{fp.name}",
@@ -5690,7 +5714,7 @@ def main():
             if fp.exists():
                 st.download_button(
                     f"Download {fp.name}",
-                    data=fp.read_bytes(),
+                    data=_dl_bytes_cached(fp),
                     file_name=fp.name,
                     mime="application/pdf",
                     key=f"ra_dl_sub_{fp.name}",
@@ -5706,7 +5730,7 @@ def main():
             if fp.exists():
                 st.download_button(
                     f"Download {fp.name}",
-                    data=fp.read_bytes(),
+                    data=_dl_bytes_cached(fp),
                     file_name=fp.name,
                     mime="application/pdf",
                     key=f"ra_dl_pod_{fp.name}",
