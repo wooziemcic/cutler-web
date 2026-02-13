@@ -714,6 +714,35 @@ def _build_text_pdf(
 
 
 
+
+def _podcast_name_for_id(podcast_id: str) -> str:
+    """Best-effort mapping from podcast_id to a human-readable podcast name.
+
+    Uses podcasts_config (if available). Falls back to the raw podcast_id.
+    """
+    pid = (podcast_id or "").strip()
+    if not pid:
+        return ""
+    try:
+        import podcasts_config  # type: ignore
+        candidates = []
+        for attr in ("PODCASTS", "PODCAST_LIST", "PODCAST_SOURCES"):
+            if hasattr(podcasts_config, attr):
+                candidates = getattr(podcasts_config, attr)  # type: ignore
+                break
+        if isinstance(candidates, list):
+            for row in candidates:
+                if not isinstance(row, dict):
+                    continue
+                rid = str(row.get("podcast_id") or row.get("id") or "").strip()
+                if rid and rid == pid:
+                    nm = str(row.get("name") or row.get("podcast_name") or row.get("title") or "").strip()
+                    if nm:
+                        return nm
+    except Exception:
+        pass
+    return pid
+
 def _build_podcast_all_pdf(
     *,
     excerpts_path: Path,
@@ -816,7 +845,41 @@ def _build_podcast_all_pdf(
                 if isinstance(x, str) and x.strip():
                     body_parts.append(f"- {x.strip()}")
 
-        sections.append((f"{sym} — Podcast stance", "\n".join(body_parts).strip() or "No summary available."))
+        # Evidence snippets (to validate this wasn't a false positive)
+        ev_lines: list[str] = []
+        try:
+            raw_hits = excerpts.get(sym) if isinstance(excerpts, dict) else None
+        except Exception:
+            raw_hits = None
+        if isinstance(raw_hits, list) and raw_hits:
+            ev_lines.append("")
+            ev_lines.append("Evidence snippets (top 5):")
+            shown = 0
+            for h in raw_hits:
+                if shown >= 5:
+                    break
+                if not isinstance(h, dict):
+                    continue
+                snip = str(h.get("snippet") or "").strip()
+                if not snip:
+                    continue
+                ep_title = str(h.get("title") or "").strip()
+                pid = str(h.get("podcast_id") or "").strip()
+                pname = _podcast_name_for_id(pid)
+                prefix_parts = []
+                if pname:
+                    prefix_parts.append(pname)
+                if ep_title:
+                    prefix_parts.append(ep_title)
+                prefix = " — ".join(prefix_parts).strip()
+                if prefix:
+                    ev_lines.append(f"- {prefix}: {snip}")
+                else:
+                    ev_lines.append(f"- {snip}")
+                shown += 1
+
+        body_text = "\n".join(body_parts + ev_lines).strip() or "No summary available."
+        sections.append((f"{sym} — Podcast stance", body_text))
 
     subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p ET} • {window_line.replace(chr(10),' • ')}"
     return _build_text_pdf(
@@ -2784,6 +2847,451 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
+    return out_path
+
+
+def _runall_ckpt_dir() -> Path:
+    """Directory for Run All checkpoint artifacts."""
+    d = (BASE / "outputs" / "_run_all_ckpt")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def _runall_load_json_safe(path: Path, default):
+    try:
+        if path and Path(path).exists():
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return default
+
+def _runall_write_json_safe(path: Path, obj) -> None:
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+def _sa_build_items_for_symbol(sym: str, *, max_articles: int, model: str) -> list[dict]:
+    """Build SA PDF items (headers + paragraphs) for one ticker."""
+    max_paras_per_ticker = int(st.session_state.get("sa_pdf_max_paras_per_ticker", 5000))
+    max_paras_per_article = int(st.session_state.get("sa_pdf_max_paras_per_article", 500))
+
+    raw_list = sa_api.fetch_analysis_list(sym, size=max_articles) or []
+    try:
+        if hasattr(sa_api, "enrich_articles_with_author_metrics"):
+            raw_list = sa_api.enrich_articles_with_author_metrics(raw_list)
+    except Exception:
+        pass
+
+    _sa_metrics_by_id = {}
+    try:
+        for _art in raw_list or []:
+            _aid = str(getattr(_art, "id", "") or "")
+            if not _aid:
+                continue
+            _sa_metrics_by_id[_aid] = {
+                "followers": getattr(_art, "author_followers", None),
+                "rating": getattr(_art, "author_rating", None),
+                "articles": getattr(_art, "author_articles_count", None),
+            }
+    except Exception:
+        _sa_metrics_by_id = {}
+
+    rows = [_sa_article_row_basic(x) for x in raw_list]
+    rows = [r for r in rows if r.get("id")]
+
+    for r in rows:
+        aid = r.get("id") or ""
+        if not aid:
+            continue
+        details = {}
+        try:
+            details = sa_api.fetch_analysis_details(aid) or {}
+        except Exception:
+            details = {}
+        body_raw, author_d, title_d, pub_d = _extract_sa_details_fields(details)
+
+        if "<" in (body_raw or "") and ">" in (body_raw or ""):
+            r["body_clean"] = clean_sa_html(body_raw)
+        else:
+            r["body_clean"] = (body_raw or "").strip()
+
+        if author_d and not r.get("author"):
+            r["author"] = author_d
+        if title_d and not r.get("title"):
+            r["title"] = title_d
+        if pub_d and not r.get("published_at"):
+            r["published_at"] = pub_d
+        if isinstance(details, dict) and details.get("url") and not r.get("url"):
+            r["url"] = details.get("url")
+
+    items: list[dict] = []
+    for a in rows:
+        body = (a.get("body_clean") or "").strip()
+        if not body:
+            continue
+
+        title = (a.get("title") or "").strip()
+        author = (a.get("author") or "").strip()
+        url = (a.get("url") or "").strip()
+        published = (a.get("published_at") or "").strip()
+
+        header_parts = []
+        if title:
+            header_parts.append(title)
+        if author:
+            header_parts.append(f"— {author}")
+        header = " ".join(header_parts).strip()
+
+        meta_lines = []
+        if published:
+            meta_lines.append(f"Date: {published[:10]}")
+        if url:
+            meta_lines.append(f"Source: {url}")
+
+        try:
+            _m = _sa_metrics_by_id.get(str(a.get("id") or ""), {})
+        except Exception:
+            _m = {}
+        cred_parts = []
+        af = _m.get("followers")
+        ar = _m.get("rating")
+        ac = _m.get("articles")
+        try:
+            if isinstance(af, (int, float)):
+                cred_parts.append(f"{int(af):,} followers")
+        except Exception:
+            pass
+        try:
+            if isinstance(ar, (int, float)):
+                cred_parts.append(f"{float(ar):.1f} rating")
+        except Exception:
+            pass
+        try:
+            if isinstance(ac, (int, float)):
+                cred_parts.append(f"{int(ac):,} articles")
+        except Exception:
+            pass
+        if cred_parts:
+            meta_lines.append("Credibility: " + " | ".join(cred_parts))
+
+        if meta_lines:
+            header = (header + "\n" if header else "") + "\n".join(meta_lines)
+
+        if header:
+            items.append({"text": header, "pages": [], "is_header": True})
+
+        paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+        kept = 0
+        for p in paras:
+            if kept >= max_paras_per_article:
+                break
+            if len(p) < 60:
+                continue
+            items.append({"text": p, "pages": []})
+            kept += 1
+
+    if items:
+        trimmed: list[dict] = []
+        body_count = 0
+        for it in items:
+            if it.get("is_header"):
+                trimmed.append(it)
+                continue
+            if body_count >= max_paras_per_ticker:
+                break
+            trimmed.append(it)
+            body_count += 1
+        return trimmed
+    return []
+
+def _runall_sa_step_incremental(*, universe: list[str], max_articles: int, model: str) -> Path | None:
+    """Run All SA builder in an incremental, 1-ticker-per-rerun mode."""
+    ckpt_dir = _runall_ckpt_dir()
+    ckpt_path = ckpt_dir / "sa_ckpt.json"
+    combined_path = ckpt_dir / "sa_excerpts.json"
+
+    sig = {"universe": universe, "max_articles": int(max_articles), "model": str(model)}
+    ckpt = _runall_load_json_safe(ckpt_path, {})
+    if not isinstance(ckpt, dict) or ckpt.get("sig") != sig:
+        ckpt = {"sig": sig, "idx": 0, "done": False}
+        _runall_write_json_safe(ckpt_path, ckpt)
+        _runall_write_json_safe(combined_path, {})
+
+    if ckpt.get("done"):
+        outp = str(ckpt.get("pdf_path") or "").strip()
+        if outp and Path(outp).exists():
+            return Path(outp)
+        ckpt["done"] = False
+        _runall_write_json_safe(ckpt_path, ckpt)
+
+    combined = _runall_load_json_safe(combined_path, {})
+    if not isinstance(combined, dict):
+        combined = {}
+
+    idx = int(ckpt.get("idx") or 0)
+    total = max(1, len(universe))
+    idx = max(0, min(idx, len(universe)))
+
+    st.progress(float(idx) / float(total))
+    st.caption(f"Run All: Seeking Alpha progress — {idx}/{total} tickers")
+
+    if idx < len(universe):
+        sym = universe[idx]
+        try:
+            items = _sa_build_items_for_symbol(sym, max_articles=max_articles, model=model)
+            if items:
+                combined[sym] = items
+                _runall_write_json_safe(combined_path, combined)
+        except Exception:
+            pass
+        ckpt["idx"] = idx + 1
+        _runall_write_json_safe(ckpt_path, ckpt)
+        st.rerun()
+
+    if not combined:
+        raise RuntimeError("No Seeking Alpha articles were available to export for the current universe/config.")
+
+    from zoneinfo import ZoneInfo
+    import tempfile
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    pdf_name = f"{now_et.strftime('%m.%d.%y')} Seeking Alpha ALL.pdf"
+    out_path = CP_DIR / pdf_name
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        excerpts_path = td_path / "sa_excerpts.json"
+        excerpts_path.write_text(json.dumps(combined, indent=2), encoding="utf-8")
+        out_pdf = td_path / "sa_compiled.pdf"
+        make_pdf.build_pdf(
+            excerpts_json_path=str(excerpts_path),
+            output_pdf_path=str(out_pdf),
+            report_title="Seeking Alpha Analysis",
+            source_pdf_name=pdf_name,
+            format_style="compact",
+            ai_score=True,
+            ai_model="heuristic",
+            include_index=True,
+            index_label="Index — Hit Tickers",
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(out_pdf.read_bytes())
+
+    ckpt["done"] = True
+    ckpt["pdf_path"] = str(out_path)
+    _runall_write_json_safe(ckpt_path, ckpt)
+    return out_path
+
+def _substack_build_items_for_symbol(sym: str, *, lookback_days: int, max_posts: int) -> list[dict]:
+    """Build Substack PDF items (headers + paragraphs) for one ticker."""
+    max_paras_per_ticker = int(st.session_state.get("substack_pdf_max_paras_per_ticker", 2000))
+    max_paras_per_post = int(st.session_state.get("substack_pdf_max_paras_per_post", 250))
+
+    posts = substack_excerpts.fetch_posts_for_ticker(sym, lookback_days=int(lookback_days), max_posts=int(max_posts)) or []
+    items: list[dict] = []
+    global_seen_post_ids: set[str] = set()
+
+    for p in posts:
+        pid = str(p.get("post_id") or "").strip()
+        if pid:
+            if pid in global_seen_post_ids:
+                continue
+            global_seen_post_ids.add(pid)
+
+        title = (p.get("title") or "").strip()
+        author = (p.get("author") or "").strip()
+        url = (p.get("url") or "").strip()
+        published = (p.get("published_at") or "").strip()
+        body = (p.get("body") or p.get("excerpt") or "").strip()
+
+        if not body and not title:
+            continue
+
+        header_parts = []
+        if title:
+            header_parts.append(title)
+        if author:
+            header_parts.append(f"— {author}")
+        header = " ".join(header_parts).strip()
+
+        meta_lines = []
+        if published:
+            meta_lines.append(f"Date: {published[:19]}")
+        if url:
+            meta_lines.append(f"Source: {url}")
+        if meta_lines:
+            header = (header + "\n" if header else "") + "\n".join(meta_lines)
+
+        header_added = False
+        if header:
+            items.append({"text": header, "pages": [], "is_header": True})
+            header_added = True
+
+        hit_paras = p.get("hit_paragraphs")
+        if not isinstance(hit_paras, list):
+            hit_paras = []
+
+        candidate_parts = []
+        if body:
+            candidate_parts.append(body)
+        if hit_paras:
+            candidate_parts.append("\n\n".join([str(x) for x in hit_paras if str(x).strip()]))
+
+        candidate_text = "\n\n".join([x for x in candidate_parts if x]).strip()
+
+        paras = []
+        if candidate_text:
+            try:
+                paras = substack_excerpts.extract_ticker_paragraphs(body_text=candidate_text, ticker=str(sym)) or []
+            except Exception:
+                paras = hit_paras or []
+        else:
+            paras = hit_paras or []
+
+        import re as _re
+        cleaned_paras = []
+        for _p in paras:
+            _t = str(_p).strip()
+            if not _t:
+                continue
+            _low = _t.lower()
+
+            if (
+                ("asset-types:" in _low)
+                or ("entropy:" in _low)
+                or ("staleness:" in _low)
+                or ("uncertainty:" in _low)
+                or ("sentiment:" in _low)
+            ):
+                continue
+
+            if (
+                ("subscribe" in _low)
+                or ("share" in _low)
+                or ("read original article" in _low)
+                or ("full analysis" in _low and len(_t) < 250)
+            ):
+                continue
+
+            if ("this week" in _low and "events" in _low) or (_t.count("■") + _t.count("❤") >= 4):
+                continue
+            if len(_re.findall(r"\b(?:mon|tue|wed|thu|fri|sat|sun)\b", _low)) >= 3 and "feb" in _low:
+                continue
+
+            if _t.count("$") >= 3 and (("relative volume" in _low) or ("52-week" in _low) or ("peak gain" in _low)):
+                continue
+
+            cleaned_paras.append(_t)
+
+        paras = cleaned_paras
+
+        if not paras:
+            if header_added and items and items[-1].get("is_header"):
+                items.pop()
+            continue
+
+        kept = 0
+        for para in paras:
+            if kept >= max_paras_per_post:
+                break
+            if len(para) < 60:
+                continue
+            items.append({"text": para, "pages": []})
+            kept += 1
+
+        if kept == 0 and header_added and items and items[-1].get("is_header"):
+            items.pop()
+
+    if items:
+        trimmed: list[dict] = []
+        body_count = 0
+        for it in items:
+            if it.get("is_header"):
+                trimmed.append(it)
+                continue
+            if body_count >= max_paras_per_ticker:
+                break
+            trimmed.append(it)
+            body_count += 1
+        if body_count > 0:
+            return trimmed
+    return []
+
+def _runall_substack_step_incremental(*, universe: list[str], lookback_days: int, max_posts: int) -> Path | None:
+    """Run All Substack builder in an incremental, 1-ticker-per-rerun mode."""
+    ckpt_dir = _runall_ckpt_dir()
+    ckpt_path = ckpt_dir / "substack_ckpt.json"
+    combined_path = ckpt_dir / "substack_excerpts.json"
+
+    sig = {"universe": universe, "lookback_days": int(lookback_days), "max_posts": int(max_posts)}
+    ckpt = _runall_load_json_safe(ckpt_path, {})
+    if not isinstance(ckpt, dict) or ckpt.get("sig") != sig:
+        ckpt = {"sig": sig, "idx": 0, "done": False}
+        _runall_write_json_safe(ckpt_path, ckpt)
+        _runall_write_json_safe(combined_path, {})
+
+    if ckpt.get("done"):
+        outp = str(ckpt.get("pdf_path") or "").strip()
+        if outp and Path(outp).exists():
+            return Path(outp)
+        ckpt["done"] = False
+        _runall_write_json_safe(ckpt_path, ckpt)
+
+    combined = _runall_load_json_safe(combined_path, {})
+    if not isinstance(combined, dict):
+        combined = {}
+
+    idx = int(ckpt.get("idx") or 0)
+    total = max(1, len(universe))
+    idx = max(0, min(idx, len(universe)))
+
+    st.progress(float(idx) / float(total))
+    st.caption(f"Run All: Substack progress — {idx}/{total} tickers")
+
+    if idx < len(universe):
+        sym = universe[idx]
+        try:
+            items = _substack_build_items_for_symbol(sym, lookback_days=lookback_days, max_posts=max_posts)
+            if items:
+                combined[sym] = items
+                _runall_write_json_safe(combined_path, combined)
+        except Exception:
+            pass
+        ckpt["idx"] = idx + 1
+        _runall_write_json_safe(ckpt_path, ckpt)
+        st.rerun()
+
+    from zoneinfo import ZoneInfo
+    import tempfile
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    pdf_name = f"{now_et.strftime('%m.%d.%y')} Substack ALL.pdf"
+    out_path = CP_DIR / pdf_name
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not combined:
+        combined = {"—": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        excerpts_path = td_path / "substack_excerpts.json"
+        excerpts_path.write_text(json.dumps(combined, indent=2), encoding="utf-8")
+        out_pdf = td_path / "substack_compiled.pdf"
+        make_pdf.build_pdf(
+            excerpts_json_path=str(excerpts_path),
+            output_pdf_path=str(out_pdf),
+            report_title="Substack",
+            source_pdf_name=pdf_name,
+            format_style="compact",
+            ai_score=True,
+            ai_model="heuristic",
+            include_index=True,
+            index_label="Index — Hit Tickers",
+        )
+        out_path.write_bytes(out_pdf.read_bytes())
+
+    ckpt["done"] = True
+    ckpt["pdf_path"] = str(out_path)
+    _runall_write_json_safe(ckpt_path, ckpt)
     return out_path
 
 def _substack_rerun():
@@ -5297,7 +5805,6 @@ def main():
                 max_articles = int(cfg.get("sa_max_articles", 5))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
                 with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
-                    # Build full universe from tickers.py if available; else fall back to current universe in SA section.
                     universe = []
                     try:
                         from tickers import tickers as _T  # type: ignore
@@ -5307,19 +5814,19 @@ def main():
                         universe = []
                     if not universe:
                         universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
-                    out_pdf = _build_sa_compiled_pdf_for_universe(universe=universe, max_articles=max_articles, model=model_name)
-                    ra_state.setdefault("outputs", {}).setdefault("seeking_alpha", {})["path"] = str(out_pdf)
-                ra_state.setdefault("completed", []).append("seeking_alpha")
-                ra_state["current_step"] = "substack"
-                _save_run_all_state(ra_state)
-                st.rerun()
 
+                    out_pdf = _runall_sa_step_incremental(universe=universe, max_articles=max_articles, model=model_name)
+                    if out_pdf:
+                        ra_state.setdefault("outputs", {}).setdefault("seeking_alpha", {})["path"] = str(out_pdf)
+                        ra_state.setdefault("completed", []).append("seeking_alpha")
+                        ra_state["current_step"] = "substack"
+                        _save_run_all_state(ra_state)
+                        st.rerun()
 
             if step == "substack":
                 days_back = int(cfg.get("substack_lookback_days", 2))
                 max_posts = int(cfg.get("substack_max_posts", 3))
                 with st.status(f"Run All: Substack — building compiled PDF (last {days_back} days)", expanded=True):
-                    # Use the same ticker universe logic as Seeking Alpha (Cutler tickers.py)
                     try:
                         from tickers import tickers as _T  # type: ignore
                         universe = []
@@ -5330,17 +5837,13 @@ def main():
                     if not universe:
                         universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
 
-                    out_pdf = _build_substack_compiled_pdf_for_universe(
-                        universe=universe,
-                        lookback_days=days_back,
-                        max_posts=max_posts,
-                    )
-                    ra_state.setdefault("outputs", {}).setdefault("substack", {})["path"] = str(out_pdf)
-
-                ra_state.setdefault("completed", []).append("substack")
-                ra_state["current_step"] = "podcasts"
-                _save_run_all_state(ra_state)
-                st.rerun()
+                    out_pdf = _runall_substack_step_incremental(universe=universe, lookback_days=days_back, max_posts=max_posts)
+                    if out_pdf:
+                        ra_state.setdefault("outputs", {}).setdefault("substack", {})["path"] = str(out_pdf)
+                        ra_state.setdefault("completed", []).append("substack")
+                        ra_state["current_step"] = "podcasts"
+                        _save_run_all_state(ra_state)
+                        st.rerun()
 
             if step == "podcasts":
                 # Run All podcasts lookback (days). Kept separate from the Podcast tab lookback.
