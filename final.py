@@ -3503,10 +3503,12 @@ def draw_podcast_intelligence_section():
                 # Snippet evidence
                 ev_lines: list[str] = []
                 for i, sn in enumerate(filtered_snippets[:25], 1):
-                    ep_title = sn.get("episode_title") or sn.get("episode") or ""
-                    ep_date = sn.get("published_date") or sn.get("date") or ""
+                    pod_name = sn.get("podcast_name") or sn.get("podcast") or sn.get("podcast_id") or ""
+                    ep_title = sn.get("episode_title") or sn.get("episode") or sn.get("title") or ""
+                    ep_date = sn.get("published_date") or sn.get("date") or sn.get("published") or ""
                     txt = sn.get("text") or sn.get("snippet") or ""
-                    line = f"{i}. {ep_title} ({ep_date})\n{txt}"
+                    header = f"{pod_name} — {ep_title}".strip(" —")
+                    line = f"{i}. {header} ({ep_date}){txt}"
                     ev_lines.append(line.strip())
                 sections.append(("Episode snippets (evidence)", "\n\n".join(ev_lines) if ev_lines else "No snippets available in this window."))
 
