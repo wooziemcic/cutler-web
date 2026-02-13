@@ -5343,7 +5343,9 @@ def main():
                 st.rerun()
 
             if step == "podcasts":
-                days_back = int(cfg.get("podcast_lookback_days", cfg.get("mf_lookback_days", 2)))
+                # Run All podcasts lookback (days). Kept separate from the Podcast tab lookback.
+                # Default is 2 days as requested.
+                days_back = int(cfg.get("podcast_runall_lookback_days", 2))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
 
                 # Run podcasts in small groups to avoid long blocking runs in Streamlit.
