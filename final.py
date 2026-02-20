@@ -271,6 +271,80 @@ BATCH8_NAME = "Batch 8 — Latest"  # dynamic weekly/latest mode
 
 # External data source URL (kept internal; not shown in UI)
 BSD_URL = "https://www.buysidedigest.com/hedge-fund-database/"
+
+# ---------------------- BSD login support (optional) ----------------------
+# BSD has started gating PDF downloads behind an authenticated session.
+# We do NOT hardcode credentials in code. Provide them via Streamlit secrets
+# (.streamlit/secrets.toml) or environment variables:
+#   BSD_EMAIL, BSD_PASSWORD
+#
+# Example secrets.toml:
+#   BSD_EMAIL = "you@example.com"
+#   BSD_PASSWORD = "your-password"
+#
+# This helper tries to log in once per Streamlit session, only when needed.
+
+def _get_bsd_creds() -> Tuple[Optional[str], Optional[str]]:
+    try:
+        email = (st.secrets.get("BSD_EMAIL") if hasattr(st, "secrets") else None)  # type: ignore[attr-defined]
+        pwd = (st.secrets.get("BSD_PASSWORD") if hasattr(st, "secrets") else None)  # type: ignore[attr-defined]
+    except Exception:
+        email, pwd = None, None
+
+    email = email or os.environ.get("BSD_EMAIL")
+    pwd = pwd or os.environ.get("BSD_PASSWORD")
+    return (email, pwd)
+
+
+def _bsd_login_if_needed(page) -> None:
+    # Guard: only attempt once per session unless explicitly cleared.
+    if st.session_state.get("_bsd_logged_in") is True:
+        return
+
+    email, pwd = _get_bsd_creds()
+    if not email or not pwd:
+        # No credentials configured; leave as-is (downloads may fail).
+        return
+
+    try:
+        # Many BSD installs use a WP "My Account" login.
+        # We try it, and mark logged-in if we can see a logout / account link.
+        page.goto("https://www.buysidedigest.com/my-account/", wait_until="domcontentloaded", timeout=30000)
+
+        # If already logged in, we're done.
+        if page.locator("text=Logout").count() > 0 or page.locator("a:has-text('Logout')").count() > 0:
+            st.session_state["_bsd_logged_in"] = True
+            return
+
+        # Try common WP/WooCommerce selectors.
+        user_sel = "input#username, input[name='username'], input[name='log'], input#user_login"
+        pass_sel = "input#password, input[name='password'], input[name='pwd'], input#user_pass"
+        btn_sel = "button[name='login'], button:has-text('Log in'), input[type='submit']:has-text('Log in'), input#wp-submit"
+
+        if page.locator(user_sel).count() == 0 or page.locator(pass_sel).count() == 0:
+            return  # unexpected layout; don't hard-fail
+
+        page.locator(user_sel).first.fill(email)
+        page.locator(pass_sel).first.fill(pwd)
+
+        # Click login and wait briefly.
+        if page.locator(btn_sel).count() > 0:
+            page.locator(btn_sel).first.click()
+            page.wait_for_timeout(1200)
+
+        # Heuristic: logged in if Logout appears or we left the login form.
+        if page.locator("text=Logout").count() > 0 or page.locator("a:has-text('Logout')").count() > 0:
+            st.session_state["_bsd_logged_in"] = True
+            return
+
+        # Some pages redirect back to /my-account/ with account dashboard elements.
+        if page.locator("text=Dashboard").count() > 0 and page.locator(user_sel).count() == 0:
+            st.session_state["_bsd_logged_in"] = True
+            return
+
+    except Exception:
+        # Silent fail: we'll just proceed unauthenticated.
+        return
 FILTERS = {
     "fund": "#md-fund-letter-table-fund-search",
     "quarter": "#md-fund-letter-table-select",
@@ -1033,6 +1107,8 @@ def _download_quarter_pdf_from_fund(page, quarter: str, dest_dir: Path) -> List[
        This restores the historical "download something for this fund" behavior for Batch 8 Latest.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
+    # Ensure BSD session is authenticated if credentials are configured.
+    _bsd_login_if_needed(page)
     pdfs: List[Path] = []
 
     # Normalize quarter text for fuzzy matching.
@@ -1101,15 +1177,18 @@ def _download_quarter_pdf_from_fund(page, quarter: str, dest_dir: Path) -> List[
         except Exception:
             pass
 
-        # Fallback: direct HTTP download (sometimes works even when Playwright click doesn't)
+        # Fallback: direct HTTP download via Playwright request (keeps cookies/session).
         try:
-            r = requests.get(href, timeout=20)
-            if r.status_code == 200 and r.content:
-                fname = _safe(Path(href).name or f"{quarter}.pdf")
-                path = dest_dir / fname
-                with open(path, "wb") as f:
-                    f.write(r.content)
-                pdfs.append(path)
+            ctx = page.context
+            resp = ctx.request.get(href, timeout=20000)
+            if resp and resp.ok:
+                body = resp.body()
+                if body:
+                    fname = _safe(Path(href).name or f"{quarter}.pdf")
+                    path = dest_dir / fname
+                    with open(path, "wb") as f:
+                        f.write(body)
+                    pdfs.append(path)
         except Exception:
             continue
 
