@@ -21,6 +21,7 @@ import sys
 import shutil
 import traceback
 import json
+from datetime import date
 import hashlib
 import openai
 from dataclasses import dataclass
@@ -158,6 +159,49 @@ def _mark_completed(brand: str, quarter: str) -> None:
     except Exception:
         pass
 
+
+
+def _batch8_state_path() -> Path:
+    """Persistent run-state file for Batch 8 (Latest)."""
+    return MAN_DIR / "_batch8_latest_state.json"
+
+
+def _load_batch8_state() -> Dict[str, Any]:
+    try:
+        sp = _batch8_state_path()
+        if sp.exists():
+            return json.loads(sp.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        pass
+    return {}
+
+
+def _save_batch8_state(state: Dict[str, Any]) -> None:
+    try:
+        sp = _batch8_state_path()
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _batch8_run_id(today_date: date, lookback_days: int) -> str:
+    """A stable run id for a given day + lookback window."""
+    return f"{today_date.isoformat()}|{int(lookback_days)}d"
+
+
+def _clear_batch8_progress_markers() -> None:
+    """Delete Batch 8 progress markers so a fresh run can re-download everything."""
+    try:
+        root = MAN_DIR / "_progress" / _safe(BATCH8_NAME)
+        if root.exists():
+            for fp in root.rglob("*.done"):
+                try:
+                    fp.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 def _excerpt_pdf(
     pdf_path: Path,
@@ -4865,6 +4909,24 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
     today = _today_et_date().date()
     start_date = today - timedelta(days=max(1, lookback_days) - 1)
 
+    # Batch 8 uses persistent progress markers to resume after reloads.
+    # However, once a run is complete, those markers would cause future runs to "skip" everything.
+    # We fix this by using a small persistent run-state file:
+    # - If the last run is not the current run_id OR it is not running, we clear markers and start fresh.
+    # - If it *is* running with the same run_id, we preserve markers and resume.
+    run_id = _batch8_run_id(today, lookback_days)
+    b8_state = _load_batch8_state()
+    if b8_state.get("status") == "running" and b8_state.get("run_id") == run_id:
+        st.info("Resuming Batch 8 latest run (progress preserved).")
+    else:
+        _clear_batch8_progress_markers()
+        _save_batch8_state({
+            "status": "running",
+            "run_id": run_id,
+            "lookback_days": int(lookback_days),
+            "started_at": _now_et().isoformat(),
+        })
+
     def _label_with_batch(fund_name: str) -> str:
         fn = (fund_name or "").strip()
         if not fn:
@@ -4956,6 +5018,12 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         }
         st.session_state["batch_cache"] = cache_all
         st.info("No letters found within the selected lookback window.")
+        _save_batch8_state({
+            "status": "complete",
+            "run_id": run_id,
+            "lookback_days": int(lookback_days),
+            "completed_at": _now_et().isoformat(),
+        })
         return
 
     # ---------------------- process hits (download + excerpt) ----------------------
@@ -5056,6 +5124,12 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
     }
     st.session_state["batch_cache"] = cache_all
 
+    _save_batch8_state({
+        "status": "complete",
+        "run_id": run_id,
+        "lookback_days": int(lookback_days),
+        "completed_at": _now_et().isoformat(),
+    })
     st.success("Batch 8 latest run complete.")
     _render_latest_results(by_quarter)
 
