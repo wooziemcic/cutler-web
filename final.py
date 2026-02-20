@@ -5040,8 +5040,18 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
 
         rows = page.locator(TABLE_ROW)
 
+        # BSD can occasionally re-render / redirect (e.g., auth gating), which can make locator.count() fail.
+        # Make row counting resilient and avoid crashing the whole app.
+        try:
+            page.wait_for_selector(TABLE_ROW, timeout=20000)
+            n_rows = rows.count()
+        except Exception as e:
+            st.error("Could not read the BSD 'Latest' table rows. This usually means the page redirected (login) or the table selector changed.")
+            st.exception(e)
+            return
+
         # If the table is sorted newest-first (as BSD indicates), we can early-stop once we hit older dates.
-        for i in range(rows.count()):
+        for i in range(n_rows):
             row = rows.nth(i)
             try:
                 letter_date_str = row.locator("td").nth(COLMAP["letter_date"]-1).inner_text().strip()
