@@ -21,7 +21,6 @@ import sys
 import shutil
 import traceback
 import json
-from datetime import date
 import hashlib
 import openai
 from dataclasses import dataclass
@@ -159,49 +158,6 @@ def _mark_completed(brand: str, quarter: str) -> None:
     except Exception:
         pass
 
-
-
-def _batch8_state_path() -> Path:
-    """Persistent run-state file for Batch 8 (Latest)."""
-    return MAN_DIR / "_batch8_latest_state.json"
-
-
-def _load_batch8_state() -> Dict[str, Any]:
-    try:
-        sp = _batch8_state_path()
-        if sp.exists():
-            return json.loads(sp.read_text(encoding="utf-8") or "{}")
-    except Exception:
-        pass
-    return {}
-
-
-def _save_batch8_state(state: Dict[str, Any]) -> None:
-    try:
-        sp = _batch8_state_path()
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        sp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _batch8_run_id(today_date: date, lookback_days: int) -> str:
-    """A stable run id for a given day + lookback window."""
-    return f"{today_date.isoformat()}|{int(lookback_days)}d"
-
-
-def _clear_batch8_progress_markers() -> None:
-    """Delete Batch 8 progress markers so a fresh run can re-download everything."""
-    try:
-        root = MAN_DIR / "_progress" / _safe(BATCH8_NAME)
-        if root.exists():
-            for fp in root.rglob("*.done"):
-                try:
-                    fp.unlink()
-                except Exception:
-                    pass
-    except Exception:
-        pass
 
 def _excerpt_pdf(
     pdf_path: Path,
@@ -1063,28 +1019,78 @@ def _parse_rows(page, quarter: str) -> List[Hit]:
     return hits
 
 def _download_quarter_pdf_from_fund(page, quarter: str, dest_dir: Path) -> List[Path]:
+    """
+    Download one or more PDFs for the requested quarter from a BSD fund page.
+
+    Why this is defensive:
+    - BSD fund pages sometimes label the quarter link text differently than the table (e.g., "2025 Q4", "2025 Q4 (Latest)",
+      or the quarter appears only in the anchor title attribute).
+    - Some pages only expose a generic "Letter_#.pdf" link under the Quarterly Letters section.
+
+    Strategy:
+    1) Prefer anchors where (text/title) matches the requested quarter and href looks like a PDF.
+    2) If none, fall back to ANY "letters/file" PDF under the page (still within the page's anchor list).
+       This restores the historical "download something for this fund" behavior for Batch 8 Latest.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     pdfs: List[Path] = []
+
+    # Normalize quarter text for fuzzy matching.
+    q_raw = (quarter or "").strip()
+    q_norm = _re.sub(r"[^0-9A-Za-z ]+", " ", q_raw).strip().lower()
+    q_norm = _re.sub(r"\s+", " ", q_norm)
+
+    # Best-effort: wait for the section to load, but do not fail if not found.
     try:
         page.locator("text=Quarterly Letters").first.wait_for(state="visible", timeout=8000)
     except Exception:
         pass
+
+    # Collect candidate anchors.
     anchors = page.locator("a").all()
-    candidates = []
+    primary: List[Tuple[Any, str]] = []
+    fallback: List[Tuple[Any, str]] = []
+
     for a in anchors:
         try:
-            text = (a.inner_text() or '').strip()
-            title = a.get_attribute("title") or ""
-            href = a.get_attribute("href") or ""
+            txt = (a.inner_text() or "").strip()
+            title = (a.get_attribute("title") or "").strip()
+            href = (a.get_attribute("href") or "").strip()
             if not href:
                 continue
-            if (text == quarter or quarter in title) and ("letters/file" in href or href.lower().endswith('.pdf')):
-                candidates.append((a, href))
+
+            href_l = href.lower()
+            is_pdfish = ("letters/file" in href_l) or href_l.endswith(".pdf")
+
+            if not is_pdfish:
+                continue
+
+            # Keep a broad fallback bucket (any PDF-ish letter link).
+            fallback.append((a, href))
+
+            # Primary match: quarter appears in visible text or title (fuzzy, case-insensitive).
+            txt_norm = _re.sub(r"[^0-9A-Za-z ]+", " ", txt).strip().lower()
+            txt_norm = _re.sub(r"\s+", " ", txt_norm)
+            title_norm = _re.sub(r"[^0-9A-Za-z ]+", " ", title).strip().lower()
+            title_norm = _re.sub(r"\s+", " ", title_norm)
+
+            if q_norm:
+                if (txt_norm == q_norm) or (q_norm in txt_norm) or (q_norm in title_norm):
+                    primary.append((a, href))
         except Exception:
             continue
+
+    candidates = primary if primary else fallback
+
+    if not candidates:
+        # Nothing that looks like a letter PDF on this page.
+        return pdfs
+
+    # Try each candidate: prefer Playwright download, fall back to requests.get.
     for a, href in candidates:
         try:
-            with page.expect_download(timeout=8000) as dl_info:
+            # Playwright path (best, respects any auth/routing)
+            with page.expect_download(timeout=15000) as dl_info:
                 a.click(force=True)
             dl = dl_info.value
             fname = _safe(Path(dl.suggested_filename or Path(href).name or f"{quarter}.pdf").name)
@@ -1094,17 +1100,21 @@ def _download_quarter_pdf_from_fund(page, quarter: str, dest_dir: Path) -> List[
             continue
         except Exception:
             pass
+
+        # Fallback: direct HTTP download (sometimes works even when Playwright click doesn't)
         try:
             r = requests.get(href, timeout=20)
             if r.status_code == 200 and r.content:
                 fname = _safe(Path(href).name or f"{quarter}.pdf")
                 path = dest_dir / fname
-                with open(path, 'wb') as f:
+                with open(path, "wb") as f:
                     f.write(r.content)
                 pdfs.append(path)
         except Exception:
             continue
+
     return pdfs
+
 
 # excerption + build
 
@@ -4909,24 +4919,6 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
     today = _today_et_date().date()
     start_date = today - timedelta(days=max(1, lookback_days) - 1)
 
-    # Batch 8 uses persistent progress markers to resume after reloads.
-    # However, once a run is complete, those markers would cause future runs to "skip" everything.
-    # We fix this by using a small persistent run-state file:
-    # - If the last run is not the current run_id OR it is not running, we clear markers and start fresh.
-    # - If it *is* running with the same run_id, we preserve markers and resume.
-    run_id = _batch8_run_id(today, lookback_days)
-    b8_state = _load_batch8_state()
-    if b8_state.get("status") == "running" and b8_state.get("run_id") == run_id:
-        st.info("Resuming Batch 8 latest run (progress preserved).")
-    else:
-        _clear_batch8_progress_markers()
-        _save_batch8_state({
-            "status": "running",
-            "run_id": run_id,
-            "lookback_days": int(lookback_days),
-            "started_at": _now_et().isoformat(),
-        })
-
     def _label_with_batch(fund_name: str) -> str:
         fn = (fund_name or "").strip()
         if not fn:
@@ -5018,12 +5010,6 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         }
         st.session_state["batch_cache"] = cache_all
         st.info("No letters found within the selected lookback window.")
-        _save_batch8_state({
-            "status": "complete",
-            "run_id": run_id,
-            "lookback_days": int(lookback_days),
-            "completed_at": _now_et().isoformat(),
-        })
         return
 
     # ---------------------- process hits (download + excerpt) ----------------------
@@ -5124,12 +5110,6 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
     }
     st.session_state["batch_cache"] = cache_all
 
-    _save_batch8_state({
-        "status": "complete",
-        "run_id": run_id,
-        "lookback_days": int(lookback_days),
-        "completed_at": _now_et().isoformat(),
-    })
     st.success("Batch 8 latest run complete.")
     _render_latest_results(by_quarter)
 
