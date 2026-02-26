@@ -30,87 +30,6 @@ from typing import List, Dict, Optional, Tuple, Any
 import re as _re
 import html as html_lib
 import streamlit as st
-
-# --- BSD auth helpers (minimal) ---
-def _get_bsd_creds() -> tuple[str|None, str|None]:
-    """Fetch BSD credentials from Streamlit secrets or environment variables.
-    Expected keys: BSD_EMAIL, BSD_PASSWORD.
-    """
-    email = None
-    password = None
-    try:
-        # Streamlit secrets may be dict-like
-        email = st.secrets.get("BSD_EMAIL", None)  # type: ignore[attr-defined]
-        password = st.secrets.get("BSD_PASSWORD", None)  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    if not email:
-        email = os.environ.get("BSD_EMAIL")
-    if not password:
-        password = os.environ.get("BSD_PASSWORD")
-    return email, password
-
-
-def _ensure_bsd_logged_in(page) -> bool:
-    """Best-effort BSD login so downloads behind auth work.
-    Returns True if we believe the session is authenticated.
-    """
-    try:
-        # Already logged in? header has LOGOUT or Manage Account on BSD pages
-        if page.locator("text=LOGOUT").count() > 0 or page.locator("text=MANAGE ACCOUNT").count() > 0:
-            return True
-    except Exception:
-        pass
-
-    email, password = _get_bsd_creds()
-    if not email or not password:
-        try:
-            st.warning("BSD credentials not found (set BSD_EMAIL/BSD_PASSWORD). Proceeding unauthenticated; downloads may fail.")
-        except Exception:
-            pass
-        return False
-
-    try:
-        # Navigate to login/account page
-        page.goto("https://www.buysidedigest.com/my-account/", wait_until="domcontentloaded", timeout=30000)
-    except Exception:
-        # fallback
-        try:
-            page.goto("https://www.buysidedigest.com/login/", wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            pass
-
-    # If already logged in after navigation
-    try:
-        if page.locator("text=LOGOUT").count() > 0 or page.locator("text=MANAGE ACCOUNT").count() > 0:
-            return True
-    except Exception:
-        pass
-
-    # Try common login selectors (keep broad but safe)
-    try:
-        # Some pages use email/username input
-        email_loc = page.locator("input[type='email'], input[name*='email' i], input#username, input[name='username']")
-        pwd_loc = page.locator("input[type='password'], input#password, input[name='password']")
-        if email_loc.count() == 0 or pwd_loc.count() == 0:
-            return False
-        email_loc.first.fill(str(email))
-        pwd_loc.first.fill(str(password))
-        # submit
-        btn = page.locator("button[type='submit'], input[type='submit'], button:has-text('Log in'), button:has-text('Login'), button:has-text('Sign in')")
-        if btn.count() > 0:
-            btn.first.click()
-        else:
-            pwd_loc.first.press("Enter")
-        page.wait_for_load_state("networkidle", timeout=30000)
-        # verify
-        if page.locator("text=LOGOUT").count() > 0 or page.locator("text=MANAGE ACCOUNT").count() > 0:
-            return True
-    except Exception:
-        return False
-    return False
-# --- end BSD auth helpers ---
-
 import requests
 try:
     import sa_analysis_api as sa_api
@@ -366,6 +285,7 @@ class Hit:
     letter_date: str
     fund_name: str
     fund_href: str
+    letter_view_href: str
 
 _DEF_WORD_RE = re.compile(r"^[A-Za-z0-9'&.-]+")
 
@@ -1041,8 +961,9 @@ def _parse_letter_date_to_date(s: str) -> Optional[datetime]:
     """
     if not s:
         return None
-    s = (s or "").strip()
-    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%b %d, %Y", "%B %d, %Y"):
+    s = (s or "").strip().replace("\u00a0", " ")
+    s = " ".join(s.split())
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%b %d, %Y", "%B %d, %Y", "%b %d %Y", "%B %d %Y"):
         try:
             return datetime.strptime(s, fmt)
         except Exception:
@@ -1082,17 +1003,7 @@ def _build_fund_to_batch_lookup() -> Tuple[Dict[str, str], Dict[str, str]]:
 def _parse_rows(page, quarter: str) -> List[Hit]:
     rows = page.locator(TABLE_ROW)
     hits: List[Hit] = []
-            # Snapshot row count once; avoids Playwright errors if the DOM refreshes.
-    try:
-        page.wait_for_selector(TABLE_ROW, timeout=15000)
-    except Exception:
-        pass
-    try:
-        n_rows = rows.count()
-    except Exception:
-        n_rows = 0
-
-    for i in range(n_rows):
+    for i in range(rows.count()):
         row = rows.nth(i)
         try:
             q = row.locator("td").nth(COLMAP["quarter"]-1).inner_text().strip()
@@ -1109,149 +1020,161 @@ def _parse_rows(page, quarter: str) -> List[Hit]:
             continue
     return hits
 
-
 def _download_quarter_pdf_from_fund(page, quarter: str, dest_dir: Path) -> List[Path]:
-    """Download letter PDFs from a BSD fund/letter page.
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    pdfs: List[Path] = []
+    try:
+        page.locator("text=Quarterly Letters").first.wait_for(state="visible", timeout=8000)
+    except Exception:
+        pass
+    anchors = page.locator("a").all()
+    candidates = []
+    for a in anchors:
+        try:
+            text = (a.inner_text() or '').strip()
+            title = a.get_attribute("title") or ""
+            href = a.get_attribute("href") or ""
+            if not href:
+                continue
+            if (text == quarter or quarter in title) and ("letters/file" in href or href.lower().endswith('.pdf')):
+                candidates.append((a, href))
+        except Exception:
+            continue
+    for a, href in candidates:
+        try:
+            with page.expect_download(timeout=8000) as dl_info:
+                a.click(force=True)
+            dl = dl_info.value
+            fname = _safe(Path(dl.suggested_filename or Path(href).name or f"{quarter}.pdf").name)
+            path = dest_dir / fname
+            dl.save_as(str(path))
+            pdfs.append(path)
+            continue
+        except Exception:
+            pass
+        try:
+            r = requests.get(href, timeout=20)
+            if r.status_code == 200 and r.content:
+                fname = _safe(Path(href).name or f"{quarter}.pdf")
+                path = dest_dir / fname
+                with open(path, 'wb') as f:
+                    f.write(r.content)
+                pdfs.append(path)
+        except Exception:
+            continue
+    return pdfs
 
-    BSD has moved downloads behind login and sometimes uses a 'DOWNLOAD LETTER' button
-    with class 'zee1' pointing to an authenticated URL. We therefore:
-      - try to click downloadable anchors (expect_download)
-      - fallback to clicking the DOWNLOAD LETTER button if present
-      - fallback to fetching via the authenticated Playwright request context (cookies preserved)
+# excerption + build
+
+def _ensure_bsd_logged_in(page):
     """
+    Ensures we are logged into BuySideDigest before accessing letter downloads.
+    Safe to call multiple times.
+    """
+
+    try:
+        page.goto("https://www.buysidedigest.com/", timeout=60000)
+        page.wait_for_load_state("networkidle")
+
+        # If logout button exists → already logged in
+        if page.locator("text=Logout").count() > 0:
+            return
+
+        # Otherwise perform login
+        import os
+        import streamlit as st
+
+        email = os.getenv("BSD_EMAIL") or st.secrets.get("BSD_EMAIL")
+        password = os.getenv("BSD_PASSWORD") or st.secrets.get("BSD_PASSWORD")
+
+        if not email or not password:
+            raise Exception("BSD credentials not found in env or Streamlit secrets.")
+
+        page.goto("https://www.buysidedigest.com/login/", timeout=60000)
+        page.wait_for_load_state("networkidle")
+
+        page.fill('input[type="email"]', email)
+        page.fill('input[type="password"]', password)
+        page.click('button[type="submit"]')
+
+        page.wait_for_load_state("networkidle")
+
+        if page.locator("text=Logout").count() == 0:
+            raise Exception("BSD login failed.")
+
+    except Exception as e:
+        raise Exception(f"BSD login error: {str(e)}")
+
+def _download_pdf_from_letter_view_page(page, quarter: str, brand: str, dest_dir: Path) -> List[Path]:
+    """Download the letter PDF from the BSD 'View' letter page (login-gated)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     pdfs: List[Path] = []
 
-    # best-effort: ensure session is authenticated (no-op if already logged in)
+    # Ensure auth (no-op if already logged in)
     try:
         _ensure_bsd_logged_in(page)
     except Exception:
         pass
 
-    # Helper: authenticated fetch using Playwright request context (keeps cookies)
-    def _auth_fetch_to_file(url: str, filename_hint: str) -> Optional[Path]:
-        try:
-            resp = page.context.request.get(url, timeout=30000)
-            if not resp.ok:
-                return None
-            body = resp.body()
-            if not body:
-                return None
-            # crude content-type check; allow if looks like pdf or server returns octet-stream
-            ct = (resp.headers.get("content-type") or "").lower()
-            if ("pdf" not in ct) and (not body.startswith(b"%PDF")):
-                # likely HTML login page
-                return None
-            fname = _safe(filename_hint)
-            if not fname.lower().endswith(".pdf"):
-                fname = f"{fname}.pdf"
-            outp = dest_dir / fname
-            outp.write_bytes(body)
-            return outp
-        except Exception:
-            return None
-
-    # Try to wait for typical letter section (non-fatal)
+    href = ""
     try:
-        page.locator("text=Quarterly Letters").first.wait_for(state="visible", timeout=6000)
+        a = page.locator("a.zee1").first
+        if a.count() > 0:
+            href = (a.get_attribute("href") or "").strip()
+    except Exception:
+        href = ""
+
+    if not href:
+        try:
+            a2 = page.locator("a:has-text('DOWNLOAD LETTER')").first
+            href = (a2.get_attribute("href") or "").strip()
+        except Exception:
+            href = ""
+
+    if not href:
+        return pdfs
+
+    out_name = f"{_safe(brand or 'Fund')}_{_safe(quarter or 'UNKNOWN')}.pdf"
+    out_path = dest_dir / out_name
+
+    try:
+        if out_path.exists() and out_path.stat().st_size > 10_000:
+            return [out_path]
     except Exception:
         pass
 
-    # collect candidate anchors: quarter match OR direct pdf/file links
-    # collect candidate anchors: quarter match OR direct pdf/file links
-    candidates: List[tuple] = []
-    q_norm = (quarter or "").strip().lower()
-
-    # IMPORTANT: do not use locator.all() here — the page may navigate/refresh during processing,
-    # which can destroy the execution context. Instead, snapshot anchor attributes using count/nth.
+    # Authenticated request download (preferred; avoids navigation context destruction)
     try:
-        a_loc = page.locator("a")
-        a_n = a_loc.count()
+        resp = page.context.request.get(href, timeout=60000)
+        if resp and resp.ok:
+            body = resp.body()
+            if body and body[:4] == b"%PDF":
+                out_path.write_bytes(body)
+                pdfs.append(out_path)
+                return pdfs
     except Exception:
-        a_n = 0
+        pass
 
-    for i in range(a_n):
-        try:
-            a = page.locator("a").nth(i)
-            a_text = (a.inner_text() or "").strip()
-            title = (a.get_attribute("title") or "").strip()
-            href = (a.get_attribute("href") or "").strip()
-            cls = (a.get_attribute("class") or "").strip()
-
-            if not href:
-                continue
-            href_l = href.lower()
-            text_l = a_text.lower()
-            title_l = title.lower()
-
-            is_pdfish = ("letters/file" in href_l) or href_l.endswith(".pdf") or ("investor-letters.buysidedigest.com" in href_l)
-            q_match = (q_norm and (q_norm in text_l or q_norm in title_l)) or (a_text.strip() == quarter)
-
-            # include quarter matches, but also allow explicit "download letter" anchors
-            if (q_match and is_pdfish) or ("download letter" in text_l and is_pdfish) or ("zee1" in cls.lower()):
-                # store a minimal selector strategy; avoid carrying locator objects across possible navigations
-                if "zee1" in cls.lower():
-                    sel = "a.zee1"
-                else:
-                    # href is usually safe inside double quotes; if it ever contains a quote, we fall back later.
-                    sel = f'a[href="{href}"]'
-                candidates.append((sel, href, a_text or title or ""))
-        except Exception:
-            continue
-
-        # If no candidates, fallback specifically to the DOWNLOAD LETTER button
-        if not candidates:
+    # Fallback: click-based download
+    try:
+        with page.expect_download(timeout=60000) as dl_info:
+            page.locator("a.zee1").first.click()
+        dl = dl_info.value
+        suggested = (dl.suggested_filename or "").strip()
+        target = out_path
+        if suggested:
             try:
-                dl_btn = page.locator("a.zee1, a:has-text('DOWNLOAD LETTER'), a:has-text('Download Letter')").first
-                if dl_btn and dl_btn.count() > 0:
-                    href = (dl_btn.get_attribute("href") or "").strip()
-                    if href:
-                        candidates.append(("a.zee1, a:has-text('DOWNLOAD LETTER'), a:has-text('Download Letter')", href, "DOWNLOAD LETTER"))
+                target = dest_dir / _safe(Path(suggested).name)
             except Exception:
-                pass
+                target = out_path
+        dl.save_as(str(target))
+        pdfs.append(target)
+    except Exception:
+        pass
 
-        # Download each candidate
-        for sel, href, label in candidates:
-            # 1) click and expect browser download
-            try:
-                with page.expect_download(timeout=15000) as dl_info:
-                    page.locator(sel).first.click(force=True)
-                dl = dl_info.value
-                suggested = dl.suggested_filename or ""
-                fname = suggested.strip() or Path(href).name or f"{quarter}.pdf"
-                fname = _safe(Path(fname).name)
-                if not fname.lower().endswith(".pdf"):
-                    fname = f"{fname}.pdf"
-                path = dest_dir / fname
-                dl.save_as(str(path))
-                pdfs.append(path)
-                continue
-            except Exception:
-                pass
-
-            # 2) authenticated fetch using Playwright request context (cookies)
-            fname_hint = Path(href).name or (label or quarter or "letter")
-            outp = _auth_fetch_to_file(href, fname_hint)
-            if outp:
-                pdfs.append(outp)
-                continue
-
-            # 3) legacy fallback (may fail behind login)
-            try:
-                r = requests.get(href, timeout=20)
-                if r.status_code == 200 and r.content and r.content.startswith(b"%PDF"):
-                    fname = _safe(Path(href).name or f"{quarter}.pdf")
-                    if not fname.lower().endswith(".pdf"):
-                        fname = f"{fname}.pdf"
-                    path = dest_dir / fname
-                    with open(path, "wb") as f:
-                        f.write(r.content)
-                    pdfs.append(path)
-            except Exception:
-                continue
     return pdfs
 
-# excerption + build
+
 
 def run_excerpt_and_build(
     pdf_path: Path,
@@ -4815,7 +4738,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                                 if h.fund_href in seen:
                                     continue
                                 seen.add(h.fund_href)
-                                page.goto(h.fund_href, wait_until='domcontentloaded')
+                                page.goto(h.fund_href)
                                 page.wait_for_load_state("domcontentloaded")
 
                                 dest = DL_DIR / q / _safe(brand)
@@ -5073,15 +4996,8 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30000)
-
-        # Ensure BSD session is authenticated once per browser context (helps gated downloads)
-        try:
-            _ensure_bsd_logged_in(page)
-        except Exception:
-            pass
         page.goto(BSD_URL)
-        # Ensure authenticated session for gated downloads
-        _ensure_bsd_logged_in(page)
+
         # IMPORTANT: for Batch 8 we do NOT iterate quarters; we want the table sorted by most recent.
         # Use "Last Two Quarters" view (latest_two) to ensure recency and reduce pagination.
         try:
@@ -5104,11 +5020,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         rows = page.locator(TABLE_ROW)
 
         # If the table is sorted newest-first (as BSD indicates), we can early-stop once we hit older dates.
-                # Snapshot row count once; avoids Playwright errors if the DOM refreshes.
-        try:
-            page.wait_for_selector(TABLE_ROW, timeout=15000)
-        except Exception:
-            pass
+        n_rows = 0
         try:
             n_rows = rows.count()
         except Exception:
@@ -5126,7 +5038,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                 if d > today:
                     continue
                 if d < start_date:
-                    break  # older than window; stop scanning
+                    continue  # older than window; keep scanning (ordering may change)
 
                 # quarter comes from the row itself
                 q_row = row.locator("td").nth(COLMAP["quarter"]-1).inner_text().strip()
@@ -5139,11 +5051,23 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                 if fund_href and fund_href.startswith("/"):
                     fund_href = "https://www.buysidedigest.com" + fund_href
 
+
+                # NEW: Use the 'View' link in the Letter column (opens the actual letter page)
+                view_href = ""
+                try:
+                    view_link = row.locator("td.letter-btn a:has-text('View')").first
+                    view_href = (view_link.get_attribute("href") or "").strip()
+                except Exception:
+                    view_href = ""
+                if view_href and view_href.startswith("/"):
+                    view_href = "https://www.buysidedigest.com" + view_href
+
                 h = Hit(
                     quarter=q_row,
                     letter_date=letter_date_str,
                     fund_name=fund_name,
                     fund_href=fund_href,
+                letter_view_href=view_href,
                 )
                 hits_by_quarter.setdefault(q_row, []).append(h)
             except Exception:
@@ -5173,12 +5097,6 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         page = ctx.new_page()
         page.set_default_timeout(30000)
 
-        # Ensure BSD session is authenticated once per browser context (helps gated downloads)
-        try:
-            _ensure_bsd_logged_in(page)
-        except Exception:
-            pass
-
         for q, hits in hits_by_quarter.items():
             table_rows: List[Dict[str, Any]] = []
             manifest_items: List[Dict[str, Any]] = []
@@ -5200,12 +5118,17 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                         "letter_date": h.letter_date,
                         "fund_name": h.fund_name,
                         "fund_href": h.fund_href,
+                        "letter_view_href": h.letter_view_href,
                     }
                 )
 
                 try:
-                    page.goto(h.fund_href, wait_until='domcontentloaded')
-                    pdfs = _download_quarter_pdf_from_fund(page, q, _downloads_dir())
+                    page.goto(h.letter_view_href or h.fund_href)
+                    pdfs = _download_pdf_from_letter_view_page(page, q, brand, _downloads_dir())
+                    if not pdfs:
+                        # fallback to legacy fund-page downloader (older BSD pages)
+                        page.goto(h.fund_href)
+                        pdfs = _download_quarter_pdf_from_fund(page, q, _downloads_dir())
                     if not pdfs:
                         _mark_completed(brand, q)
                         continue
@@ -5222,7 +5145,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                             out_dir,
                             source_pdf_name=pdf.name,
                             letter_date=h.letter_date or None,
-                            source_url=h.fund_href,
+                            source_url=(h.letter_view_href or h.fund_href),
                         )
 
                         manifest_items.append(
@@ -5237,6 +5160,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                                 "excerpt_pdf": str(built) if built else "",
                                 "fund_name": h.fund_name,
                                 "fund_href": h.fund_href,
+                        "letter_view_href": h.letter_view_href,
                             }
                         )
 
@@ -5332,12 +5256,6 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         page.set_default_timeout(30000)
-
-        # Ensure BSD session is authenticated once per browser context (helps gated downloads)
-        try:
-            _ensure_bsd_logged_in(page)
-        except Exception:
-            pass
         page.goto(BSD_URL)
 
         st.write(f"Scanning BSD table for {batch_name} / {quarter} (no downloads yet)…")
