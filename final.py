@@ -127,10 +127,7 @@ def _ensure_bsd_logged_in(context, page, *, state_path: Path = _BSD_STATE_PATH) 
         pass
 
 def _download_pdf_from_bsd_letter_page(context, page, letter_url: str, dest_path: Path) -> bool:
-    """Open a /bsd-letter page, extract the DOWNLOAD LETTER href, and download bytes using the authenticated context.
-
-    Returns True only if a valid PDF was saved to dest_path.
-    """
+    """Open a /bsd-letter page, extract the DOWNLOAD LETTER href, and download bytes using the authenticated context."""
     try:
         page.goto(letter_url, wait_until="domcontentloaded", timeout=30000)
     except Exception:
@@ -138,16 +135,9 @@ def _download_pdf_from_bsd_letter_page(context, page, letter_url: str, dest_path
 
     _ensure_bsd_logged_in(context, page)
 
-    # The download button is typically an <a> tag with class zee1 and text DOWNLOAD LETTER.
+    # The download button is an <a> tag with class zee1 and text DOWNLOAD LETTER.
     href = ""
-    selectors = [
-        "a.zee1",
-        "a:has-text('DOWNLOAD LETTER')",
-        "a:has-text('Download Letter')",
-        "a[href$='.pdf']",
-        "a[href*='.pdf?']",
-    ]
-    for sel in selectors:
+    for sel in ["a.zee1", "a:has-text('DOWNLOAD LETTER')", "a[href*='investor-letters.']"]:
         try:
             loc = page.locator(sel).first
             if loc.count() > 0:
@@ -160,28 +150,13 @@ def _download_pdf_from_bsd_letter_page(context, page, letter_url: str, dest_path
     if not href:
         return False
 
-    # Normalize href to absolute URL
-    try:
-        href = html_lib.unescape(href).strip()
-    except Exception:
-        href = href.strip()
-
-    if href.startswith("//"):
-        href = "https:" + href
-    elif href.startswith("/"):
-        href = _BSD_BASE_URL + href
-
     # Fetch the PDF using Playwright request (keeps auth cookies).
-    def _looks_like_pdf(b: bytes) -> bool:
-        return bool(b) and (b[:4] == b"%PDF" or b"%PDF" in b[:1024])
-
     try:
         resp = context.request.get(href, timeout=60000)
         if resp and resp.ok:
             b = resp.body()
-            if isinstance(b, str):
-                b = b.encode("utf-8", errors="ignore")
-            if isinstance(b, bytes) and _looks_like_pdf(b):
+            # Basic PDF sniff
+            if b and (b[:4] == b"%PDF" or b"%PDF" in b[:1024]):
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(dest_path, "wb") as f:
                     f.write(b)
@@ -189,16 +164,14 @@ def _download_pdf_from_bsd_letter_page(context, page, letter_url: str, dest_path
     except Exception:
         pass
 
-    # Fallback: navigate to the PDF URL in the same page (helps if BSD requires a redirect),
-    # then fetch again via request.
+    # Fallback: navigate to the PDF URL in the same page and save the response body
     try:
         page.goto(href, wait_until="domcontentloaded", timeout=45000)
+        # If the PDF renders inline, grab the response via request anyway
         resp = context.request.get(href, timeout=60000)
         if resp and resp.ok:
             b = resp.body()
-            if isinstance(b, str):
-                b = b.encode("utf-8", errors="ignore")
-            if isinstance(b, bytes) and _looks_like_pdf(b):
+            if b and (b[:4] == b"%PDF" or b"%PDF" in b[:1024]):
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(dest_path, "wb") as f:
                     f.write(b)
@@ -4961,6 +4934,85 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
     dest_dir = Path(_downloads_dir())
     dest_dir.mkdir(parents=True, exist_ok=True)
 
+
+    # --- BSD latest table helper (robust against site DOM changes) ---
+    def _bsd_find_latest_table_and_colmap(page):
+        """Return (rows_locator, colmap0) where colmap0 is 0-based indices for columns we need.
+        We search for the specific hedge-fund database table by header text.
+        """
+        tables = page.locator("table")
+        n = tables.count()
+        best = None
+        best_score = -1
+        best_headers = []
+        for ti in range(n):
+            t = tables.nth(ti)
+            try:
+                heads = t.locator("thead tr th")
+                hc = heads.count()
+                if hc == 0:
+                    # Some tables render headers in first row of tbody
+                    heads = t.locator("tr").first.locator("th, td")
+                    hc = heads.count()
+                hdrs = []
+                for hi in range(hc):
+                    try:
+                        hdrs.append((heads.nth(hi).inner_text() or "").strip().lower())
+                    except Exception:
+                        hdrs.append("")
+                joined = " | ".join(hdrs)
+                score = 0
+                # Required-ish signals
+                if "letter date" in joined:
+                    score += 5
+                if "fund name" in joined or "fund" in joined:
+                    score += 3
+                if "tickers" in joined:
+                    score += 2
+                if "letter" in joined:
+                    score += 2
+                if "quarter" in joined:
+                    score += 1
+                if score > best_score:
+                    best_score = score
+                    best = t
+                    best_headers = hdrs
+            except Exception:
+                continue
+    
+        if best is None or best_score < 6:
+            # Fallback: use existing selector
+            rows = page.locator(TABLE_ROW)
+            colmap0 = {
+                "quarter": max(0, int(COLMAP.get("quarter", 1)) - 1),
+                "letter_date": max(0, int(COLMAP.get("letter_date", 2)) - 1),
+                "fund_name": max(0, int(COLMAP.get("fund_name", 3)) - 1),
+                "letter": max(0, int(COLMAP.get("letter", 4)) - 1),
+            }
+            return rows, colmap0
+    
+        # Build 0-based colmap by header match
+        def _find_idx(keys):
+            for k in keys:
+                for i, htxt in enumerate(best_headers):
+                    if k in (htxt or ""):
+                        return i
+            return None
+    
+        idx_date = _find_idx(["letter date", "date"])
+        idx_fund = _find_idx(["fund name", "fund"])
+        idx_letter = _find_idx(["letter"])
+        idx_quarter = _find_idx(["quarter"])
+    
+        # Safe fallbacks if any are missing
+        idx_date = 1 if idx_date is None else idx_date
+        idx_fund = 2 if idx_fund is None else idx_fund
+        idx_letter = 3 if idx_letter is None else idx_letter
+        idx_quarter = 0 if idx_quarter is None else idx_quarter
+    
+        rows = best.locator("tbody tr")
+        colmap0 = {"quarter": idx_quarter, "letter_date": idx_date, "fund_name": idx_fund, "letter": idx_letter}
+        return rows, colmap0
     st.markdown(f"### Running {BATCH8_NAME} (last {lookback_days} days)")
 
     cache_all = st.session_state.get("batch_cache", {})
@@ -5106,202 +5158,80 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
 
         st.write(f"Scanning latest table for items in window {start_date.isoformat()} → {today.isoformat()} …")
 
-        # --- Robust: locate the correct hedge-fund database table by header text ---
-        tables = page.locator("table")
-        db_table = None
-        headers: List[str] = []
-        for ti in range(tables.count()):
-            t = tables.nth(ti)
-            try:
-                thead_text = (t.locator("thead").inner_text(timeout=800) or "").strip()
-            except Exception:
-                thead_text = ""
-            # BSD table header typically includes these exact strings
-            if ("Letter Date" in thead_text) and ("Fund name" in thead_text or "Fund Name" in thead_text):
-                db_table = t
-                try:
-                    headers = [h.strip() for h in t.locator("thead th").all_inner_texts()]
-                except Exception:
-                    headers = []
-                break
+        
+    # Robustly locate the correct BSD database table and dynamically map columns
+    rows, col0 = _bsd_find_latest_table_and_colmap(page)
+    try:
+        st.write(f"BSD table rows detected: {rows.count()}")
+    except Exception:
+        pass
 
-        # Fallback: if we couldn't find it by header, use the first table with a tbody
-        if db_table is None:
-            for ti in range(tables.count()):
-                t = tables.nth(ti)
-                try:
-                    if t.locator("tbody tr").count() > 0:
-                        db_table = t
-                        try:
-                            headers = [h.strip() for h in t.locator("thead th").all_inner_texts()]
-                        except Exception:
-                            headers = []
-                        break
-                except Exception:
-                    continue
-
-        def _norm_hdr(s: str) -> str:
-            return " ".join((s or "").strip().lower().split())
-
-        headers_norm = [_norm_hdr(h) for h in headers]
-
-        # Determine column indices dynamically (0-based)
-        idx_quarter = next((ii for ii, hh in enumerate(headers_norm) if "quarter" in hh), 0)
-        idx_date = next((ii for ii, hh in enumerate(headers_norm) if "letter date" in hh), 1)
-        idx_fund = next((ii for ii, hh in enumerate(headers_norm) if "fund name" in hh), 2)
-        # Some BSD layouts label this column "Letter"
-        idx_letter = next((ii for ii, hh in enumerate(headers_norm) if hh == "letter" or hh.endswith(" letter")), max(0, len(headers_norm) - 1))
-
-        if db_table is None:
-            st.warning("Could not locate BSD database table reliably. Falling back to legacy row selector.")
-            rows = page.locator(TABLE_ROW)
-        else:
-            rows = db_table.locator("tbody tr")
-
-        row_count = rows.count()
-        st.write(f"BSD table rows detected: {row_count}")
-
-        # If the table is sorted newest-first (as BSD indicates), we can early-stop once we hit older dates.
-        scan_prog = st.progress(0.0)
-        for i in range(row_count):
-            # progress (avoid "stuck" feeling)
-            if row_count:
-                try:
-                    scan_prog.progress(min(1.0, (i + 1) / float(row_count)))
-                except Exception:
-                    pass
-
-            row = rows.nth(i)
-            try:
-                tds = row.locator("td")
-                td_count = tds.count()
-                if td_count <= max(idx_quarter, idx_date, idx_fund, idx_letter):
-                    continue
-
-                # Pull all cell texts in one shot (fewer Playwright roundtrips)
-                try:
-                    cell_texts = [c.strip() for c in tds.all_inner_texts()]
-                except Exception:
-                    cell_texts = []
-
-                def _ct(idx: int) -> str:
-                    if 0 <= idx < len(cell_texts):
-                        return (cell_texts[idx] or "").strip()
-                    return ""
-
-                letter_date_str = _ct(idx_date)
-                # Keep per-call timeouts small so a single slow row doesn't hang the whole scan
-                dt = _parse_letter_date_to_date(letter_date_str)
-                if dt is None:
-                    continue
-
-                d = dt.date()
-                if d > today:
-                    continue
-                if d < start_date:
-                    break  # older than window; stop scanning
-
-                # quarter comes from the row itself
-                q_row = _ct(idx_quarter) or "UNKNOWN"
-
-                # Fund name / href (prefer anchor in fund column)
-                fund_cell = tds.nth(idx_fund)
-                fund_name = _ct(idx_fund)
-                fund_href = ""
-                try:
-                    link = fund_cell.locator("a").first
-                    if link.count() > 0:
-                        fund_name = (link.inner_text(timeout=1200) or "").strip() or fund_name
-                        fund_href = (link.get_attribute("href", timeout=1200) or "").strip()
-                except Exception:
-                    pass
-
-                # Letter page link (opens the BSD letter viewer page)
-                letter_href = ""
-                try:
-                    # Prefer anchor in "Letter" column if present
-                    a = None
-                    try:
-                        a = tds.nth(idx_letter).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
-                        if a.count() == 0:
-                            a = None
-                    except Exception:
-                        a = None
-
-                    # Fallback: quarter column
-                    if a is None:
-                        try:
-                            aq = tds.nth(idx_quarter).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
-                            if aq.count() > 0:
-                                a = aq
-                        except Exception:
-                            pass
-
-                    # Fallback: fund column (sometimes the fund name anchors the letter viewer)
-                    if a is None:
-                        try:
-                            af = tds.nth(idx_fund).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
-                            if af.count() > 0:
-                                a = af
-                        except Exception:
-                            pass
-
-                    # Final fallback: any link in the row that looks like the letter viewer
-                    if a is None:
-                        try:
-                            # First try the most specific pattern
-                            ar = row.locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
-                            if ar.count() > 0:
-                                a = ar
-                        except Exception:
-                            pass
-
-                    # Extra fallback for BSD DOM changes: any anchor containing 'bsd-letter'
-                    if a is None:
-                        try:
-                            ar2 = row.locator("a[href*='bsd-letter']").first
-                            if ar2.count() > 0:
-                                a = ar2
-                        except Exception:
-                            pass
-
-                    if a is not None and a.count() > 0:
-                        letter_href = (a.get_attribute("href", timeout=1200) or "").strip()
-                except Exception:
-                    letter_href = ""
-
-                if fund_href and fund_href.startswith("/"):
-
-                    fund_href = "https://www.buysidedigest.com" + fund_href
-
-                if letter_href and letter_href.startswith("/"):
-                    letter_href = "https://www.buysidedigest.com" + letter_href
-
-                h = Hit(
-                    quarter=q_row,
-                    letter_date=letter_date_str,
-                    fund_name=fund_name,
-                    fund_href=fund_href,
-                    letter_href=letter_href,
-                )
-                hits_by_quarter.setdefault(q_row, []).append(h)
-            except Exception:
+    # If the table is sorted newest-first (as BSD indicates), we can early-stop once we hit older dates.
+    for i in range(rows.count()):
+        row = rows.nth(i)
+        try:
+            tds = row.locator("td")
+            td_count = tds.count()
+            if td_count <= max(col0["quarter"], col0["letter_date"], col0["fund_name"], col0["letter"]):
                 continue
 
-        try:
-            ctx.close()
-        finally:
-            browser.close()
+            letter_date_str = (tds.nth(col0["letter_date"]).inner_text() or "").strip()
+            dt = _parse_letter_date_to_date(letter_date_str)
+            if dt is None:
+                continue
 
-    if not hits_by_quarter:
-        cache_all[cache_key] = {
-            "quarters": ["LATEST"],
-            "lookback_days": lookback_days,
-            "by_quarter": {},
-        }
-        st.session_state["batch_cache"] = cache_all
-        st.info("No letters found within the selected lookback window.")
-        return
+            d = dt.date()
+            if d > today:
+                continue
+            if d < start_date:
+                break  # older than window; stop scanning
+
+            q_row = (tds.nth(col0["quarter"]).inner_text() or "").strip() or "UNKNOWN"
+
+            fund_cell = tds.nth(col0["fund_name"])
+            link = fund_cell.locator("a").first
+            fund_name = (link.inner_text() or "").strip()
+            fund_href = (link.get_attribute("href") or "").strip()
+
+            # Letter page link: prefer anchor in the "Letter" column containing '/bsd-letter/?letter='
+            letter_href = ""
+            try:
+                a = tds.nth(col0["letter"]).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter='], a[href*='/bsd-letter/']").first
+                if a.count() == 0:
+                    a = tds.nth(col0["quarter"]).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter='], a[href*='/bsd-letter/']").first
+                letter_href = (a.get_attribute("href") or "").strip()
+            except Exception:
+                letter_href = ""
+
+            if fund_href and fund_href.startswith("/"):
+                fund_href = "https://www.buysidedigest.com" + fund_href
+            if letter_href and letter_href.startswith("/"):
+                letter_href = "https://www.buysidedigest.com" + letter_href
+
+            h = Hit(
+                quarter=q_row,
+                letter_date=letter_date_str,
+                fund_name=fund_name,
+                fund_href=fund_href,
+                letter_href=letter_href,
+            )
+            hits_by_quarter.setdefault(q_row, []).append(h)
+        except Exception:
+            continue
+            try:
+                ctx.close()
+            finally:
+                browser.close()
+
+        if not hits_by_quarter:
+            cache_all[cache_key] = {
+                "quarters": ["LATEST"],
+                "lookback_days": lookback_days,
+                "by_quarter": {},
+            }
+            st.session_state["batch_cache"] = cache_all
+            st.info("No letters found within the selected lookback window.")
+            return
 
     # ---------------------- process hits (download + excerpt) ----------------------
     by_quarter: Dict[str, Dict[str, Any]] = {}
@@ -5355,19 +5285,15 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                             ok = _download_pdf_from_bsd_letter_page(ctx, page, h.letter_href, dest_pdf)
                             if ok and dest_pdf.exists() and dest_pdf.stat().st_size > 0:
                                 pdfs = [dest_pdf]
-                            else:
-                                st.warning(f"[{q}] Letter-page download failed for {brand}. Will try fund-page fallback.")
-                        else:
-                            st.warning(f"[{q}] Missing letter_href for {brand}. Will try fund-page fallback.")
-                    except Exception as e:
-                        st.warning(f"[{q}] Letter-page download error for {brand}: {e}. Will try fund-page fallback.")
+                    except Exception:
+                        pass
 
                     # Fallback to the prior flow if needed.
                     if not pdfs:
                         page.goto(h.fund_href)
                         pdfs = _download_quarter_pdf_from_fund(page, q, dest_dir)
                     if not pdfs:
-                        st.warning(f"[{q}] No PDF downloaded for {brand} ({h.letter_date}). Skipping without marking complete.")
+                        _mark_completed(brand, q)
                         continue
 
                     seen = set()
