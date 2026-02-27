@@ -292,6 +292,21 @@ def _downloads_dir() -> Path:
     return d
 
 
+
+def _outputs_dir() -> Path:
+    """Return a stable output directory for compiled/excerpt outputs.
+
+    Batch 8 'Latest' needs a place to write run artifacts (compiled PDF, manifest).
+    Reuse the existing compiled root (CP_DIR) so downstream UI behavior stays consistent.
+    """
+    try:
+        d = CP_DIR
+    except Exception:
+        d = Path("outputs")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _already_completed(brand: str, quarter: str) -> bool:
     """Check marker file for Batch 8 completion."""
     try:
