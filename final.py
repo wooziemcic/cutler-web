@@ -31,6 +31,18 @@ import re as _re
 import html as html_lib
 import streamlit as st
 
+
+# --- Playwright sync API sometimes fails after asyncio.run() closes the default loop (Streamlit 'Run All').
+# Ensure we always have an open event loop before entering sync_playwright().
+def _ensure_open_event_loop_for_playwright() -> None:
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except Exception:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
 # --- BSD auth + letter-page download helpers (added for login-gated downloads) ---
 
 _BSD_BASE_URL = "https://www.buysidedigest.com"
@@ -288,21 +300,6 @@ def _ensure_chromium_ready() -> bool:
 def _downloads_dir() -> Path:
     """Return a stable download directory for Batch 8 runs."""
     d = DL_DIR / "_latest"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-
-def _outputs_dir() -> Path:
-    """Return a stable output directory for compiled/excerpt outputs.
-
-    Batch 8 'Latest' needs a place to write run artifacts (compiled PDF, manifest).
-    Reuse the existing compiled root (CP_DIR) so downstream UI behavior stays consistent.
-    """
-    try:
-        d = CP_DIR
-    except Exception:
-        d = Path("outputs")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -4485,6 +4482,7 @@ def get_available_quarters() -> List[str]:
         # Ensure Chromium exists (Streamlit Cloud containers can be wiped)
         ensure_playwright_chromium_installed(show_messages=False)
 
+        _ensure_open_event_loop_for_playwright()
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
             ctx = browser.new_context()
@@ -4721,6 +4719,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
     }
 
     try:
+        _ensure_open_event_loop_for_playwright()
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
@@ -4949,85 +4948,6 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
     dest_dir = Path(_downloads_dir())
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-
-    # --- BSD latest table helper (robust against site DOM changes) ---
-    def _bsd_find_latest_table_and_colmap(page):
-        """Return (rows_locator, colmap0) where colmap0 is 0-based indices for columns we need.
-        We search for the specific hedge-fund database table by header text.
-        """
-        tables = page.locator("table")
-        n = tables.count()
-        best = None
-        best_score = -1
-        best_headers = []
-        for ti in range(n):
-            t = tables.nth(ti)
-            try:
-                heads = t.locator("thead tr th")
-                hc = heads.count()
-                if hc == 0:
-                    # Some tables render headers in first row of tbody
-                    heads = t.locator("tr").first.locator("th, td")
-                    hc = heads.count()
-                hdrs = []
-                for hi in range(hc):
-                    try:
-                        hdrs.append((heads.nth(hi).inner_text() or "").strip().lower())
-                    except Exception:
-                        hdrs.append("")
-                joined = " | ".join(hdrs)
-                score = 0
-                # Required-ish signals
-                if "letter date" in joined:
-                    score += 5
-                if "fund name" in joined or "fund" in joined:
-                    score += 3
-                if "tickers" in joined:
-                    score += 2
-                if "letter" in joined:
-                    score += 2
-                if "quarter" in joined:
-                    score += 1
-                if score > best_score:
-                    best_score = score
-                    best = t
-                    best_headers = hdrs
-            except Exception:
-                continue
-    
-        if best is None or best_score < 6:
-            # Fallback: use existing selector
-            rows = page.locator(TABLE_ROW)
-            colmap0 = {
-                "quarter": max(0, int(COLMAP.get("quarter", 1)) - 1),
-                "letter_date": max(0, int(COLMAP.get("letter_date", 2)) - 1),
-                "fund_name": max(0, int(COLMAP.get("fund_name", 3)) - 1),
-                "letter": max(0, int(COLMAP.get("letter", 4)) - 1),
-            }
-            return rows, colmap0
-    
-        # Build 0-based colmap by header match
-        def _find_idx(keys):
-            for k in keys:
-                for i, htxt in enumerate(best_headers):
-                    if k in (htxt or ""):
-                        return i
-            return None
-    
-        idx_date = _find_idx(["letter date", "date"])
-        idx_fund = _find_idx(["fund name", "fund"])
-        idx_letter = _find_idx(["letter"])
-        idx_quarter = _find_idx(["quarter"])
-    
-        # Safe fallbacks if any are missing
-        idx_date = 1 if idx_date is None else idx_date
-        idx_fund = 2 if idx_fund is None else idx_fund
-        idx_letter = 3 if idx_letter is None else idx_letter
-        idx_quarter = 0 if idx_quarter is None else idx_quarter
-    
-        rows = best.locator("tbody tr")
-        colmap0 = {"quarter": idx_quarter, "letter_date": idx_date, "fund_name": idx_fund, "letter": idx_letter}
-        return rows, colmap0
     st.markdown(f"### Running {BATCH8_NAME} (last {lookback_days} days)")
 
     cache_all = st.session_state.get("batch_cache", {})
@@ -5139,6 +5059,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
     # Collect hits from the database table within the window, grouped by row quarter.
     hits_by_quarter: Dict[str, List[Hit]] = {}
 
+    _ensure_open_event_loop_for_playwright()
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx = browser.new_context(accept_downloads=True)
@@ -5173,84 +5094,71 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
 
         st.write(f"Scanning latest table for items in window {start_date.isoformat()} → {today.isoformat()} …")
 
-        
-    # Robustly locate the correct BSD database table and dynamically map columns
-    rows, col0 = _bsd_find_latest_table_and_colmap(page)
-    try:
-        st.write(f"BSD table rows detected: {rows.count()}")
-    except Exception:
-        pass
+        rows = page.locator(TABLE_ROW)
 
-    # If the table is sorted newest-first (as BSD indicates), we can early-stop once we hit older dates.
-    for i in range(rows.count()):
-        row = rows.nth(i)
-        try:
-            tds = row.locator("td")
-            td_count = tds.count()
-            if td_count <= max(col0["quarter"], col0["letter_date"], col0["fund_name"], col0["letter"]):
-                continue
-
-            letter_date_str = (tds.nth(col0["letter_date"]).inner_text() or "").strip()
-            dt = _parse_letter_date_to_date(letter_date_str)
-            if dt is None:
-                continue
-
-            d = dt.date()
-            if d > today:
-                continue
-            if d < start_date:
-                break  # older than window; stop scanning
-
-            q_row = (tds.nth(col0["quarter"]).inner_text() or "").strip() or "UNKNOWN"
-
-            fund_cell = tds.nth(col0["fund_name"])
-            link = fund_cell.locator("a").first
-            fund_name = (link.inner_text() or "").strip()
-            fund_href = (link.get_attribute("href") or "").strip()
-
-            # Letter page link: prefer anchor in the "Letter" column containing '/bsd-letter/?letter='
-            letter_href = ""
+        # If the table is sorted newest-first (as BSD indicates), we can early-stop once we hit older dates.
+        for i in range(rows.count()):
+            row = rows.nth(i)
             try:
-                a = tds.nth(col0["letter"]).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter='], a[href*='/bsd-letter/']").first
-                if a.count() == 0:
-                    a = tds.nth(col0["quarter"]).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter='], a[href*='/bsd-letter/']").first
-                letter_href = (a.get_attribute("href") or "").strip()
-            except Exception:
+                letter_date_str = row.locator("td").nth(COLMAP["letter_date"]-1).inner_text().strip()
+                dt = _parse_letter_date_to_date(letter_date_str)
+                if dt is None:
+                    continue
+
+                d = dt.date()
+                if d > today:
+                    continue
+                if d < start_date:
+                    break  # older than window; stop scanning
+
+                # quarter comes from the row itself
+                q_row = row.locator("td").nth(COLMAP["quarter"]-1).inner_text().strip()
+                q_row = q_row or "UNKNOWN"
+
+                fund_cell = row.locator("td").nth(COLMAP["fund_name"]-1)
+                link = fund_cell.locator("a").first
+                fund_name = (link.inner_text() or "").strip()
+                fund_href = link.get_attribute("href") or ""
+
+                # Letter page link (opens the BSD letter viewer page)
                 letter_href = ""
+                try:
+                    letter_href = (row.locator("a[href*='bsd-letter/?letter='], a[href*='/bsd-letter/']").first.get_attribute("href") or "").strip()
+                except Exception:
+                    letter_href = ""
+                if fund_href and fund_href.startswith("/"):
+                    fund_href = "https://www.buysidedigest.com" + fund_href
 
-            if fund_href and fund_href.startswith("/"):
-                fund_href = "https://www.buysidedigest.com" + fund_href
-            if letter_href and letter_href.startswith("/"):
-                letter_href = "https://www.buysidedigest.com" + letter_href
+                h = Hit(
+                    quarter=q_row,
+                    letter_date=letter_date_str,
+                    fund_name=fund_name,
+                    fund_href=fund_href,
+                    letter_href=letter_href,
+                )
+                hits_by_quarter.setdefault(q_row, []).append(h)
+            except Exception:
+                continue
 
-            h = Hit(
-                quarter=q_row,
-                letter_date=letter_date_str,
-                fund_name=fund_name,
-                fund_href=fund_href,
-                letter_href=letter_href,
-            )
-            hits_by_quarter.setdefault(q_row, []).append(h)
-        except Exception:
-            continue
-            try:
-                ctx.close()
-            finally:
-                browser.close()
+        try:
+            ctx.close()
+        finally:
+            browser.close()
 
-        if not hits_by_quarter:
-            cache_all[cache_key] = {
-                "quarters": ["LATEST"],
-                "lookback_days": lookback_days,
-                "by_quarter": {},
-            }
-            st.session_state["batch_cache"] = cache_all
-            st.info("No letters found within the selected lookback window.")
-            return
+    if not hits_by_quarter:
+        cache_all[cache_key] = {
+            "quarters": ["LATEST"],
+            "lookback_days": lookback_days,
+            "by_quarter": {},
+        }
+        st.session_state["batch_cache"] = cache_all
+        st.info("No letters found within the selected lookback window.")
+        return
 
     # ---------------------- process hits (download + excerpt) ----------------------
     by_quarter: Dict[str, Dict[str, Any]] = {}
 
+    _ensure_open_event_loop_for_playwright()
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx = browser.new_context(accept_downloads=True)
@@ -5428,6 +5336,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
     current_rows: List[Dict[str, Any]] = []
     row_by_key: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
 
+    _ensure_open_event_loop_for_playwright()
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         ctx = browser.new_context(accept_downloads=True)
