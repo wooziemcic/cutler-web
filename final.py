@@ -127,7 +127,10 @@ def _ensure_bsd_logged_in(context, page, *, state_path: Path = _BSD_STATE_PATH) 
         pass
 
 def _download_pdf_from_bsd_letter_page(context, page, letter_url: str, dest_path: Path) -> bool:
-    """Open a /bsd-letter page, extract the DOWNLOAD LETTER href, and download bytes using the authenticated context."""
+    """Open a /bsd-letter page, extract the DOWNLOAD LETTER href, and download bytes using the authenticated context.
+
+    Returns True only if a valid PDF was saved to dest_path.
+    """
     try:
         page.goto(letter_url, wait_until="domcontentloaded", timeout=30000)
     except Exception:
@@ -135,9 +138,16 @@ def _download_pdf_from_bsd_letter_page(context, page, letter_url: str, dest_path
 
     _ensure_bsd_logged_in(context, page)
 
-    # The download button is an <a> tag with class zee1 and text DOWNLOAD LETTER.
+    # The download button is typically an <a> tag with class zee1 and text DOWNLOAD LETTER.
     href = ""
-    for sel in ["a.zee1", "a:has-text('DOWNLOAD LETTER')", "a[href*='investor-letters.']"]:
+    selectors = [
+        "a.zee1",
+        "a:has-text('DOWNLOAD LETTER')",
+        "a:has-text('Download Letter')",
+        "a[href$='.pdf']",
+        "a[href*='.pdf?']",
+    ]
+    for sel in selectors:
         try:
             loc = page.locator(sel).first
             if loc.count() > 0:
@@ -150,13 +160,28 @@ def _download_pdf_from_bsd_letter_page(context, page, letter_url: str, dest_path
     if not href:
         return False
 
+    # Normalize href to absolute URL
+    try:
+        href = html_lib.unescape(href).strip()
+    except Exception:
+        href = href.strip()
+
+    if href.startswith("//"):
+        href = "https:" + href
+    elif href.startswith("/"):
+        href = _BSD_BASE_URL + href
+
     # Fetch the PDF using Playwright request (keeps auth cookies).
+    def _looks_like_pdf(b: bytes) -> bool:
+        return bool(b) and (b[:4] == b"%PDF" or b"%PDF" in b[:1024])
+
     try:
         resp = context.request.get(href, timeout=60000)
         if resp and resp.ok:
             b = resp.body()
-            # Basic PDF sniff
-            if b and (b[:4] == b"%PDF" or b"%PDF" in b[:1024]):
+            if isinstance(b, str):
+                b = b.encode("utf-8", errors="ignore")
+            if isinstance(b, bytes) and _looks_like_pdf(b):
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(dest_path, "wb") as f:
                     f.write(b)
@@ -164,14 +189,16 @@ def _download_pdf_from_bsd_letter_page(context, page, letter_url: str, dest_path
     except Exception:
         pass
 
-    # Fallback: navigate to the PDF URL in the same page and save the response body
+    # Fallback: navigate to the PDF URL in the same page (helps if BSD requires a redirect),
+    # then fetch again via request.
     try:
         page.goto(href, wait_until="domcontentloaded", timeout=45000)
-        # If the PDF renders inline, grab the response via request anyway
         resp = context.request.get(href, timeout=60000)
         if resp and resp.ok:
             b = resp.body()
-            if b and (b[:4] == b"%PDF" or b"%PDF" in b[:1024]):
+            if isinstance(b, str):
+                b = b.encode("utf-8", errors="ignore")
+            if isinstance(b, bytes) and _looks_like_pdf(b):
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(dest_path, "wb") as f:
                     f.write(b)
@@ -5192,17 +5219,49 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                 # Letter page link (opens the BSD letter viewer page)
                 letter_href = ""
                 try:
-                    # Prefer anchor in "Letter" column
-                    a = tds.nth(idx_letter).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
-                    if a.count() == 0:
-                        # Some layouts put link in the Quarter column
-                        a = tds.nth(idx_quarter).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
-                    if a.count() > 0:
+                    # Prefer anchor in "Letter" column if present
+                    a = None
+                    try:
+                        a = tds.nth(idx_letter).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
+                        if a.count() == 0:
+                            a = None
+                    except Exception:
+                        a = None
+
+                    # Fallback: quarter column
+                    if a is None:
+                        try:
+                            aq = tds.nth(idx_quarter).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
+                            if aq.count() > 0:
+                                a = aq
+                        except Exception:
+                            pass
+
+                    # Fallback: fund column (sometimes the fund name anchors the letter viewer)
+                    if a is None:
+                        try:
+                            af = tds.nth(idx_fund).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
+                            if af.count() > 0:
+                                a = af
+                        except Exception:
+                            pass
+
+                    # Final fallback: any link in the row
+                    if a is None:
+                        try:
+                            ar = row.locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
+                            if ar.count() > 0:
+                                a = ar
+                        except Exception:
+                            pass
+
+                    if a is not None and a.count() > 0:
                         letter_href = (a.get_attribute("href", timeout=1200) or "").strip()
                 except Exception:
                     letter_href = ""
 
                 if fund_href and fund_href.startswith("/"):
+
                     fund_href = "https://www.buysidedigest.com" + fund_href
 
                 if letter_href and letter_href.startswith("/"):
@@ -5286,15 +5345,19 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                             ok = _download_pdf_from_bsd_letter_page(ctx, page, h.letter_href, dest_pdf)
                             if ok and dest_pdf.exists() and dest_pdf.stat().st_size > 0:
                                 pdfs = [dest_pdf]
-                    except Exception:
-                        pass
+                            else:
+                                st.warning(f"[{q}] Letter-page download failed for {brand}. Will try fund-page fallback.")
+                        else:
+                            st.warning(f"[{q}] Missing letter_href for {brand}. Will try fund-page fallback.")
+                    except Exception as e:
+                        st.warning(f"[{q}] Letter-page download error for {brand}: {e}. Will try fund-page fallback.")
 
                     # Fallback to the prior flow if needed.
                     if not pdfs:
                         page.goto(h.fund_href)
                         pdfs = _download_quarter_pdf_from_fund(page, q, dest_dir)
                     if not pdfs:
-                        _mark_completed(brand, q)
+                        st.warning(f"[{q}] No PDF downloaded for {brand} ({h.letter_date}). Skipping without marking complete.")
                         continue
 
                     seen = set()
