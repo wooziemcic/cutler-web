@@ -5246,12 +5246,22 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                         except Exception:
                             pass
 
-                    # Final fallback: any link in the row
+                    # Final fallback: any link in the row that looks like the letter viewer
                     if a is None:
                         try:
+                            # First try the most specific pattern
                             ar = row.locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
                             if ar.count() > 0:
                                 a = ar
+                        except Exception:
+                            pass
+
+                    # Extra fallback for BSD DOM changes: any anchor containing 'bsd-letter'
+                    if a is None:
+                        try:
+                            ar2 = row.locator("a[href*='bsd-letter']").first
+                            if ar2.count() > 0:
+                                a = ar2
                         except Exception:
                             pass
 
