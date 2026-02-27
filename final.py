@@ -5135,7 +5135,15 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         st.write(f"BSD table rows detected: {row_count}")
 
         # If the table is sorted newest-first (as BSD indicates), we can early-stop once we hit older dates.
+        scan_prog = st.progress(0.0)
         for i in range(row_count):
+            # progress (avoid "stuck" feeling)
+            if row_count:
+                try:
+                    scan_prog.progress(min(1.0, (i + 1) / float(row_count)))
+                except Exception:
+                    pass
+
             row = rows.nth(i)
             try:
                 tds = row.locator("td")
@@ -5143,7 +5151,19 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                 if td_count <= max(idx_quarter, idx_date, idx_fund, idx_letter):
                     continue
 
-                letter_date_str = (tds.nth(idx_date).inner_text() or "").strip()
+                # Pull all cell texts in one shot (fewer Playwright roundtrips)
+                try:
+                    cell_texts = [c.strip() for c in tds.all_inner_texts()]
+                except Exception:
+                    cell_texts = []
+
+                def _ct(idx: int) -> str:
+                    if 0 <= idx < len(cell_texts):
+                        return (cell_texts[idx] or "").strip()
+                    return ""
+
+                letter_date_str = _ct(idx_date)
+                # Keep per-call timeouts small so a single slow row doesn't hang the whole scan
                 dt = _parse_letter_date_to_date(letter_date_str)
                 if dt is None:
                     continue
@@ -5155,21 +5175,19 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     break  # older than window; stop scanning
 
                 # quarter comes from the row itself
-                q_row = (tds.nth(idx_quarter).inner_text() or "").strip()
-                q_row = q_row or "UNKNOWN"
+                q_row = _ct(idx_quarter) or "UNKNOWN"
 
+                # Fund name / href (prefer anchor in fund column)
                 fund_cell = tds.nth(idx_fund)
-                fund_name = ""
+                fund_name = _ct(idx_fund)
                 fund_href = ""
                 try:
                     link = fund_cell.locator("a").first
                     if link.count() > 0:
-                        fund_name = (link.inner_text() or "").strip()
-                        fund_href = (link.get_attribute("href") or "").strip()
-                    else:
-                        fund_name = (fund_cell.inner_text() or "").strip()
+                        fund_name = (link.inner_text(timeout=1200) or "").strip() or fund_name
+                        fund_href = (link.get_attribute("href", timeout=1200) or "").strip()
                 except Exception:
-                    fund_name = (fund_cell.inner_text() or "").strip()
+                    pass
 
                 # Letter page link (opens the BSD letter viewer page)
                 letter_href = ""
@@ -5179,7 +5197,8 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     if a.count() == 0:
                         # Some layouts put link in the Quarter column
                         a = tds.nth(idx_quarter).locator("a[href*='/bsd-letter/?letter='], a[href*='bsd-letter/?letter=']").first
-                    letter_href = (a.get_attribute("href") or "").strip()
+                    if a.count() > 0:
+                        letter_href = (a.get_attribute("href", timeout=1200) or "").strip()
                 except Exception:
                     letter_href = ""
 
