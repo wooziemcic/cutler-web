@@ -84,6 +84,7 @@ tickers = {
     "PINE": ['Alpine Income Property Trust'],
     "PKBK": ['Parke Bancorp'],
     "PPL": ['PPL Corporation'],
+    "PRGS": ['Progress Software'],
     "PTBS": ['Potomac Bancshares'],
     "SBCF": ['Seacoast Banking'],
     "SBFG": ['SB Financial Group'],
