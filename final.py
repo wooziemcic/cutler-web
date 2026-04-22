@@ -1473,7 +1473,6 @@ def compile_merged(batch: str, quarter: str, collected: List[Path], *, increment
 
 SA_ANALYSIS_BASE = "https://seeking-alpha.p.rapidapi.com"
 
-
 def _get_sa_rapidapi_key() -> str:
     key = os.getenv("SA_RAPIDAPI_KEY")
     if not key:
@@ -6047,13 +6046,28 @@ def main():
                 paths = []
                 for q, qd in by_q.items():
                     c = (qd or {}).get("compiled") or ""
-                    if c:
-                        paths.append({"quarter": q, "path": c})
+                    try:
+                        fp = Path(c) if c else None
+                    except Exception:
+                        fp = None
+                    if fp and fp.exists():
+                        paths.append({"quarter": q, "path": str(fp)})
                 ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
-                ra_state.setdefault("completed", []).append("fund_families")
-                ra_state["current_step"] = "seeking_alpha"
+
+                if paths:
+                    completed = ra_state.get("completed") or []
+                    if "fund_families" not in completed:
+                        completed.append("fund_families")
+                    ra_state["completed"] = completed
+                    ra_state["current_step"] = "seeking_alpha"
+                    _save_run_all_state(ra_state)
+                    st.rerun()
+
+                st.warning(
+                    "Run All: Fund Families finished scanning, but no compiled Fund Families PDF was produced yet."
+                )
                 _save_run_all_state(ra_state)
-                st.rerun()
+                st.stop()
 
             if step == "seeking_alpha":
                 max_articles = int(cfg.get("sa_max_articles", 5))
@@ -6570,7 +6584,7 @@ def main():
                         }
                     )
                 st.write("**Summary by ticker**")
-                st.dataframe(summary_rows, use_container_width=True)
+                st.dataframe(summary_rows, use_container_width=True) 
 
                 # Detailed view: dropdown + gauge + reasoning
                 ticker_options = [row["Ticker"] for row in summary_rows]
