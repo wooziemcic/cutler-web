@@ -5022,7 +5022,20 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                             if p.exists():
                                 excerpt_pdfs.append(p)
                     if excerpt_pdfs:
-                        compiled = compile_merged(BATCH8_NAME, q, excerpt_pdfs, incremental=False)
+                        # Deduplicate any recovered / newly-built excerpt PDFs before compilation.
+                        _seen_ep = set()
+                        _deduped_excerpt_pdfs = []
+                        for _p in excerpt_pdfs:
+                            try:
+                                _rp = Path(_p).resolve()
+                            except Exception:
+                                _rp = Path(_p)
+                            if _rp in _seen_ep:
+                                continue
+                            _seen_ep.add(_rp)
+                            _deduped_excerpt_pdfs.append(Path(_p))
+
+                        compiled = compile_merged(BATCH8_NAME, q, _deduped_excerpt_pdfs, incremental=False)
                         if compiled:
                             (qd or {})["compiled"] = str(compiled)
                 cache_entry["by_quarter"] = by_q
@@ -5182,7 +5195,17 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                 st.write(f"[{q}] Latest — {brand} ({h.letter_date})")
 
                 if _already_completed(brand, q):
+                    # Recover already-built excerpt PDFs from disk so Run All can still compile
+                    # a Fund Families output in this session instead of skipping silently.
                     st.info(f"[{q}] Skipping {brand} (already completed in this container).")
+                    try:
+                        existing_root = EX_DIR / q / _safe(brand)
+                        if existing_root.exists():
+                            for pdf in existing_root.rglob("*.pdf"):
+                                if pdf.is_file() and pdf not in excerpt_pdfs:
+                                    excerpt_pdfs.append(pdf)
+                    except Exception:
+                        pass
                     continue
 
                 table_rows.append(
@@ -6046,28 +6069,21 @@ def main():
                 paths = []
                 for q, qd in by_q.items():
                     c = (qd or {}).get("compiled") or ""
-                    try:
-                        fp = Path(c) if c else None
-                    except Exception:
-                        fp = None
-                    if fp and fp.exists():
-                        paths.append({"quarter": q, "path": str(fp)})
+                    if c and Path(c).exists():
+                        paths.append({"quarter": q, "path": c})
                 ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
-
                 if paths:
-                    completed = ra_state.get("completed") or []
-                    if "fund_families" not in completed:
-                        completed.append("fund_families")
-                    ra_state["completed"] = completed
+                    if "fund_families" not in (ra_state.get("completed") or []):
+                        ra_state.setdefault("completed", []).append("fund_families")
                     ra_state["current_step"] = "seeking_alpha"
                     _save_run_all_state(ra_state)
                     st.rerun()
-
-                st.warning(
-                    "Run All: Fund Families finished scanning, but no compiled Fund Families PDF was produced yet."
-                )
-                _save_run_all_state(ra_state)
-                st.stop()
+                else:
+                    st.warning(
+                        "Run All: Fund Families finished scanning, but no compiled Fund Families PDF was produced yet."
+                    )
+                    _save_run_all_state(ra_state)
+                    st.stop()
 
             if step == "seeking_alpha":
                 max_articles = int(cfg.get("sa_max_articles", 5))
