@@ -4935,30 +4935,54 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 # ---------- NEW: incremental per-batch updater ----------
 
 
+
 def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_word: bool, *, ensure_compiled_index: bool = False):
     """
-    Batch 8 — Latest:
-    - Ignore quarter selection; scan the BSD database table for anything published within the last N days.
-    - For each hit, download the correct quarter PDF from the fund page (quarter comes from the row).
-    - If fund name matches a known batch (1–7), label as '<FundName>_BatchX' for traceability.
+    Batch 8 — Latest direct flow:
+    Chromium -> BSD login -> latest-table date match -> View letter page
+    -> DOWNLOAD LETTER -> excerption / AI scoring -> compiled PDF.
+
+    This intentionally stays inside final.py and reuses the existing helpers:
+    _ensure_bsd_logged_in, _download_pdf_from_bsd_letter_page,
+    run_excerpt_and_build, compile_merged, and make_pdf/excerpt_check.
     """
 
-    # Ensure download directory exists for Batch 8
     dest_dir = Path(_downloads_dir())
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     st.markdown(f"### Running {BATCH8_NAME} (last {lookback_days} days)")
 
-    cache_all = st.session_state.get("batch_cache", {})
+    cache_all = st.session_state.get("batch_cache", {}) or {}
     cache_key = f"{BATCH8_NAME}|{lookback_days}d"
     cache_entry = cache_all.get(cache_key)
+
+    def _latest_abs_url(href: str) -> str:
+        href = (href or "").strip()
+        if href.startswith("/"):
+            return "https://www.buysidedigest.com" + href
+        return href
+
+    def _extract_view_link_from_row(row) -> str:
+        for sel in [
+            "a:has-text('View')",
+            "a[href*='bsd-letter/?letter=']",
+            "a[href*='/bsd-letter/']",
+        ]:
+            try:
+                loc = row.locator(sel).first
+                if loc.count() > 0:
+                    href = (loc.get_attribute("href") or "").strip()
+                    if href:
+                        return _latest_abs_url(href)
+            except Exception:
+                continue
+        return ""
 
     def _render_latest_results(by_quarter: Dict[str, Dict[str, Any]]) -> None:
         if not by_quarter:
             st.info("No letters found within the selected lookback window.")
             return
 
-        # Newest quarter first
         def _q_sort_key(q: str) -> Tuple[int, int]:
             pq = _parse_quarter_label(q) or (0, 0)
             return pq[0], pq[1]
@@ -4983,12 +5007,16 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                         )
                 except Exception:
                     st.warning(f"Could not open compiled PDF: {compiled}")
+            else:
+                st.info(f"[{q}] No compiled excerpt PDF was created.")
 
             if manifest_items:
-                with st.expander(f"[{q}] Download full letters ({len(manifest_items)})", expanded=False):
+                with st.expander(f"[{q}] Download full letters / excerpt artifacts ({len(manifest_items)})", expanded=False):
                     for idx, row in enumerate(manifest_items):
                         pdf_path = Path(row.get("downloaded_pdf") or "")
+                        excerpt_path = Path(row.get("excerpt_pdf") or "")
                         label_text = row.get("fund_family") or row.get("fund_name") or ""
+
                         if pdf_path.exists():
                             try:
                                 with open(pdf_path, "rb") as f:
@@ -5001,45 +5029,59 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                                     )
                             except Exception:
                                 st.warning(f"Could not open full letter: {pdf_path}")
-                        else:
-                            st.warning(f"Full letter file not found on disk: {pdf_path}")
+                        if excerpt_path.exists():
+                            try:
+                                with open(excerpt_path, "rb") as f:
+                                    st.download_button(
+                                        label=f"Download excerpt PDF #{idx+1}: {label_text or excerpt_path.name}",
+                                        data=f.read(),
+                                        file_name=excerpt_path.name,
+                                        mime="application/pdf",
+                                        key=f"download_excerpt_latest_{q}_{idx}",
+                                    )
+                            except Exception:
+                                pass
 
-    # cache reuse (session-only)
+    # Cache reuse. If cached outputs exist, optionally rebuild missing compiled PDFs
+    # from existing excerpt PDFs without scraping again.
     if cache_entry and cache_entry.get("lookback_days") == lookback_days:
-        # In Run All, we want to ensure the compiled PDF includes the ticker index page.
-        # If results are cached, we can rebuild the compiled PDF from the already-produced excerpt PDFs
-        # without re-scraping any websites.
         if ensure_compiled_index:
             try:
                 by_q = cache_entry.get("by_quarter") or {}
                 for q, qd in (by_q or {}).items():
                     manifest_items = (qd or {}).get("manifest_items") or []
-                    excerpt_pdfs = []
+                    excerpt_pdfs: List[Path] = []
                     for row in manifest_items:
                         ep = row.get("excerpt_pdf") or ""
-                        if ep:
-                            p = Path(ep)
-                            if p.exists():
-                                excerpt_pdfs.append(p)
-                    if excerpt_pdfs:
-                        # Deduplicate any recovered / newly-built excerpt PDFs before compilation.
-                        _seen_ep = set()
-                        _deduped_excerpt_pdfs = []
-                        for _p in excerpt_pdfs:
-                            try:
-                                _rp = Path(_p).resolve()
-                            except Exception:
-                                _rp = Path(_p)
-                            if _rp in _seen_ep:
-                                continue
-                            _seen_ep.add(_rp)
-                            _deduped_excerpt_pdfs.append(Path(_p))
+                        if ep and Path(ep).exists():
+                            excerpt_pdfs.append(Path(ep))
+                        else:
+                            ex_dir = Path(row.get("excerpt_dir") or "")
+                            if ex_dir.exists():
+                                excerpt_pdfs.extend([p for p in ex_dir.glob("Excerpted_*.pdf") if p.is_file()])
 
-                        compiled = compile_merged(BATCH8_NAME, q, _deduped_excerpt_pdfs, incremental=False)
+                    # As a final recovery, scan the quarter folder for existing excerpt PDFs.
+                    if not excerpt_pdfs:
+                        q_root = EX_DIR / q
+                        if q_root.exists():
+                            excerpt_pdfs.extend([p for p in q_root.rglob("Excerpted_*.pdf") if p.is_file()])
+
+                    if excerpt_pdfs:
+                        seen = set()
+                        deduped: List[Path] = []
+                        for p in excerpt_pdfs:
+                            try:
+                                rp = p.resolve()
+                            except Exception:
+                                rp = p
+                            if rp in seen:
+                                continue
+                            seen.add(rp)
+                            deduped.append(p)
+                        compiled = compile_merged(BATCH8_NAME, q, deduped, incremental=False)
                         if compiled:
                             (qd or {})["compiled"] = str(compiled)
                 cache_entry["by_quarter"] = by_q
-                cache_all = st.session_state.get("batch_cache", {}) or {}
                 cache_all[cache_key] = cache_entry
                 st.session_state["batch_cache"] = cache_all
             except Exception:
@@ -5049,13 +5091,14 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         _render_latest_results(cache_entry.get("by_quarter") or {})
         return
 
-    # ---------------------- scrape ----------------------
-    _ensure_chromium_ready()
+    if not _ensure_chromium_ready():
+        st.error("Cannot proceed — Chromium is not available.")
+        return
 
     exact_lookup, norm_lookup = _build_fund_to_batch_lookup()
 
     today = _today_et_date().date()
-    start_date = today - timedelta(days=max(1, lookback_days) - 1)
+    start_date = today - timedelta(days=max(1, int(lookback_days)) - 1)
 
     def _label_with_batch(fund_name: str) -> str:
         fn = (fund_name or "").strip()
@@ -5065,245 +5108,310 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         if not b:
             b = norm_lookup.get(_normalize_fund_name(fn))
         if b:
-            return f"{fn}_{b.replace(' ', '')}"  # FundName_Batch3
+            return f"{fn}_{b.replace(' ', '')}"
         return fn
 
-    # Collect hits from the database table within the window, grouped by row quarter.
     hits_by_quarter: Dict[str, List[Hit]] = {}
 
+    # One browser/session for the whole direct flow, so the login completed before
+    # scanning is the same authenticated context used for DOWNLOAD LETTER.
     _ensure_open_event_loop_for_playwright()
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = browser.new_context(accept_downloads=True)
-        # Reuse BSD login session if available (storage_state).
+
+        ctx_kwargs = {"accept_downloads": True}
         try:
             if _BSD_STATE_PATH.exists():
-                ctx.close()
-                ctx = browser.new_context(accept_downloads=True, storage_state=str(_BSD_STATE_PATH))
+                ctx_kwargs["storage_state"] = str(_BSD_STATE_PATH)
         except Exception:
             pass
 
+        ctx = browser.new_context(**ctx_kwargs)
         page = ctx.new_page()
         page.set_default_timeout(30000)
-        page.goto(BSD_URL)
-
-        # IMPORTANT: for Batch 8 we do NOT iterate quarters; we want the table sorted by most recent.
-        # Use "Last Two Quarters" view (latest_two) to ensure recency and reduce pagination.
-        try:
-            sel = page.locator(FILTERS["quarter"]).first
-            # Set to latest_two if present; else leave current selection.
-            sel.select_option("latest_two")
-        except Exception:
-            pass
 
         try:
-            # clear fund filter and search
-            page.locator(FILTERS["fund"]).first.fill("")
-            page.locator(FILTERS["search_btn"]).first.click()
-            page.wait_for_timeout(900)
-        except Exception:
-            pass
+            st.write("Opening BSD database…")
+            page.goto(BSD_URL, wait_until="domcontentloaded", timeout=45000)
 
-        st.write(f"Scanning latest table for items in window {start_date.isoformat()} → {today.isoformat()} …")
+            st.write("Checking BSD login/session…")
+            _ensure_bsd_logged_in(ctx, page)
+            st.success("BSD login/session ready.")
 
-        rows = page.locator(TABLE_ROW)
-
-        # If the table is sorted newest-first (as BSD indicates), we can early-stop once we hit older dates.
-        for i in range(rows.count()):
-            row = rows.nth(i)
+            # Date matching step
             try:
-                letter_date_str = row.locator("td").nth(COLMAP["letter_date"]-1).inner_text().strip()
-                dt = _parse_letter_date_to_date(letter_date_str)
-                if dt is None:
-                    continue
-
-                d = dt.date()
-                if d > today:
-                    continue
-                if d < start_date:
-                    break  # older than window; stop scanning
-
-                # quarter comes from the row itself
-                q_row = row.locator("td").nth(COLMAP["quarter"]-1).inner_text().strip()
-                q_row = q_row or "UNKNOWN"
-
-                fund_cell = row.locator("td").nth(COLMAP["fund_name"]-1)
-                link = fund_cell.locator("a").first
-                fund_name = (link.inner_text() or "").strip()
-                fund_href = link.get_attribute("href") or ""
-
-                # Letter page link (opens the BSD letter viewer page)
-                letter_href = ""
-                try:
-                    letter_href = (row.locator("a[href*='bsd-letter/?letter='], a[href*='/bsd-letter/']").first.get_attribute("href") or "").strip()
-                except Exception:
-                    letter_href = ""
-                if fund_href and fund_href.startswith("/"):
-                    fund_href = "https://www.buysidedigest.com" + fund_href
-
-                h = Hit(
-                    quarter=q_row,
-                    letter_date=letter_date_str,
-                    fund_name=fund_name,
-                    fund_href=fund_href,
-                    letter_href=letter_href,
-                )
-                hits_by_quarter.setdefault(q_row, []).append(h)
+                sel = page.locator(FILTERS["quarter"]).first
+                sel.select_option("latest_two")
             except Exception:
-                continue
+                pass
 
-        try:
-            ctx.close()
-        finally:
-            browser.close()
+            try:
+                page.locator(FILTERS["fund"]).first.fill("")
+                page.locator(FILTERS["search_btn"]).first.click()
+                page.wait_for_timeout(900)
+            except Exception:
+                pass
 
-    if not hits_by_quarter:
-        cache_all[cache_key] = {
-            "quarters": ["LATEST"],
-            "lookback_days": lookback_days,
-            "by_quarter": {},
-        }
-        st.session_state["batch_cache"] = cache_all
-        st.info("No letters found within the selected lookback window.")
-        return
+            st.write(f"Matching latest table dates for window {start_date.isoformat()} → {today.isoformat()} …")
 
-    # ---------------------- process hits (download + excerpt) ----------------------
-    by_quarter: Dict[str, Dict[str, Any]] = {}
+            rows = page.locator(TABLE_ROW)
+            row_count = rows.count()
 
-    _ensure_open_event_loop_for_playwright()
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = browser.new_context(accept_downloads=True)
-        # Reuse BSD login session if available (storage_state).
-        try:
-            if _BSD_STATE_PATH.exists():
-                ctx.close()
-                ctx = browser.new_context(accept_downloads=True, storage_state=str(_BSD_STATE_PATH))
-        except Exception:
-            pass
+            scan_prog = st.progress(0.0)
+            scan_status = st.empty()
 
-        page = ctx.new_page()
-        page.set_default_timeout(30000)
+            for i in range(row_count):
+                try:
+                    scan_status.info(f"Matching date row {i + 1}/{row_count}…")
+                    scan_prog.progress((i + 1) / max(1, row_count))
 
-        for q, hits in hits_by_quarter.items():
-            table_rows: List[Dict[str, Any]] = []
-            manifest_items: List[Dict[str, Any]] = []
-            excerpt_pdfs: List[Path] = []
+                    row = rows.nth(i)
 
-            for h in hits:
-                brand = _label_with_batch(h.fund_name or "")
-                st.write(f"[{q}] Latest — {brand} ({h.letter_date})")
+                    letter_date_str = row.locator("td").nth(COLMAP["letter_date"] - 1).inner_text().strip()
+                    dt = _parse_letter_date_to_date(letter_date_str)
+                    if dt is None:
+                        continue
 
-                if _already_completed(brand, q):
-                    # Recover already-built excerpt PDFs from disk so Run All can still compile
-                    # a Fund Families output in this session instead of skipping silently.
-                    st.info(f"[{q}] Skipping {brand} (already completed in this container).")
-                    try:
-                        existing_root = EX_DIR / q / _safe(brand)
-                        if existing_root.exists():
-                            for pdf in existing_root.rglob("*.pdf"):
-                                if pdf.is_file() and pdf not in excerpt_pdfs:
-                                    excerpt_pdfs.append(pdf)
-                    except Exception:
-                        pass
+                    d = dt.date()
+                    if d > today:
+                        continue
+                    if d < start_date:
+                        break
+
+                    q_row = row.locator("td").nth(COLMAP["quarter"] - 1).inner_text().strip() or "UNKNOWN"
+
+                    fund_cell = row.locator("td").nth(COLMAP["fund_name"] - 1)
+                    link = fund_cell.locator("a").first
+                    fund_name = (link.inner_text() or "").strip()
+                    fund_href = _latest_abs_url(link.get_attribute("href") or "")
+                    letter_href = _extract_view_link_from_row(row)
+
+                    if not fund_name:
+                        continue
+
+                    st.caption(f"[MATCH] {q_row} — {fund_name} ({letter_date_str})")
+
+                    hits_by_quarter.setdefault(q_row, []).append(
+                        Hit(
+                            quarter=q_row,
+                            letter_date=letter_date_str,
+                            fund_name=fund_name,
+                            fund_href=fund_href,
+                            letter_href=letter_href,
+                        )
+                    )
+                except Exception:
                     continue
 
-                table_rows.append(
-                    {
-                        "fund_family": brand,
-                        "search_token": "",
-                        "quarter": q,
-                        "letter_date": h.letter_date,
-                        "fund_name": h.fund_name,
-                        "fund_href": h.fund_href,
-                    }
-                )
-                try:
-                    pdfs: List[Path] = []
-                    # New logic: download from the BSD letter page first (login-gated DOWNLOAD LETTER button),
-                    # then run ticker check/excerption. This avoids relying on fund pages.
+            scan_prog.empty()
+            scan_status.empty()
+
+            total_hits = sum(len(v) for v in hits_by_quarter.values())
+            st.success(f"Date matching complete. Matched {total_hits} latest letter(s).")
+
+            if not hits_by_quarter:
+                cache_all[cache_key] = {
+                    "quarters": ["LATEST"],
+                    "lookback_days": lookback_days,
+                    "by_quarter": {},
+                }
+                st.session_state["batch_cache"] = cache_all
+                st.info("No letters found within the selected lookback window.")
+                return
+
+            by_quarter: Dict[str, Dict[str, Any]] = {}
+            process_prog = st.progress(0.0)
+            process_status = st.empty()
+            processed_count = 0
+
+            for q, hits in hits_by_quarter.items():
+                table_rows: List[Dict[str, Any]] = []
+                manifest_items: List[Dict[str, Any]] = []
+                excerpt_pdfs: List[Path] = []
+
+                for h in hits:
+                    processed_count += 1
+                    brand = _label_with_batch(h.fund_name or "")
+                    process_status.info(f"Processing letter {processed_count}/{total_hits}: {brand}")
+                    process_prog.progress(processed_count / max(1, total_hits))
+
+                    st.write(f"[{q}] Latest — {brand} ({h.letter_date})")
+
+                    if _already_completed(brand, q):
+                        st.info(f"[{q}] Already completed; recovering existing excerpt PDFs from disk.")
+                        try:
+                            existing_root = EX_DIR / q / _safe(brand)
+                            if existing_root.exists():
+                                for pdf in existing_root.rglob("Excerpted_*.pdf"):
+                                    if pdf.is_file():
+                                        excerpt_pdfs.append(pdf)
+                        except Exception:
+                            pass
+                        continue
+
+                    table_rows.append(
+                        {
+                            "fund_family": brand,
+                            "search_token": "",
+                            "quarter": q,
+                            "letter_date": h.letter_date,
+                            "fund_name": h.fund_name,
+                            "fund_href": h.fund_href,
+                            "letter_href": h.letter_href,
+                        }
+                    )
+
                     try:
-                        if getattr(h, 'letter_href', ''):
-                            _ensure_bsd_logged_in(ctx, page)
+                        pdfs: List[Path] = []
+
+                        # Preferred path: actual View link -> DOWNLOAD LETTER.
+                        if getattr(h, "letter_href", ""):
                             safe_base = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{h.fund_name}_{h.quarter}_{h.letter_date}")
                             dest_pdf = dest_dir / f"{safe_base}.pdf"
+
+                            st.write(f"Opening View page and downloading letter: {h.fund_name}")
                             ok = _download_pdf_from_bsd_letter_page(ctx, page, h.letter_href, dest_pdf)
                             if ok and dest_pdf.exists() and dest_pdf.stat().st_size > 0:
                                 pdfs = [dest_pdf]
+                                st.success(f"Downloaded letter: {dest_pdf.name}")
+                            else:
+                                st.warning(f"Download Letter did not produce a PDF for {h.fund_name}.")
+
+                        # Fallback path: fund profile page.
+                        if not pdfs and h.fund_href:
+                            st.write(f"Fallback: opening fund profile page for {h.fund_name}.")
+                            page.goto(h.fund_href, wait_until="domcontentloaded", timeout=45000)
+                            pdfs = _download_quarter_pdf_from_fund(page, q, dest_dir) or []
+
+                        if not pdfs:
+                            st.warning(f"[{q}] No PDF downloaded for {brand}.")
+                            _mark_completed(brand, q)
+                            continue
+
+                        seen_pdf_names = set()
+                        for pdf in pdfs:
+                            if pdf.name in seen_pdf_names:
+                                continue
+                            seen_pdf_names.add(pdf.name)
+
+                            out_dir = EX_DIR / q / _safe(brand) / _safe(pdf.stem)
+
+                            st.write(f"Running excerption for: {pdf.name}")
+                            st.caption(
+                                "AI relevance scoring: "
+                                + ("ON" if st.session_state.get("ai_score_enabled", False) else "OFF")
+                                + f" | model={st.session_state.get('ai_score_model', 'gpt-4o-mini')}"
+                            )
+
+                            built = run_excerpt_and_build(
+                                Path(pdf),
+                                out_dir,
+                                source_pdf_name=Path(pdf).name,
+                                letter_date=h.letter_date or None,
+                                source_url=h.fund_href or h.letter_href,
+                            )
+
+                            # Critical recovery: the underlying builder can create the PDF
+                            # but still return None in some cases. Recover it from out_dir.
+                            recovered_pdf = ""
+                            if built and Path(built).exists():
+                                recovered_pdf = str(Path(built))
+                                excerpt_pdfs.append(Path(built))
+                                st.success(f"Excerpt PDF created: {Path(built).name}")
+                            else:
+                                recovered = list(out_dir.glob("Excerpted_*.pdf")) if out_dir.exists() else []
+                                if recovered:
+                                    for rp in recovered:
+                                        excerpt_pdfs.append(Path(rp))
+                                    recovered_pdf = str(recovered[0])
+                                    st.success(f"Recovered excerpt PDF from disk: {recovered[0].name}")
+                                else:
+                                    st.info("No narrative excerpts found; no excerpt PDF created for this letter.")
+
+                            manifest_items.append(
+                                {
+                                    "fund_family": brand,
+                                    "search_token": "",
+                                    "letter_date": h.letter_date or "",
+                                    "downloaded_pdf": str(pdf),
+                                    "source_pdf_name": Path(pdf).name,
+                                    "excerpt_dir": str(out_dir),
+                                    "excerpts_json": str(out_dir / "excerpts_clean.json"),
+                                    "excerpt_pdf": recovered_pdf,
+                                    "fund_name": h.fund_name,
+                                    "fund_href": h.fund_href,
+                                    "letter_href": h.letter_href,
+                                }
+                            )
+
+                        _mark_completed(brand, q)
+
+                    except Exception as e:
+                        st.warning(f"[{q}] Failed to process {brand}: {e}")
+                        continue
+
+                # Final recovery before compile: scan touched manifest output dirs.
+                for item in manifest_items:
+                    try:
+                        ex_dir = Path(item.get("excerpt_dir") or "")
+                        if ex_dir.exists():
+                            for rp in ex_dir.glob("Excerpted_*.pdf"):
+                                if rp.is_file():
+                                    excerpt_pdfs.append(rp)
+                                    if not item.get("excerpt_pdf"):
+                                        item["excerpt_pdf"] = str(rp)
                     except Exception:
                         pass
 
-                    # Fallback to the prior flow if needed.
-                    if not pdfs:
-                        page.goto(h.fund_href)
-                        pdfs = _download_quarter_pdf_from_fund(page, q, dest_dir)
-                    if not pdfs:
-                        _mark_completed(brand, q)
+                # Deduplicate.
+                seen_paths = set()
+                deduped_excerpt_pdfs: List[Path] = []
+                for p in excerpt_pdfs:
+                    try:
+                        rp = Path(p).resolve()
+                    except Exception:
+                        rp = Path(p)
+                    if rp in seen_paths:
                         continue
+                    seen_paths.add(rp)
+                    deduped_excerpt_pdfs.append(Path(p))
 
-                    seen = set()
-                    for pdf in pdfs:
-                        if pdf.name in seen:
-                            continue
-                        seen.add(pdf.name)
+                st.write(f"[{q}] Compiling {len(deduped_excerpt_pdfs)} excerpt PDF(s)…")
+                compiled = compile_merged(BATCH8_NAME, q, deduped_excerpt_pdfs, incremental=False)
 
-                        out_dir = EX_DIR / q / _safe(brand) / _safe(pdf.stem)
-                        built = run_excerpt_and_build(
-                            pdf,
-                            out_dir,
-                            source_pdf_name=pdf.name,
-                            letter_date=h.letter_date or None,
-                            source_url=h.fund_href,
-                        )
+                if compiled and Path(compiled).exists():
+                    st.success(f"[{q}] Compiled PDF created: {Path(compiled).name}")
+                else:
+                    st.info(f"[{q}] No compiled PDF created because no excerpt PDFs were available.")
 
-                        manifest_items.append(
-                            {
-                                "fund_family": brand,
-                                "search_token": "",
-                                "letter_date": h.letter_date or "",
-                                "downloaded_pdf": str(pdf),
-                                "source_pdf_name": pdf.name,
-                                "excerpt_dir": str(out_dir),
-                                "excerpts_json": str(out_dir / "excerpts_clean.json"),
-                                "excerpt_pdf": str(built) if built else "",
-                                "fund_name": h.fund_name,
-                                "fund_href": h.fund_href,
-                            }
-                        )
+                by_quarter[q] = {
+                    "compiled": str(compiled) if compiled else "",
+                    "manifest_items": manifest_items,
+                    "table_rows": table_rows,
+                }
 
-                        if built:
-                            excerpt_pdfs.append(Path(built))
+            process_prog.empty()
+            process_status.empty()
 
-                    _mark_completed(brand, q)
-                except Exception as e:
-                    st.warning(f"[{q}] Failed to process {brand}: {e}")
-                    continue
-
-            compiled = compile_merged(BATCH8_NAME, q, excerpt_pdfs, incremental=False)
-            by_quarter[q] = {
-                "compiled": str(compiled) if compiled else "",
-                "manifest_items": manifest_items,
-                "table_rows": table_rows,
+            cache_all[cache_key] = {
+                "quarters": ["LATEST"],
+                "lookback_days": lookback_days,
+                "by_quarter": by_quarter,
             }
+            st.session_state["batch_cache"] = cache_all
 
-        try:
-            ctx.close()
+            st.success("Batch 8 latest run complete.")
+            _render_latest_results(by_quarter)
+
         finally:
-            browser.close()
-
-    # Save to session cache
-    cache_all[cache_key] = {
-        "quarters": ["LATEST"],
-        "lookback_days": lookback_days,
-        "by_quarter": by_quarter,
-    }
-    st.session_state["batch_cache"] = cache_all
-
-    st.success("Batch 8 latest run complete.")
-    _render_latest_results(by_quarter)
-
-
-
+            try:
+                ctx.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 def _row_key(row: Dict[str, Any]) -> Tuple[str, str, str, str, str]:
     """
@@ -6080,7 +6188,8 @@ def main():
                     st.rerun()
                 else:
                     st.warning(
-                        "Run All: Fund Families finished scanning, but no compiled Fund Families PDF was produced yet."
+                        "Run All: Fund Families finished, but no compiled Fund Families PDF was produced. "
+                        "Check the Fund Families logs above; this usually means downloaded letters had no narrative ticker excerpts."
                     )
                     _save_run_all_state(ra_state)
                     st.stop()
