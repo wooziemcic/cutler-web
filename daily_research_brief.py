@@ -143,6 +143,24 @@ RELEVANCE_COLUMNS = INVENTORY_COLUMNS + [
     "investment_rationale",
 ]
 
+INSUFFICIENT_TEXT_NOTICE = (
+    "No verified financial claims were generated because extracted text was insufficient. "
+    "The observations below are based on filenames, folders, document types, and "
+    "broker/source coverage only."
+)
+SENSITIVE_FINANCE_PATTERNS = [
+    r"\bbeat(?:s|en|ing)?\b", r"\bmiss(?:es|ed|ing)?\b", r"\beps\b", r"\brevenue\b",
+    r"\bprice target\b", r"\brating (?:was |has been )?(?:raised|lowered|upgraded|downgraded)\b",
+    r"\brating (?:changed|moved|cut|increased|decreased)\b",
+    r"\bguidance (?:was |has been )?(?:raised|lowered|increased|decreased|cut)\b",
+    r"\bunderwriting performance\b", r"\bcredit (?:deterioration|improvement)\b",
+    r"\bcredit (?:improved|deteriorated|weakened|strengthened)\b",
+    r"\bmargins?\b", r"\bcapex\b", r"\bliquidity\b", r"\bvaluation\b",
+    r"\b(?:market weight|overweight|underweight)\b",
+    r"\boperational (?:strength|weakness|performance)\b", r"\bperformance was (?:robust|strong|weak)\b",
+    r"\bstrong earnings\b", r"\bweak earnings\b",
+]
+
 
 def create_session_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="cutler_daily_research_"))
@@ -704,6 +722,7 @@ def build_deterministic_brief(
     selected_by_path = {str(x.get("relative_path") or ""): x for x in selected_text}
     high = relevance[relevance["priority_level"] == "High"].head(15) if not relevance.empty else relevance
     skipped = relevance[~relevance["relative_path"].isin(selected_by_path.keys())] if not relevance.empty else relevance
+    verified_text = verified_extracted_text_items(selected_text)
     lines = [
         "# Daily Research Brief",
         "",
@@ -712,7 +731,7 @@ def build_deterministic_brief(
         f"Files lightly scanned: {len(selected_text)}",
         f"High-priority files: {len(relevance[relevance['priority_level'] == 'High']) if not relevance.empty else 0}",
         "",
-        "## Top Tickers / Entities",
+        "## Metadata-Based Observations",
     ]
     if ticker_summary.empty:
         lines.append("No ticker could be identified conservatively from the filenames.")
@@ -724,7 +743,7 @@ def build_deterministic_brief(
                 f"max score {row['max_relevance_score']}."
             )
 
-    lines.extend(["", "## Top High-Priority Documents"])
+    lines.extend(["", "### Top High-Priority Documents"])
     if high.empty:
         lines.append("No files reached the deterministic high-priority threshold.")
     else:
@@ -735,7 +754,7 @@ def build_deterministic_brief(
                 f"{row['ticker'] or 'ticker uncertain'}). Rationale: {row['investment_rationale']}"
             )
 
-    lines.extend(["", "## Broker Coverage Highlights"])
+    lines.extend(["", "### Broker Coverage Highlights"])
     if broker_summary.empty:
         lines.append("No normalized broker/source coverage was identified.")
     else:
@@ -745,29 +764,36 @@ def build_deterministic_brief(
                 f"{row['brokers_or_sources']}; {row['attention_reason']}."
             )
 
-    lines.extend(["", "## Category Summary"])
+    lines.extend(["", "### Category Summary"])
     for _, row in category_summary.iterrows():
         lines.append(
             f"- **{row['category']}**: {row['file_count']} file(s), "
             f"{row['high_priority_files']} high priority; common types: {row['top_document_types'] or 'other'}."
         )
 
-    lines.extend(["", "## Possible Signals From Metadata and Limited Text"])
-    if not selected_text:
-        lines.append("Not enough extracted text to verify details beyond filename/folder metadata.")
+    lines.extend(["", "## Extracted-Text Signals"])
+    if not verified_text:
+        lines.append(INSUFFICIENT_TEXT_NOTICE)
+        lines.extend(["", "### Potential Areas to Review"])
+        lines.append(
+            "Review the high-priority source files listed above for actual results, estimates, "
+            "ratings, guidance, and other financial conclusions."
+        )
     else:
-        for item in selected_text[:12]:
-            text = re.sub(r"\s+", " ", str(item.get("extracted_text") or "")).strip()
-            if len(text) < 80:
-                signal = "Not enough extracted text to verify details beyond filename/folder metadata."
-            else:
-                signal = text[:300] + ("..." if len(text) > 300 else "")
-            lines.append(f"- `{item['relative_path']}`: {signal}")
+        lines.append(
+            "The following are direct excerpts from successfully extracted source text. "
+            "They are not independent conclusions."
+        )
+        for item in verified_text[:12]:
+            text = _normalized_extracted_text(item)[:300]
+            excerpt = text + ("..." if len(_normalized_extracted_text(item)) > 300 else "")
+            lines.append(f"- `{item['relative_path']}`: extracted-text excerpt: \"{excerpt}\"")
 
     lines.extend(
         [
             "",
-            "## Recommended Follow-Up for Geoff / Mitko",
+            "## Recommended Follow-Up",
+            "For Geoff / Mitko:",
             "- Review the highest-scoring documents first, especially repeated tickers across multiple sources.",
             "- Prioritize tickers with multiple brokers, cross-category coverage, or both credit and equity research.",
             "- Open source files before acting on any possible signal; this brief uses only filenames, metadata, and limited first-page text.",
@@ -799,6 +825,56 @@ def build_deterministic_brief(
     return "\n".join(lines)
 
 
+def _normalized_extracted_text(item: Dict[str, Any]) -> str:
+    return re.sub(r"\s+", " ", str(item.get("extracted_text") or "")).strip()
+
+
+def verified_extracted_text_items(selected_text: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    verified = []
+    for item in selected_text:
+        status = str(item.get("text_extraction_status") or "")
+        text = _normalized_extracted_text(item)
+        if status != "scanned" or len(text) < 160:
+            continue
+        verified.append(item)
+    return verified
+
+
+def validate_llm_brief_grounding(text: str, selected_text: List[Dict[str, Any]]) -> bool:
+    """Require sensitive financial claims to be direct quotes from a cited, verified source."""
+    verified = verified_extracted_text_items(selected_text)
+    if not verified:
+        return not any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in SENSITIVE_FINANCE_PATTERNS)
+
+    for line in text.splitlines():
+        matched_patterns = [
+            pattern for pattern in SENSITIVE_FINANCE_PATTERNS
+            if re.search(pattern, line, flags=re.IGNORECASE)
+        ]
+        if not matched_patterns:
+            continue
+        cited = [
+            item for item in verified
+            if str(item.get("relative_path") or "") in line or str(item.get("file_name") or "") in line
+        ]
+        if not cited:
+            return False
+        quoted_parts = [part.strip() for part in re.findall(r'"([^"]+)"', line) if part.strip()]
+        if not quoted_parts:
+            return False
+        if not any(
+            any(
+                len(quote) >= 20
+                and quote.lower() in _normalized_extracted_text(item).lower()
+                and all(re.search(pattern, quote, flags=re.IGNORECASE) for pattern in matched_patterns)
+                for quote in quoted_parts
+            )
+            for item in cited
+        ):
+            return False
+    return True
+
+
 def build_llm_evidence_payload(
     relevance: pd.DataFrame,
     selected_text: List[Dict[str, Any]],
@@ -808,7 +884,9 @@ def build_llm_evidence_payload(
     records = []
     used = 0
     for item in selected_text:
-        snippet = re.sub(r"\s+", " ", str(item.get("extracted_text") or "")).strip()[:1200]
+        snippet = _normalized_extracted_text(item)[:1200]
+        status = str(item.get("text_extraction_status") or "")
+        verified = status == "scanned" and len(snippet) >= 160
         record = {
             "relative_path": item.get("relative_path"),
             "ticker": item.get("ticker"),
@@ -816,7 +894,9 @@ def build_llm_evidence_payload(
             "source_or_broker": item.get("source_or_broker"),
             "document_type": item.get("document_type"),
             "relevance_score": item.get("relevance_score"),
-            "limited_text": snippet or "Not enough extracted text to verify details beyond filename/folder metadata.",
+            "text_extraction_status": status,
+            "verified_text_available": verified,
+            "limited_text": snippet if verified else INSUFFICIENT_TEXT_NOTICE,
         }
         encoded = json.dumps(record, ensure_ascii=False)
         if used + len(encoded) > max_total_chars:
@@ -833,6 +913,10 @@ def build_llm_evidence_payload(
     ticker_summary = build_ticker_summary(relevance).head(20).to_dict(orient="records")
     return json.dumps(
         {
+            "grounding_rule": (
+                "Metadata may establish file availability, ticker/source/category coverage, and document type only. "
+                "Financial claims require verified_text_available=true and must cite that source filename."
+            ),
             "selected_sources": records,
             "top_metadata": metadata,
             "broker_coverage": broker_coverage,

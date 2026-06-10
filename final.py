@@ -5634,19 +5634,31 @@ def _generate_daily_research_brief_with_optional_llm(
     if not api_key:
         return fallback, "deterministic"
 
+    verified_text = daily_research_brief.verified_extracted_text_items(selected_text)
+    if not verified_text:
+        return fallback, "deterministic_metadata_only"
+
     evidence = daily_research_brief.build_llm_evidence_payload(relevance_df, selected_text)
     system_prompt = (
-        "You create concise daily investment research briefs using only the supplied source metadata "
-        "and limited extracted text. Never invent financial numbers, ratings, estimates, beats/misses, "
-        "price targets, or conclusions. Clearly distinguish metadata-only observations from text-supported "
-        "observations. When evidence is weak, write exactly: "
-        "'Not enough extracted text to verify details beyond filename/folder metadata.' "
-        "Include source relative paths for every observation."
+        "You create a strictly source-grounded daily investment research brief. "
+        "Metadata can support only file existence, ticker occurrence, broker/source coverage counts, "
+        "detected document type, and folder/category location. A filename or document type never proves "
+        "a rating change, beat/miss, price target change, guidance change, EPS, revenue, underwriting "
+        "performance, credit deterioration/improvement, margins, capex, liquidity, valuation, weight "
+        "change, or operational strength/weakness. State such a financial claim only when a supplied "
+        "record has verified_text_available=true and its limited_text explicitly supports the exact claim. "
+        "Every financial claim must cite its source relative_path in backticks on the same bullet. "
+        "Every other factual observation must also cite one or more source relative_path values; "
+        "recommendation bullets are the only exception. "
+        "Never infer direction, magnitude, causality, or investment conclusions. "
+        "When evidence is insufficient, use the supplied insufficiency notice exactly."
     )
     user_prompt = (
-        "Create a Markdown daily research memo with these sections: Top Tickers / Entities, "
-        "Top High-Priority Documents, Broker Coverage Highlights, Category-Wise Summary, Possible Signals, Recommended Follow-Up "
-        "for Geoff / Mitko, Skipped or Lightly Scanned Files, and Source References.\n\n"
+        "Create a Markdown memo with exactly these top-level sections: Metadata-Based Observations, "
+        "Extracted-Text Signals, Recommended Follow-Up, and Source References. "
+        "Keep broker coverage highlights and scoring rationales inside Metadata-Based Observations. "
+        "Use Potential Areas to Review instead of signals when extracted text is weak. "
+        "Cite a source filename/path for every extracted-text claim.\n\n"
         f"Source archive: {source_name}\n\nEvidence JSON:\n{evidence}"
     )
     try:
@@ -5661,7 +5673,7 @@ def _generate_daily_research_brief_with_optional_llm(
             max_tokens=1800,
         )
         text = response["choices"][0]["message"]["content"].strip()
-        if text:
+        if text and daily_research_brief.validate_llm_brief_grounding(text, selected_text):
             return text, "openai"
     except Exception:
         pass
