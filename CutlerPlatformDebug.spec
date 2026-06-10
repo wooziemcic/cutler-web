@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('final.py', '.'), ('run_app.py', '.'), ('tickers.py', '.'), ('fund_families_biglist.py', '.'), ('podcasts_config.py', '.'), ('podcast_ingest.py', '.'), ('podcast_excerpts.py', '.'), ('podcast_insights.py', '.'), ('seekingalpha_excerpts.py', '.'), ('sa_news_ai.py', '.'), ('sa_analysis_api.py', '.'), ('sa_app.py', '.'), ('ai_insights.py', '.'), ('make_pdf.py', '.'), ('excerpt_check.py', '.'), ('reddit_excerpts.py', '.'), ('rss_lookup.py', '.'), ('site_app.py', '.'), ('build_podcast_sources.py', '.'), ('podcast_sources.csv', '.'), ('podcast_list.csv', '.'), ('Fixed_Batch_Fund_Lists.csv', '.'), ('cutler.png', '.'), ('.env', '.'), ('ms-playwright', 'ms-playwright')]
+datas = [('final.py', '.'), ('run_app.py', '.'), ('tickers.py', '.'), ('fund_families_biglist.py', '.'), ('daily_research_brief.py', '.'), ('podcasts_config.py', '.'), ('podcast_ingest.py', '.'), ('podcast_excerpts.py', '.'), ('podcast_insights.py', '.'), ('seekingalpha_excerpts.py', '.'), ('sa_news_ai.py', '.'), ('sa_analysis_api.py', '.'), ('sa_app.py', '.'), ('ai_insights.py', '.'), ('make_pdf.py', '.'), ('excerpt_check.py', '.'), ('reddit_excerpts.py', '.'), ('rss_lookup.py', '.'), ('site_app.py', '.'), ('build_podcast_sources.py', '.'), ('podcast_sources.csv', '.'), ('podcast_list.csv', '.'), ('Fixed_Batch_Fund_Lists.csv', '.'), ('cutler.png', '.'), ('.env', '.'), ('ms-playwright', 'ms-playwright')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('streamlit')
@@ -31,6 +31,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('rapidfuzz')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('pandas')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('openpyxl')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('numpy')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]

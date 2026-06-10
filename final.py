@@ -377,6 +377,7 @@ substack_excerpts = _import("substack_excerpts", HERE / "substack_excerpts.py")
 
 excerpt_check = _import("excerpt_check", HERE / "excerpt_check.py")
 make_pdf = _import("make_pdf", HERE / "make_pdf.py")
+daily_research_brief = _import("daily_research_brief", HERE / "daily_research_brief.py")
 
 # Seeking Alpha news + AI digest
 try:
@@ -5616,6 +5617,270 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 
         browser.close()
 
+# ---------- Daily Research Brief ----------
+
+def _generate_daily_research_brief_with_optional_llm(
+    relevance_df,
+    selected_text: List[Dict[str, Any]],
+    *,
+    source_name: str,
+) -> Tuple[str, str]:
+    fallback = daily_research_brief.build_deterministic_brief(
+        relevance_df,
+        selected_text,
+        source_name=source_name,
+    )
+    api_key = os.getenv("OPENAI_API_KEY") or ""
+    if not api_key:
+        return fallback, "deterministic"
+
+    evidence = daily_research_brief.build_llm_evidence_payload(relevance_df, selected_text)
+    system_prompt = (
+        "You create concise daily investment research briefs using only the supplied source metadata "
+        "and limited extracted text. Never invent financial numbers, ratings, estimates, beats/misses, "
+        "price targets, or conclusions. Clearly distinguish metadata-only observations from text-supported "
+        "observations. When evidence is weak, write exactly: "
+        "'Not enough extracted text to verify details beyond filename/folder metadata.' "
+        "Include source relative paths for every observation."
+    )
+    user_prompt = (
+        "Create a Markdown daily research memo with these sections: Top Tickers / Entities, "
+        "Top High-Priority Documents, Category-Wise Summary, Possible Signals, Recommended Follow-Up "
+        "for Geoff / Mitko, Skipped or Lightly Scanned Files, and Source References.\n\n"
+        f"Source archive: {source_name}\n\nEvidence JSON:\n{evidence}"
+    )
+    try:
+        openai.api_key = api_key
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=1800,
+        )
+        text = response["choices"][0]["message"]["content"].strip()
+        if text:
+            return text, "openai"
+    except Exception:
+        pass
+    return fallback, "deterministic_fallback"
+
+
+def draw_daily_research_brief_section() -> None:
+    import pandas as pd
+    import zipfile
+
+    st.markdown("### Daily Research Brief")
+    st.caption(
+        "Upload one daily research ZIP. The app inventories all files, scores them deterministically, "
+        "and lightly scans only the highest-priority supported documents."
+    )
+
+    st.markdown("#### 1. Upload Daily Research Zip")
+    uploaded = st.file_uploader(
+        "Daily investment research folder (.zip)",
+        type=["zip"],
+        key="daily_uploaded_zip",
+        help="Large archives are written to a temporary session folder and processed only when you click Process Daily Zip.",
+    )
+
+    st.markdown("#### 2. Processing Options")
+    mode = st.radio(
+        "Processing mode",
+        options=["Fast / low-cost", "Deeper summary"],
+        index=0,
+        horizontal=True,
+        key="daily_processing_mode",
+    )
+    if mode == "Deeper summary":
+        limits = {"max_files": 30, "max_pdf_pages": 5, "max_chars": 10000}
+    else:
+        limits = {"max_files": 15, "max_pdf_pages": 2, "max_chars": 4000}
+    st.caption(
+        f"Will lightly scan at most {limits['max_files']} files, "
+        f"{limits['max_pdf_pages']} PDF pages per file, and {limits['max_chars']:,} characters per file."
+    )
+
+    process_col, generate_col, reset_col = st.columns(3)
+    with process_col:
+        process_clicked = st.button("Process Daily Zip", key="daily_process_btn", use_container_width=True)
+    with generate_col:
+        generate_clicked = st.button(
+            "Generate Daily Brief",
+            key="daily_generate_btn",
+            use_container_width=True,
+            disabled="daily_relevance_df" not in st.session_state,
+        )
+    with reset_col:
+        reset_clicked = st.button("Reset Daily Research Brief", key="daily_reset_btn", use_container_width=True)
+
+    if reset_clicked:
+        daily_research_brief.remove_session_dir(st.session_state.get("daily_session_dir"))
+        _clear_session_keys(
+            exact=[
+                "daily_uploaded_zip", "daily_processing_mode", "daily_session_dir",
+                "daily_source_name", "daily_inventory_df", "daily_relevance_df",
+                "daily_selected_df", "daily_selected_text", "daily_processing_limits",
+                "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
+            ]
+        )
+        st.rerun()
+
+    if process_clicked:
+        if uploaded is None:
+            st.warning("Upload a ZIP file before processing.")
+        else:
+            old_dir = st.session_state.get("daily_session_dir")
+            daily_research_brief.remove_session_dir(old_dir)
+            _clear_session_keys(
+                exact=[
+                    "daily_session_dir", "daily_source_name", "daily_inventory_df",
+                    "daily_relevance_df", "daily_selected_df", "daily_selected_text",
+                    "daily_processing_limits", "daily_extract_warnings", "daily_brief_text",
+                    "daily_brief_method",
+                ]
+            )
+            session_dir = daily_research_brief.create_session_dir()
+            zip_path = session_dir / "daily_research.zip"
+            extract_root = session_dir / "extracted"
+            try:
+                uploaded.seek(0)
+                with zip_path.open("wb") as dst:
+                    shutil.copyfileobj(uploaded, dst, length=1024 * 1024)
+
+                records, warnings = daily_research_brief.safe_extract_zip(zip_path, extract_root)
+                known_tickers = set(tickers.keys()) if isinstance(tickers, dict) else set()
+                inventory_df = daily_research_brief.build_inventory(records, known_tickers=known_tickers)
+                relevance_df = daily_research_brief.score_inventory(inventory_df)
+                selected_df = daily_research_brief.select_files_for_text(relevance_df, limits["max_files"])
+                selected_text = daily_research_brief.extract_selected_text(
+                    selected_df,
+                    max_pdf_pages=limits["max_pdf_pages"],
+                    max_chars_per_file=limits["max_chars"],
+                )
+
+                st.session_state["daily_session_dir"] = str(session_dir)
+                st.session_state["daily_source_name"] = uploaded.name
+                st.session_state["daily_inventory_df"] = inventory_df
+                st.session_state["daily_relevance_df"] = relevance_df
+                st.session_state["daily_selected_df"] = selected_df
+                st.session_state["daily_selected_text"] = selected_text
+                st.session_state["daily_processing_limits"] = limits
+                st.session_state["daily_extract_warnings"] = warnings
+                st.session_state.pop("daily_brief_text", None)
+                st.session_state.pop("daily_brief_method", None)
+                st.success(
+                    f"Processed {len(inventory_df)} file(s); lightly scanned {len(selected_text)} selected file(s)."
+                )
+            except zipfile.BadZipFile:
+                daily_research_brief.remove_session_dir(session_dir)
+                st.error("The uploaded file is not a valid ZIP archive.")
+            except Exception as exc:
+                daily_research_brief.remove_session_dir(session_dir)
+                st.error(f"Daily ZIP processing failed: {exc}")
+
+    relevance_df = st.session_state.get("daily_relevance_df")
+    inventory_df = st.session_state.get("daily_inventory_df")
+    selected_df = st.session_state.get("daily_selected_df")
+    selected_text = st.session_state.get("daily_selected_text") or []
+
+    if generate_clicked and isinstance(relevance_df, pd.DataFrame):
+        with st.spinner("Generating source-grounded daily brief..."):
+            brief, method = _generate_daily_research_brief_with_optional_llm(
+                relevance_df,
+                selected_text,
+                source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
+            )
+        st.session_state["daily_brief_text"] = brief
+        st.session_state["daily_brief_method"] = method
+        st.success("Daily brief generated.")
+
+    st.markdown("#### 3. Folder/File Inventory")
+    if isinstance(inventory_df, pd.DataFrame):
+        inventory_display_columns = [
+            "category", "ticker", "company_or_identifier", "source_or_broker", "document_type",
+            "file_name", "file_extension", "file_size_mb", "relative_path", "modified_date",
+            "extraction_status",
+        ]
+        st.dataframe(inventory_df[inventory_display_columns], use_container_width=True, hide_index=True)
+        warnings = st.session_state.get("daily_extract_warnings") or []
+        if warnings:
+            with st.expander(f"Extraction warnings ({len(warnings)})"):
+                for warning in warnings[:100]:
+                    st.text(warning)
+    else:
+        st.info("Process a daily research ZIP to build the inventory.")
+
+    st.markdown("#### 4. Relevance Scoring / Selected Files")
+    if isinstance(relevance_df, pd.DataFrame):
+        relevance_columns = [
+            "relevance_score", "priority_level", "reason_for_score", "ticker", "category",
+            "source_or_broker", "document_type", "file_name",
+        ]
+        st.dataframe(relevance_df[relevance_columns], use_container_width=True, hide_index=True)
+        if isinstance(selected_df, pd.DataFrame):
+            st.caption(f"Selected for limited text extraction: {len(selected_df)} file(s)")
+            selected_status = pd.DataFrame(selected_text)
+            if not selected_status.empty:
+                st.dataframe(
+                    selected_status[["relevance_score", "ticker", "category", "file_name", "text_extraction_status"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    st.markdown("#### 5. Ticker / Category Grouping")
+    if isinstance(relevance_df, pd.DataFrame):
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Ticker summary**")
+            st.dataframe(daily_research_brief.build_ticker_summary(relevance_df), use_container_width=True, hide_index=True)
+        with right:
+            st.markdown("**Category summary**")
+            st.dataframe(daily_research_brief.build_category_summary(relevance_df), use_container_width=True, hide_index=True)
+
+    st.markdown("#### 6. Generate Daily Brief")
+    brief_text = st.session_state.get("daily_brief_text") or ""
+    if brief_text:
+        method = st.session_state.get("daily_brief_method") or "deterministic"
+        st.caption(f"Generation method: {method}")
+        st.markdown(brief_text)
+    else:
+        st.info("After processing, click Generate Daily Brief to create the memo.")
+
+    st.markdown("#### 7. Download Outputs")
+    if isinstance(inventory_df, pd.DataFrame) and isinstance(relevance_df, pd.DataFrame):
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            st.download_button(
+                "Download inventory CSV",
+                data=inventory_df.drop(columns=["extracted_path"], errors="ignore").to_csv(index=False).encode("utf-8"),
+                file_name="daily_research_inventory.csv",
+                mime="text/csv",
+                key="daily_download_inventory",
+                use_container_width=True,
+            )
+        with d2:
+            st.download_button(
+                "Download relevance CSV",
+                data=relevance_df.drop(columns=["extracted_path"], errors="ignore").to_csv(index=False).encode("utf-8"),
+                file_name="daily_research_relevance.csv",
+                mime="text/csv",
+                key="daily_download_relevance",
+                use_container_width=True,
+            )
+        with d3:
+            st.download_button(
+                "Download daily brief Markdown",
+                data=brief_text.encode("utf-8") if brief_text else b"",
+                file_name="daily_research_brief.md",
+                mime="text/markdown",
+                key="daily_download_brief",
+                disabled=not bool(brief_text),
+                use_container_width=True,
+            )
+
 # ---------- UI ----------
 
 def main():
@@ -6422,8 +6687,8 @@ def main():
 
     st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
-    tab_mf, tab_sa, tab_substack, tab_podcast = st.tabs(
-        ["Fund Families", "Seeking Alpha", "Substack", "Podcast"]
+    tab_mf, tab_sa, tab_substack, tab_podcast, tab_daily = st.tabs(
+        ["Fund Families", "Seeking Alpha", "Substack", "Podcast", "Daily Research Brief"]
     )
 
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
@@ -6832,6 +7097,9 @@ def main():
 
         # ---------- Podcast intelligence (ticker mentions across podcasts) ----------
         draw_podcast_intelligence_section()
+
+    with tab_daily:
+        draw_daily_research_brief_section()
 
 
     # Output path
