@@ -1939,19 +1939,65 @@ def search_research_index(
     if ticker:
         ticker_upper = ticker.upper()
         result = result[
-            result["all_detected_tickers"].astype(str).str.upper().str.split(",").apply(
-                lambda values: ticker_upper in {value.strip() for value in values}
+            result.apply(
+                lambda row: ticker_upper in {
+                    value.strip().upper()
+                    for value in str(
+                        row.get("all_detected_tickers") or row.get("ticker") or ""
+                    ).split(",")
+                    if value.strip()
+                },
+                axis=1,
             )
         ]
     if result.empty:
         return pd.DataFrame(columns=RESEARCH_SEARCH_RESULT_COLUMNS)
 
     query_text = str(query or "").strip().casefold()
+    generic_query_terms = {
+        "what", "which", "did", "does", "do", "say", "said", "show", "find",
+        "about", "mention", "mentions", "mentioned", "report", "reports",
+        "broker", "brokers", "research", "source", "sources", "ticker", "tickers",
+        "all", "have", "has", "had",
+    }
     terms = [
         term for term in re.findall(r"[a-z0-9][a-z0-9&._-]*", query_text)
-        if len(term) > 1 or term.isdigit()
+        if (len(term) > 1 or term.isdigit()) and term not in generic_query_terms
     ]
-    ticker_terms = {term.upper() for term in terms if re.fullmatch(r"[a-z]{1,5}", term)}
+    indexed_tickers = {
+        value.strip().upper()
+        for detected in result["all_detected_tickers"].astype(str)
+        for value in detected.split(",")
+        if value.strip()
+    }
+    indexed_tickers.update(
+        str(value).strip().upper()
+        for value in result["ticker"]
+        if str(value).strip()
+    )
+    query_tickers = {term.upper() for term in terms if term.upper() in indexed_tickers}
+    broad_ticker_query = bool(
+        re.search(r"\b(?:all|which)\s+tickers?\b|\bacross\s+(?:all\s+)?tickers?\b", query_text)
+    )
+    if query_tickers and not broad_ticker_query:
+        result = result[
+            result.apply(
+                lambda row: bool(
+                    query_tickers
+                    & {
+                        value.strip().upper()
+                        for value in str(
+                            row.get("all_detected_tickers") or row.get("ticker") or ""
+                        ).split(",")
+                        if value.strip()
+                    }
+                ),
+                axis=1,
+            )
+        ]
+    if result.empty:
+        return pd.DataFrame(columns=RESEARCH_SEARCH_RESULT_COLUMNS)
+
     parsed_dates = {}
     for value in result["source_date"].astype(str).drop_duplicates():
         try:
@@ -1993,16 +2039,19 @@ def search_research_index(
             for value in str(row.get("all_detected_tickers") or row.get("ticker") or "").split(",")
             if value.strip()
         }
-        exact_tickers = detected & ticker_terms
+        exact_tickers = detected & query_tickers
         if exact_tickers:
-            score += 35
+            score += 55
             reasons.append(f"exact ticker: {', '.join(sorted(exact_tickers))}")
         if str(row.get("priority_level") or "") == "High":
             score += 8
             reasons.append("high priority")
         if str(row.get("extracted_snippet") or "").strip():
-            score += 8
+            score += 20
             reasons.append("snippet available")
+        else:
+            score -= 5
+            reasons.append("metadata only")
         if str(row.get("evidence_type") or "") not in {"", "Other"}:
             score += 4
             reasons.append(str(row.get("evidence_type")))
@@ -2014,7 +2063,7 @@ def search_research_index(
             reasons.append("source-date recency")
         if matched_terms:
             reasons.append(f"matched: {', '.join(sorted(set(matched_terms)))}")
-        if query_text and not matched_terms and not exact_tickers and query_text not in full_text:
+        if terms and not matched_terms and not exact_tickers and query_text not in full_text:
             continue
         output = row.to_dict()
         output["search_score"] = round(score, 1)
@@ -2052,15 +2101,18 @@ def build_deterministic_research_answer(
     else:
         tickers = sorted({str(value) for value in top["ticker"] if str(value)})
         sources = sorted({str(value) for value in top["source_or_broker"] if str(value)})
+        snippet_count = int(top["extracted_snippet"].astype(str).str.strip().ne("").sum())
+        metadata_only_count = len(top) - snippet_count
         lines.append(
             f"Found {len(results)} matching indexed row(s); the top {len(top)} are shown below. "
+            f"{snippet_count} top result(s) include extracted snippets and {metadata_only_count} are metadata-only. "
             f"Matched ticker/entity metadata: {', '.join(tickers[:12]) or 'none identified'}. "
             f"Matched broker/source metadata: {', '.join(sources[:12]) or 'none identified'}."
         )
 
     lines.extend(["", "## Top Matching Evidence"])
     if top.empty:
-        lines.append("- No matching evidence.")
+        lines.append("No matching evidence.")
     else:
         for _, row in top.iterrows():
             snippet = str(row.get("extracted_snippet") or "").strip()
@@ -2079,7 +2131,7 @@ def build_deterministic_research_answer(
 
     lines.extend(["", "## Source Files"])
     if top.empty:
-        lines.append("- No matching source files.")
+        lines.append("No matching source files.")
     else:
         for _, row in top.drop_duplicates(["indexed_source", "relative_path"]).iterrows():
             lines.append(f"- `{row['file_name']}` - {row['indexed_source']} - {row['source_date']}")
@@ -2088,9 +2140,9 @@ def build_deterministic_research_answer(
         [
             "",
             "## Caveats / Manual Verification",
-            "- Search ranking is deterministic and uses filenames, metadata, relevance scores, and previously extracted limited snippets.",
-            "- A metadata match does not establish a financial claim or broker view.",
-            "- Review source PDFs before relying on ratings, price targets, EPS, revenue, guidance, estimates, margins, liquidity, valuation, or credit conclusions.",
+            "Search ranking is deterministic and uses filenames, metadata, relevance scores, and previously extracted limited snippets.",
+            "",
+            "A metadata match does not establish a financial claim or broker view. Review source PDFs before relying on ratings, price targets, EPS, revenue, guidance, estimates, margins, liquidity, valuation, or credit conclusions.",
         ]
     )
     return "\n".join(lines)
@@ -2119,8 +2171,7 @@ def validate_research_answer_grounding(text: str, results: pd.DataFrame) -> bool
         for value in results.get("file_name", pd.Series(dtype=str)).astype(str)
         if str(value)
     }
-    evidence_section = text.split("## Top Matching Evidence", 1)[-1].split("## Source Files", 1)[0]
-    for line in evidence_section.splitlines():
+    for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("-") and source_names and not any(name in stripped for name in source_names):
             return False

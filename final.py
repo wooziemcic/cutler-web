@@ -5877,6 +5877,42 @@ def _generate_cross_day_report_with_optional_llm(
     return fallback, "deterministic_fallback", "openai_response_failed_grounding"
 
 
+def _openai_chat_completion_compatible(
+    *,
+    api_key: str,
+    messages: List[Dict[str, str]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """Call either the modern or legacy OpenAI Python SDK without exposing keys."""
+    if hasattr(openai, "OpenAI"):
+        client = openai.OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return str(response.choices[0].message.content or "").strip()
+
+    openai.api_key = api_key
+    response = openai.ChatCompletion.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return str(response["choices"][0]["message"]["content"] or "").strip()
+
+
+def _concise_openai_error(exc: Exception) -> str:
+    message = " ".join(str(exc).split())
+    if len(message) > 240:
+        message = message[:237] + "..."
+    return f"{type(exc).__name__}: {message or 'OpenAI request failed'}"
+
+
 def _generate_historical_research_answer_with_optional_llm(
     query: str,
     results_df,
@@ -5907,18 +5943,20 @@ def _generate_historical_research_answer_with_optional_llm(
         "empty, label the result `metadata match only`. Do not state ratings, price targets, EPS, revenue, "
         "guidance, estimates, margins, liquidity, valuation, credit conclusions, upgrades, downgrades, "
         "beats, or misses unless the exact claim is directly present in extracted_snippet. Every evidence "
-        "bullet must cite a supplied file_name. Use cautious wording and recommend source-PDF review when "
-        "evidence is weak."
+        "bullet and every source-file bullet must cite a supplied file_name. Clearly distinguish extracted-"
+        "snippet evidence from metadata-only matches. Use prose, not bullets, for summary and caveats. Use "
+        "cautious wording and recommend source-PDF review when evidence is weak."
     )
     user_prompt = (
         "Create concise Markdown with exactly these sections: Answer Summary, Top Matching Evidence, "
         "Source Files, and Caveats / Manual Verification. Do not include unsupported claims. "
-        "Do not cite files outside the supplied results.\n\n"
+        "Do not cite files outside the supplied results. State how many top results contain extracted snippets "
+        "versus metadata-only matches.\n\n"
         f"Search evidence JSON:\n{evidence}"
     )
     try:
-        openai.api_key = api_key
-        response = openai.ChatCompletion.create(
+        text = _openai_chat_completion_compatible(
+            api_key=api_key,
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -5927,11 +5965,10 @@ def _generate_historical_research_answer_with_optional_llm(
             temperature=0.0,
             max_tokens=2400 if mode == "Deeper answer" else 1400,
         )
-        text = response["choices"][0]["message"]["content"].strip()
         if text and daily_research_brief.validate_research_answer_grounding(text, results_df.head(max_results)):
             return daily_research_brief.add_generation_method(text, "openai_refined"), "openai_refined", ""
-    except Exception:
-        return fallback, "deterministic_fallback", "openai_call_failed"
+    except Exception as exc:
+        return fallback, "deterministic_fallback", f"openai_call_failed: {_concise_openai_error(exc)}"
     return fallback, "deterministic_fallback", "openai_response_failed_grounding"
 
 
@@ -6758,8 +6795,16 @@ def draw_daily_research_brief_section() -> None:
             answer_warning = st.session_state.get("historical_answer_warning") or ""
             if answer_warning == "missing_api_key":
                 st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
-            elif answer_warning in {"openai_call_failed", "openai_response_failed_grounding"}:
-                st.warning("OpenAI refinement failed; the conservative deterministic fallback is shown.")
+            elif answer_warning.startswith("openai_call_failed:"):
+                st.warning(
+                    "OpenAI refinement failed; the conservative deterministic fallback is shown. "
+                    f"{answer_warning.split(':', 1)[1].strip()}"
+                )
+            elif answer_warning == "openai_response_failed_grounding":
+                st.warning(
+                    "OpenAI refinement returned an answer that failed grounding checks; "
+                    "the conservative deterministic fallback is shown."
+                )
             st.markdown(grounded_answer)
             st.download_button(
                 "Download grounded answer Markdown",
