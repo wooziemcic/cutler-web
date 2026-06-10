@@ -6179,20 +6179,22 @@ def main():
                     c = (qd or {}).get("compiled") or ""
                     if c and Path(c).exists():
                         paths.append({"quarter": q, "path": c})
-                ra_state.setdefault("outputs", {}).setdefault("fund_families", {})["paths"] = paths
-                if paths:
-                    if "fund_families" not in (ra_state.get("completed") or []):
-                        ra_state.setdefault("completed", []).append("fund_families")
-                    ra_state["current_step"] = "seeking_alpha"
-                    _save_run_all_state(ra_state)
-                    st.rerun()
-                else:
+                fund_output = ra_state.setdefault("outputs", {}).setdefault("fund_families", {})
+                fund_output["paths"] = paths
+                fund_output["result"] = "compiled" if paths else "no_excerpts"
+
+                if not paths:
                     st.warning(
                         "Run All: Fund Families finished, but no compiled Fund Families PDF was produced. "
-                        "Check the Fund Families logs above; this usually means downloaded letters had no narrative ticker excerpts."
+                        "This usually means no matching letters or narrative ticker excerpts were found. "
+                        "Continuing to Seeking Alpha."
                     )
-                    _save_run_all_state(ra_state)
-                    st.stop()
+
+                if "fund_families" not in (ra_state.get("completed") or []):
+                    ra_state.setdefault("completed", []).append("fund_families")
+                ra_state["current_step"] = "seeking_alpha"
+                _save_run_all_state(ra_state)
+                st.rerun()
 
             if step == "seeking_alpha":
                 max_articles = int(cfg.get("sa_max_articles", 5))
