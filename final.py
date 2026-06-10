@@ -5654,6 +5654,8 @@ def _generate_daily_research_brief_with_optional_llm(
         "When evidence is insufficient, use the supplied insufficiency notice exactly."
     )
     user_prompt = (
+        f"Title the memo `Daily Research Brief - "
+        f"{daily_research_brief.daily_source_title_suffix(source_name, relevance_df.get('relative_path', []))}`. "
         "Create a Markdown memo with exactly these top-level sections: Metadata-Based Observations, "
         "Extracted-Text Signals, Recommended Follow-Up, and Source References. "
         "Keep broker coverage highlights and scoring rationales inside Metadata-Based Observations. "
@@ -5713,9 +5715,12 @@ def _generate_broker_comparison_with_optional_llm(
     )
     user_prompt = (
         f"Create `Broker Consensus Report - {ticker} - {report_date}` as Markdown with exactly these sections: "
-        "Files Compared, Executive Takeaway, Broker-by-Broker Summary, Consensus Themes, "
-        "Divergences / Differences, Items to Verify Manually, and Source References. "
-        "The Files Compared section must be a table. In Divergences / Differences, write exactly "
+        "Files Compared, Key Extracted Evidence, Executive Takeaway, Broker-by-Broker Summary, "
+        "Consensus Themes, Divergences / Differences, Items to Verify Manually, and Source References. "
+        "Files Compared and Key Extracted Evidence must be tables. Use only supplied limited_text in Key "
+        "Extracted Evidence and preserve its evidence_type and evidence_quality. If evidence_quality is not "
+        "investment_useful, write `No investment-useful snippet found in limited extraction.` In Divergences / "
+        "Differences, write exactly "
         "`Not enough extracted text to verify broker-level differences.` unless direct verified excerpts "
         "clearly establish a difference. Items to Verify Manually are recommendations, not claims.\n\n"
         f"Evidence JSON:\n{evidence}"
@@ -5993,7 +5998,10 @@ def draw_daily_research_brief_section() -> None:
                         selected_ticker,
                         comparison_files,
                         comparison_snippets,
-                        report_date=datetime.now().strftime("%B %d, %Y").replace(" 0", " "),
+                        report_date=daily_research_brief.daily_source_title_suffix(
+                            st.session_state.get("daily_source_name") or "daily_research.zip",
+                            relevance_df.get("relative_path", []),
+                        ),
                         mode=comparison_mode,
                     )
                 st.session_state["daily_broker_comparison_files"] = comparison_files

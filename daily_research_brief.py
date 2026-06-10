@@ -177,10 +177,60 @@ COMPARISON_REVIEW_TERMS = {
     "valuation": r"\bvaluation\b",
     "credit": r"\bcredit\b",
 }
+DISCLOSURE_PHRASES = [
+    "intended for institutional investors", "independence and disclosure standards",
+    "finra", "conflicts of interest", "seeks to do business", "analyst certification",
+    "important disclosures", "investors should consider this report", "all rights reserved",
+    "use this report only", "not subject to", "discretionary basis",
+    "covered in its research reports",
+]
+INVESTMENT_EVIDENCE_PATTERNS = {
+    "Rating / PT": (
+        r"\brating\b", r"\bprice target\b", r"\boverweight\b", r"\bunderweight\b",
+        r"\bmarket weight\b", r"\bneutral\b", r"\bbuy\b", r"\bsell\b", r"\boutperform\b",
+    ),
+    "Earnings / Results": (
+        r"\beps\b", r"\brevenue\b", r"\bsales\b", r"\bmargin\b", r"\boperating income\b",
+    ),
+    "Guidance / Estimates": (r"\bguidance\b", r"\bestimates?\b", r"\brevision\b"),
+    "Credit / Liquidity": (r"\bliquidity\b", r"\bleverage\b", r"\bdebt\b", r"\bcredit\b"),
+    "Valuation / Thesis": (r"\bvaluation\b", r"\bthesis\b", r"\bupside\b", r"\bdownside\b"),
+    "Risk / Outlook": (r"\brisk\b", r"\boutlook\b"),
+    "Other": (r"\bcapex\b", r"\baws\b", r"\bcloud\b", r"\bretail\b", r"\badvertising\b"),
+}
 
 
 def create_session_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="cutler_daily_research_"))
+
+
+def parse_daily_folder_date_from_name(source_name: str) -> Optional[datetime]:
+    """Parse a daily research date from an archive or source-folder name."""
+    name = PurePosixPath(str(source_name or "").replace("\\", "/")).name.strip()
+    name = re.sub(r"\.(?:zip|pdf|xlsx?|csv|txt|md)$", "", name, flags=re.IGNORECASE)
+    for match in re.finditer(r"(?<!\d)(\d{1,2})[._-](\d{1,2})[._-](\d{2,4})(?!\d)", name):
+        month, day, year = (int(value) for value in match.groups())
+        if year < 100:
+            year += 2000
+        try:
+            return datetime(year, month, day)
+        except ValueError:
+            continue
+    return None
+
+
+def daily_source_title_suffix(source_name: str, relative_paths: Optional[Iterable[str]] = None) -> str:
+    candidates = [str(source_name or "")]
+    for relative_path in relative_paths if relative_paths is not None else []:
+        parts = PurePosixPath(str(relative_path).replace("\\", "/")).parts
+        if parts:
+            candidates.append(parts[0])
+    for candidate in candidates:
+        parsed = parse_daily_folder_date_from_name(candidate)
+        if parsed:
+            return parsed.strftime("%B %d, %Y").replace(" 0", " ")
+    stem = Path(str(source_name or "daily_research")).stem.strip() or "daily_research"
+    return f"Source Folder: {stem}"
 
 
 def remove_session_dir(path: str | Path | None) -> None:
@@ -750,6 +800,78 @@ def prepare_broker_comparison_text(
     return sorted(output, key=lambda item: order.get(str(item.get("relative_path") or ""), 10**9))
 
 
+def _investment_evidence_type(text: str) -> str:
+    scored = []
+    for evidence_type, patterns in INVESTMENT_EVIDENCE_PATTERNS.items():
+        hits = sum(bool(re.search(pattern, text, flags=re.IGNORECASE)) for pattern in patterns)
+        if hits:
+            scored.append((hits, evidence_type))
+    return max(scored)[1] if scored else "Other"
+
+
+def best_investment_useful_snippet(item: Dict[str, Any], *, max_chars: int = 500) -> Dict[str, Any]:
+    """Choose an investment-useful extracted passage while avoiding disclosure-heavy text."""
+    status = str(item.get("text_extraction_status") or "metadata-only")
+    text = _normalized_extracted_text(item)
+    result = {
+        "evidence_type": "Other",
+        "snippet": "",
+        "quality": "unavailable",
+        "extraction_status": status,
+    }
+    if status != "scanned" or not text:
+        return result
+
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+|\s{2,}", text)
+        if sentence.strip()
+    ]
+    if not sentences:
+        sentences = [text]
+    candidates = []
+
+    def add_candidate(passage: str) -> None:
+        passage = passage.strip()[:max_chars]
+        if not passage:
+            return
+        useful_hits = sum(
+            bool(re.search(pattern, passage, flags=re.IGNORECASE))
+            for patterns in INVESTMENT_EVIDENCE_PATTERNS.values()
+            for pattern in patterns
+        )
+        disclosure_hits = sum(phrase in passage.lower() for phrase in DISCLOSURE_PHRASES)
+        score = (useful_hits * 6) - (disclosure_hits * 15)
+        if useful_hits:
+            score += min(len(passage), max_chars) / max_chars
+        candidates.append((score, useful_hits, disclosure_hits, passage))
+
+    for index in range(len(sentences)):
+        for window_size in (1, 2, 3):
+            add_candidate(" ".join(sentences[index:index + window_size]))
+    for start in range(0, len(text), max(200, max_chars // 2)):
+        add_candidate(text[start:start + max_chars])
+
+    best = max(candidates, default=None, key=lambda value: value[0])
+    if best and best[1] > 0 and best[0] > 0:
+        passage = best[3]
+        return {
+            "evidence_type": _investment_evidence_type(passage),
+            "snippet": passage,
+            "quality": "investment_useful",
+            "extraction_status": status,
+        }
+    if any(phrase in text.lower() for phrase in DISCLOSURE_PHRASES):
+        result["quality"] = "disclosure_only"
+    else:
+        result["quality"] = "no_useful_snippet"
+    return result
+
+
+def _markdown_table_text(value: Any) -> str:
+    return str(value or "").replace("|", r"\|").replace("\n", " ").strip()
+
+
 def build_deterministic_broker_comparison(
     ticker: str,
     files: pd.DataFrame,
@@ -782,6 +904,27 @@ def build_deterministic_broker_comparison(
             f"{row.get('document_type') or 'other'} | {status} | {int(row.get('relevance_score') or 0)} |"
         )
 
+    lines.extend(
+        [
+            "",
+            "## Key Extracted Evidence",
+            "",
+            "| Broker/source | File name | Evidence type | Extracted evidence | Extraction status |",
+            "|---|---|---|---|---|",
+        ]
+    )
+    for _, row in files.iterrows():
+        path = str(row.get("relative_path") or "")
+        item = snippets_by_path.get(path, {})
+        evidence = best_investment_useful_snippet(item)
+        snippet = evidence["snippet"] or "No investment-useful snippet found in limited extraction."
+        lines.append(
+            f"| {_markdown_table_text(row.get('source_or_broker') or 'Unknown')} | "
+            f"`{_markdown_table_text(row.get('file_name') or path)}` | "
+            f"{evidence['evidence_type']} | \"{_markdown_table_text(snippet)}\" | "
+            f"{_markdown_table_text(evidence['extraction_status'])} |"
+        )
+
     lines.extend(["", "## Executive Takeaway"])
     if files.empty:
         lines.append("No qualifying same-day broker/source reports were found for this ticker.")
@@ -806,17 +949,26 @@ def build_deterministic_broker_comparison(
         for _, row in group.iterrows():
             path = str(row.get("relative_path") or "")
             item = snippets_by_path.get(path, {})
-            text = _normalized_extracted_text(item)
             status = str(item.get("text_extraction_status") or "metadata-only")
+            evidence = best_investment_useful_snippet(item)
             lines.append(
                 f"- `{path}`: detected as {row.get('document_type') or 'other'} in "
                 f"{row.get('category') or 'Unknown'}; extraction status: {status}."
             )
-            if status == "scanned" and text:
-                excerpt = text[:350] + ("..." if len(text) > 350 else "")
-                lines.append(f'  Direct limited-text excerpt from `{path}`: "{excerpt}"')
+            if evidence["snippet"]:
+                lines.append(
+                    f"  Best investment-useful excerpt from `{path}`: "
+                    f"\"{evidence['snippet']}\""
+                )
+            elif evidence["quality"] == "disclosure_only":
+                lines.append(
+                    f"  Limited extraction mostly captured disclosure/disclaimer text; review PDF directly. "
+                    f"Source: `{path}`"
+                )
             else:
-                lines.append(f"  Metadata-only for `{path}`; no verified financial claims were generated.")
+                lines.append(
+                    f"  No investment-useful snippet found in limited extraction. Source: `{path}`"
+                )
 
     lines.extend(["", "## Consensus Themes"])
     if len(sources) >= 2:
@@ -839,7 +991,11 @@ def build_deterministic_broker_comparison(
         matched = [
             str(item.get("relative_path") or "")
             for item in verified
-            if re.search(pattern, _normalized_extracted_text(item), flags=re.IGNORECASE)
+            if re.search(
+                pattern,
+                str(best_investment_useful_snippet(item).get("snippet") or ""),
+                flags=re.IGNORECASE,
+            )
         ]
         if len(set(matched)) >= 2:
             verified_term_sources[term] = sorted(set(matched))
@@ -889,6 +1045,7 @@ def build_broker_comparison_evidence_payload(
         text = _normalized_extracted_text(item)
         status = str(item.get("text_extraction_status") or "metadata-only")
         verified = status == "scanned" and len(text) >= 160
+        evidence = best_investment_useful_snippet(item, max_chars=900)
         record = {
             "relative_path": path,
             "file_name": row.get("file_name"),
@@ -900,7 +1057,9 @@ def build_broker_comparison_evidence_payload(
             "investment_rationale": row.get("investment_rationale"),
             "text_extraction_status": status,
             "verified_text_available": verified,
-            "limited_text": text[:2500] if verified else INSUFFICIENT_TEXT_NOTICE,
+            "evidence_type": evidence["evidence_type"],
+            "evidence_quality": evidence["quality"],
+            "limited_text": evidence["snippet"] if verified and evidence["snippet"] else INSUFFICIENT_TEXT_NOTICE,
         }
         encoded = json.dumps(record, ensure_ascii=False)
         if used + len(encoded) > max_total_chars:
@@ -922,13 +1081,34 @@ def build_broker_comparison_evidence_payload(
 
 def validate_broker_comparison_grounding(text: str, snippets: List[Dict[str, Any]]) -> bool:
     required = [
-        "## Files Compared", "## Executive Takeaway", "## Broker-by-Broker Summary",
-        "## Consensus Themes", "## Divergences / Differences", "## Items to Verify Manually",
-        "## Source References",
+        "## Files Compared", "## Key Extracted Evidence", "## Executive Takeaway",
+        "## Broker-by-Broker Summary", "## Consensus Themes", "## Divergences / Differences",
+        "## Items to Verify Manually", "## Source References",
     ]
     if not all(section in text for section in required):
         return False
-    claim_text = text.split("## Items to Verify Manually", 1)[0]
+    key_section = text.split("## Key Extracted Evidence", 1)[1].split("## Executive Takeaway", 1)[0]
+    verified = verified_extracted_text_items(snippets)
+    for line in key_section.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or "broker/source" in stripped.lower() or bool(re.fullmatch(r"[\s|:-]+", stripped)):
+            continue
+        cited = [
+            item for item in snippets
+            if str(item.get("relative_path") or "") in line or str(item.get("file_name") or "") in line
+        ]
+        if not cited:
+            return False
+        quotes = [part.strip() for part in re.findall(r'"([^"]+)"', line) if part.strip()]
+        for quote in quotes:
+            if quote == "No investment-useful snippet found in limited extraction.":
+                continue
+            if not any(quote.lower() in _normalized_extracted_text(item).lower() for item in cited):
+                return False
+    before_evidence, after_evidence = text.split("## Key Extracted Evidence", 1)
+    after_evidence = after_evidence.split("## Executive Takeaway", 1)[1]
+    claim_text = before_evidence + "## Executive Takeaway" + after_evidence
+    claim_text = claim_text.split("## Items to Verify Manually", 1)[0]
     if not validate_llm_brief_grounding(claim_text, snippets):
         return False
     source_names = {
@@ -952,7 +1132,6 @@ def validate_broker_comparison_grounding(text: str, snippets: List[Dict[str, Any
             return False
     divergence = text.split("## Divergences / Differences", 1)[1].split("## Items to Verify Manually", 1)[0]
     if "Not enough extracted text to verify broker-level differences." not in divergence:
-        verified = verified_extracted_text_items(snippets)
         cited_sources = {
             str(item.get("relative_path") or "")
             for item in verified
@@ -1035,7 +1214,7 @@ def build_deterministic_brief(
     skipped = relevance[~relevance["relative_path"].isin(selected_by_path.keys())] if not relevance.empty else relevance
     verified_text = verified_extracted_text_items(selected_text)
     lines = [
-        "# Daily Research Brief",
+        f"# Daily Research Brief - {daily_source_title_suffix(source_name, relevance.get('relative_path', []))}",
         "",
         f"Source archive: `{source_name}`",
         f"Files inventoried: {len(relevance)}",
