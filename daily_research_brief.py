@@ -161,6 +161,23 @@ SENSITIVE_FINANCE_PATTERNS = [
     r"\bstrong earnings\b", r"\bweak earnings\b",
 ]
 
+BROKER_COMPARISON_CATEGORIES = {"Research", "Banks", "Credit", "Companies", "Green Street"}
+BROKER_COMPARISON_DOCUMENT_TYPES = {
+    "analyst report", "credit report", "Green Street report", "sector report",
+    "industry report", "recommendation change", "rating change", "guidance",
+    "estimate revision",
+}
+COMPARISON_REVIEW_TERMS = {
+    "guidance": r"\bguidance\b",
+    "rating": r"\brating\b",
+    "estimate": r"\bestimates?\b",
+    "margin": r"\bmargins?\b",
+    "capex": r"\bcapex\b|\bcapital expenditures?\b",
+    "liquidity": r"\bliquidity\b",
+    "valuation": r"\bvaluation\b",
+    "credit": r"\bcredit\b",
+}
+
 
 def create_session_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="cutler_daily_research_"))
@@ -656,6 +673,300 @@ def build_broker_coverage_summary(relevance: pd.DataFrame) -> pd.DataFrame:
         )
         if rows else pd.DataFrame(columns=columns)
     )
+
+
+def select_broker_comparison_files(
+    relevance: pd.DataFrame,
+    ticker: str,
+    *,
+    max_files: int,
+) -> pd.DataFrame:
+    """Select same-day broker/source reports for one ticker, ordered by relevance."""
+    if relevance.empty or not ticker:
+        return relevance.iloc[0:0].copy()
+    expanded = _expand_rows_by_detected_ticker(relevance)
+    ticker_rows = expanded[expanded["ticker"].astype(str).str.upper() == ticker.upper()].copy()
+    if ticker_rows.empty:
+        return ticker_rows
+    broker_rows = ticker_rows[
+        ticker_rows["source_or_broker"].astype(str).str.strip().ne("")
+        & ticker_rows["category"].astype(str).isin(BROKER_COMPARISON_CATEGORIES)
+    ].copy()
+    preferred = broker_rows[
+        broker_rows["document_type"].astype(str).isin(BROKER_COMPARISON_DOCUMENT_TYPES)
+    ].copy()
+    selected = preferred if not preferred.empty else broker_rows[
+        ~broker_rows["document_type"].astype(str).isin(
+            ["10-Q/10Q", "8-K/8K", "current report", "earnings release",
+             "earnings presentation", "earnings supplement", "transcript", "prepared remarks"]
+        )
+    ].copy()
+    if selected.empty:
+        return selected
+    selected = selected.drop_duplicates(subset=["relative_path"]).sort_values(
+        ["relevance_score", "source_or_broker", "file_name"],
+        ascending=[False, True, True],
+    )
+    return selected.head(int(max_files)).reset_index(drop=True)
+
+
+def prepare_broker_comparison_text(
+    selected: pd.DataFrame,
+    existing_text: List[Dict[str, Any]],
+    *,
+    max_pdf_pages: int,
+    max_chars_per_file: int,
+    reuse_existing: bool,
+) -> List[Dict[str, Any]]:
+    """Reuse prior snippets when requested and scan only missing comparison files."""
+    if selected.empty:
+        return []
+    existing_by_path = {
+        str(item.get("relative_path") or ""): item
+        for item in existing_text
+        if str(item.get("relative_path") or "")
+    }
+    output: List[Dict[str, Any]] = []
+    missing_rows = []
+    for _, row in selected.iterrows():
+        path = str(row.get("relative_path") or "")
+        prior = existing_by_path.get(path)
+        if reuse_existing and prior:
+            reused = dict(prior)
+            reused["extracted_text"] = str(reused.get("extracted_text") or "")[:max_chars_per_file]
+            output.append(reused)
+        else:
+            missing_rows.append(row.to_dict())
+    if missing_rows:
+        missing = pd.DataFrame(missing_rows, columns=selected.columns)
+        output.extend(
+            extract_selected_text(
+                missing,
+                max_pdf_pages=max_pdf_pages,
+                max_chars_per_file=max_chars_per_file,
+            )
+        )
+    order = {str(row.get("relative_path") or ""): i for i, row in selected.iterrows()}
+    return sorted(output, key=lambda item: order.get(str(item.get("relative_path") or ""), 10**9))
+
+
+def build_deterministic_broker_comparison(
+    ticker: str,
+    files: pd.DataFrame,
+    snippets: List[Dict[str, Any]],
+    *,
+    report_date: str,
+    mode: str,
+) -> str:
+    """Build a conservative same-day comparison from metadata and direct excerpts."""
+    snippets_by_path = {str(item.get("relative_path") or ""): item for item in snippets}
+    verified = verified_extracted_text_items(snippets)
+    sources = sorted({str(x) for x in files["source_or_broker"] if str(x)}) if not files.empty else []
+    cited_paths = ", ".join(f"`{path}`" for path in files["relative_path"].astype(str)) if not files.empty else ""
+    lines = [
+        f"# Broker Consensus Report - {ticker} - {report_date}",
+        "",
+        f"Comparison mode: {mode}",
+        "",
+        "## Files Compared",
+        "",
+        "| Broker/source | File name | Document type | Extraction status | Relevance score |",
+        "|---|---|---|---|---:|",
+    ]
+    for _, row in files.iterrows():
+        path = str(row.get("relative_path") or "")
+        item = snippets_by_path.get(path, {})
+        status = str(item.get("text_extraction_status") or "metadata-only")
+        lines.append(
+            f"| {row.get('source_or_broker') or 'Unknown'} | `{row.get('file_name') or path}` | "
+            f"{row.get('document_type') or 'other'} | {status} | {int(row.get('relevance_score') or 0)} |"
+        )
+
+    lines.extend(["", "## Executive Takeaway"])
+    if files.empty:
+        lines.append("No qualifying same-day broker/source reports were found for this ticker.")
+    elif not verified:
+        lines.append(
+            f"{len(files)} qualifying report(s) from {len(sources)} broker/source(s) were identified for "
+            f"**{ticker}**. The comparison is based mostly on metadata because extracted text was insufficient. "
+            f"No broker-view or financial conclusions were generated. Sources: {cited_paths}"
+        )
+    else:
+        lines.append(
+            f"{len(files)} qualifying report(s) from {len(sources)} broker/source(s) were compared for "
+            f"**{ticker}**. Limited extracted snippets are quoted below; review the source PDFs before "
+            f"drawing financial conclusions. Sources: {cited_paths}"
+        )
+
+    lines.extend(["", "## Broker-by-Broker Summary"])
+    if files.empty:
+        lines.append("No broker/source reports available.")
+    for broker, group in files.groupby("source_or_broker", sort=True):
+        lines.append(f"### {broker}")
+        for _, row in group.iterrows():
+            path = str(row.get("relative_path") or "")
+            item = snippets_by_path.get(path, {})
+            text = _normalized_extracted_text(item)
+            status = str(item.get("text_extraction_status") or "metadata-only")
+            lines.append(
+                f"- `{path}`: detected as {row.get('document_type') or 'other'} in "
+                f"{row.get('category') or 'Unknown'}; extraction status: {status}."
+            )
+            if status == "scanned" and text:
+                excerpt = text[:350] + ("..." if len(text) > 350 else "")
+                lines.append(f'  Direct limited-text excerpt from `{path}`: "{excerpt}"')
+            else:
+                lines.append(f"  Metadata-only for `{path}`; no verified financial claims were generated.")
+
+    lines.extend(["", "## Consensus Themes"])
+    if len(sources) >= 2:
+        cited = ", ".join(f"`{path}`" for path in files["relative_path"].astype(str).head(12))
+        lines.append(
+            f"- Multiple brokers/sources covered **{ticker}** in the uploaded research set: "
+            f"{', '.join(sources)}. Sources: {cited}"
+        )
+    doc_counts = files["document_type"].astype(str).value_counts() if not files.empty else pd.Series(dtype=int)
+    for document_type, count in doc_counts.items():
+        if count < 2:
+            continue
+        paths = files.loc[files["document_type"].astype(str) == document_type, "relative_path"].astype(str)
+        lines.append(
+            f"- {count} files were detected as **{document_type}**. Sources: "
+            + ", ".join(f"`{path}`" for path in paths)
+        )
+    verified_term_sources: Dict[str, List[str]] = {}
+    for term, pattern in COMPARISON_REVIEW_TERMS.items():
+        matched = [
+            str(item.get("relative_path") or "")
+            for item in verified
+            if re.search(pattern, _normalized_extracted_text(item), flags=re.IGNORECASE)
+        ]
+        if len(set(matched)) >= 2:
+            verified_term_sources[term] = sorted(set(matched))
+            lines.append(
+                f"- The term **{term}** appears in limited extracted text from at least two sources: "
+                + ", ".join(f"`{path}`" for path in sorted(set(matched)))
+                + ". This records term overlap only, not agreement or direction."
+            )
+    if len(sources) < 2 and not any(count >= 2 for count in doc_counts) and not verified_term_sources:
+        lines.append("No consensus theme could be verified beyond the available file metadata.")
+
+    lines.extend(["", "## Divergences / Differences"])
+    lines.append("Not enough extracted text to verify broker-level differences.")
+
+    lines.extend(
+        [
+            "",
+            "## Items to Verify Manually",
+            "- Rating or price target changes in the source PDFs.",
+            "- EPS or revenue beats/misses in the source PDFs.",
+            "- Guidance changes and estimate revisions.",
+            "- Credit concerns, liquidity commentary, and valuation assumptions.",
+            "",
+            "## Source References",
+        ]
+    )
+    for _, row in files.iterrows():
+        path = str(row.get("relative_path") or "")
+        status = str(snippets_by_path.get(path, {}).get("text_extraction_status") or "metadata-only")
+        lines.append(f"- `{path}` ({row.get('source_or_broker') or 'source unknown'}; {status})")
+    return "\n".join(lines)
+
+
+def build_broker_comparison_evidence_payload(
+    ticker: str,
+    files: pd.DataFrame,
+    snippets: List[Dict[str, Any]],
+    *,
+    max_total_chars: int = 30000,
+) -> str:
+    snippets_by_path = {str(item.get("relative_path") or ""): item for item in snippets}
+    records = []
+    used = 0
+    for _, row in files.iterrows():
+        path = str(row.get("relative_path") or "")
+        item = snippets_by_path.get(path, {})
+        text = _normalized_extracted_text(item)
+        status = str(item.get("text_extraction_status") or "metadata-only")
+        verified = status == "scanned" and len(text) >= 160
+        record = {
+            "relative_path": path,
+            "file_name": row.get("file_name"),
+            "ticker": ticker,
+            "category": row.get("category"),
+            "source_or_broker": row.get("source_or_broker"),
+            "document_type": row.get("document_type"),
+            "relevance_score": int(row.get("relevance_score") or 0),
+            "investment_rationale": row.get("investment_rationale"),
+            "text_extraction_status": status,
+            "verified_text_available": verified,
+            "limited_text": text[:2500] if verified else INSUFFICIENT_TEXT_NOTICE,
+        }
+        encoded = json.dumps(record, ensure_ascii=False)
+        if used + len(encoded) > max_total_chars:
+            break
+        records.append(record)
+        used += len(encoded)
+    return json.dumps(
+        {
+            "ticker": ticker,
+            "grounding_rule": (
+                "Metadata supports file/source/category/document-type observations only. Financial or broker-view "
+                "claims require explicit verified limited text and a same-line source filename citation."
+            ),
+            "files": records,
+        },
+        ensure_ascii=False,
+    )
+
+
+def validate_broker_comparison_grounding(text: str, snippets: List[Dict[str, Any]]) -> bool:
+    required = [
+        "## Files Compared", "## Executive Takeaway", "## Broker-by-Broker Summary",
+        "## Consensus Themes", "## Divergences / Differences", "## Items to Verify Manually",
+        "## Source References",
+    ]
+    if not all(section in text for section in required):
+        return False
+    claim_text = text.split("## Items to Verify Manually", 1)[0]
+    if not validate_llm_brief_grounding(claim_text, snippets):
+        return False
+    source_names = {
+        value
+        for item in snippets
+        for value in [str(item.get("relative_path") or ""), str(item.get("file_name") or "")]
+        if value
+    }
+    for line in claim_text.splitlines():
+        stripped = line.strip()
+        if (
+            not stripped
+            or stripped.startswith("#")
+            or bool(re.fullmatch(r"[\s|:-]+", stripped))
+            or (stripped.startswith("|") and "broker" in stripped.lower() and "file" in stripped.lower())
+            or stripped.startswith("Comparison mode:")
+            or stripped == "Not enough extracted text to verify broker-level differences."
+        ):
+            continue
+        if not any(source in stripped for source in source_names):
+            return False
+    divergence = text.split("## Divergences / Differences", 1)[1].split("## Items to Verify Manually", 1)[0]
+    if "Not enough extracted text to verify broker-level differences." not in divergence:
+        verified = verified_extracted_text_items(snippets)
+        cited_sources = {
+            str(item.get("relative_path") or "")
+            for item in verified
+            if str(item.get("relative_path") or "") in divergence
+        }
+        matched_quotes = {
+            quote
+            for quote in re.findall(r'"([^"]+)"', divergence)
+            if len(quote.strip()) >= 20
+            and any(quote.lower() in _normalized_extracted_text(item).lower() for item in verified)
+        }
+        if len(cited_sources) < 2 or len(matched_quotes) < 2:
+            return False
+    return True
 
 
 def _attention_reason(group: pd.DataFrame, *, ticker: str) -> str:

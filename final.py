@@ -5680,6 +5680,65 @@ def _generate_daily_research_brief_with_optional_llm(
     return fallback, "deterministic_fallback"
 
 
+def _generate_broker_comparison_with_optional_llm(
+    ticker: str,
+    files_df,
+    snippets: List[Dict[str, Any]],
+    *,
+    report_date: str,
+    mode: str,
+) -> Tuple[str, str]:
+    fallback = daily_research_brief.build_deterministic_broker_comparison(
+        ticker,
+        files_df,
+        snippets,
+        report_date=report_date,
+        mode=mode,
+    )
+    api_key = os.getenv("OPENAI_API_KEY") or ""
+    if not api_key or not daily_research_brief.verified_extracted_text_items(snippets):
+        return fallback, "deterministic"
+
+    evidence = daily_research_brief.build_broker_comparison_evidence_payload(ticker, files_df, snippets)
+    system_prompt = (
+        "Create a strictly source-grounded same-day broker comparison. Never hallucinate broker views. "
+        "Metadata may establish only file existence, source/broker, ticker, category, document type, and "
+        "relevance score. Do not claim an upgrade, downgrade, rating, price target, estimate, EPS, revenue, "
+        "guidance, valuation, beat/miss, credit change, or broker-level difference unless verified limited "
+        "text explicitly supports the exact statement. Any such claim must be a direct quote and cite its "
+        "source relative_path on the same bullet. Every other factual observation must also cite source "
+        "relative_path values. Consensus themes require support from at least two cited sources. If evidence "
+        "is weak, clearly say the comparison is based mostly on metadata and limited snippets. Do not infer "
+        "agreement, disagreement, direction, magnitude, causality, or investment conclusions."
+    )
+    user_prompt = (
+        f"Create `Broker Consensus Report - {ticker} - {report_date}` as Markdown with exactly these sections: "
+        "Files Compared, Executive Takeaway, Broker-by-Broker Summary, Consensus Themes, "
+        "Divergences / Differences, Items to Verify Manually, and Source References. "
+        "The Files Compared section must be a table. In Divergences / Differences, write exactly "
+        "`Not enough extracted text to verify broker-level differences.` unless direct verified excerpts "
+        "clearly establish a difference. Items to Verify Manually are recommendations, not claims.\n\n"
+        f"Evidence JSON:\n{evidence}"
+    )
+    try:
+        openai.api_key = api_key
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=2200,
+        )
+        text = response["choices"][0]["message"]["content"].strip()
+        if text and daily_research_brief.validate_broker_comparison_grounding(text, snippets):
+            return text, "openai"
+    except Exception:
+        pass
+    return fallback, "deterministic_fallback"
+
+
 def draw_daily_research_brief_section() -> None:
     import pandas as pd
     import zipfile
@@ -5753,7 +5812,8 @@ def draw_daily_research_brief_section() -> None:
                 "daily_selected_df", "daily_selected_text", "daily_processing_limits",
                 "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
                 "daily_processing",
-            ]
+            ],
+            prefixes=["daily_broker_comparison_"],
         )
         st.rerun()
 
@@ -5777,7 +5837,8 @@ def draw_daily_research_brief_section() -> None:
                     "daily_relevance_df", "daily_selected_df", "daily_selected_text",
                     "daily_processing_limits", "daily_extract_warnings", "daily_brief_text",
                     "daily_brief_method",
-                ]
+                ],
+                prefixes=["daily_broker_comparison_"],
             )
             session_dir = daily_research_brief.create_session_dir()
             zip_path = session_dir / "daily_research.zip"
@@ -5880,6 +5941,89 @@ def draw_daily_research_brief_section() -> None:
         st.markdown("**Broker coverage summary**")
         broker_coverage_df = daily_research_brief.build_broker_coverage_summary(relevance_df)
         st.dataframe(broker_coverage_df, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Broker Consensus Comparator")
+        comparable_tickers = [
+            str(ticker)
+            for ticker in broker_coverage_df["ticker"].astype(str)
+            if len(daily_research_brief.select_broker_comparison_files(relevance_df, str(ticker), max_files=2)) >= 2
+        ]
+        if comparable_tickers:
+            selected_ticker = st.selectbox(
+                "Select ticker for broker comparison",
+                options=comparable_tickers,
+                key="daily_broker_comparison_ticker",
+            )
+            comparison_mode = st.radio(
+                "Broker comparison mode",
+                options=["Fast comparison", "Deeper comparison"],
+                horizontal=True,
+                key="daily_broker_comparison_mode",
+            )
+            if comparison_mode == "Deeper comparison":
+                comparison_limits = {"max_files": 12, "max_pdf_pages": 5, "max_chars": 10000}
+            else:
+                comparison_limits = {"max_files": 8, "max_pdf_pages": 2, "max_chars": 4000}
+            st.caption(
+                f"Compare up to {comparison_limits['max_files']} recognized broker/source reports, "
+                f"{comparison_limits['max_pdf_pages']} pages and {comparison_limits['max_chars']:,} "
+                "characters per report."
+            )
+            compare_clicked = st.button(
+                "Generate Broker Comparison",
+                key="daily_broker_comparison_generate_btn",
+                disabled=daily_processing,
+                use_container_width=True,
+            )
+            if compare_clicked:
+                with st.spinner(f"Comparing same-day broker reports for {selected_ticker}..."):
+                    comparison_files = daily_research_brief.select_broker_comparison_files(
+                        relevance_df,
+                        selected_ticker,
+                        max_files=comparison_limits["max_files"],
+                    )
+                    comparison_snippets = daily_research_brief.prepare_broker_comparison_text(
+                        comparison_files,
+                        selected_text,
+                        max_pdf_pages=comparison_limits["max_pdf_pages"],
+                        max_chars_per_file=comparison_limits["max_chars"],
+                        reuse_existing=(comparison_mode == "Fast comparison"),
+                    )
+                    comparison_markdown, comparison_method = _generate_broker_comparison_with_optional_llm(
+                        selected_ticker,
+                        comparison_files,
+                        comparison_snippets,
+                        report_date=datetime.now().strftime("%B %d, %Y").replace(" 0", " "),
+                        mode=comparison_mode,
+                    )
+                st.session_state["daily_broker_comparison_files"] = comparison_files
+                st.session_state["daily_broker_comparison_snippets"] = comparison_snippets
+                st.session_state["daily_broker_comparison_markdown"] = comparison_markdown
+                st.session_state["daily_broker_comparison_method"] = comparison_method
+                st.session_state["daily_broker_comparison_generated_ticker"] = selected_ticker
+                st.session_state["daily_broker_comparison_generated_mode"] = comparison_mode
+                st.success("Broker comparison generated.")
+
+            comparison_markdown = st.session_state.get("daily_broker_comparison_markdown") or ""
+            generated_ticker = st.session_state.get("daily_broker_comparison_generated_ticker") or ""
+            if comparison_markdown and generated_ticker == selected_ticker:
+                st.caption(
+                    "Generation method: "
+                    f"{st.session_state.get('daily_broker_comparison_method') or 'deterministic'}"
+                )
+                st.markdown(comparison_markdown)
+                st.download_button(
+                    "Download broker comparison Markdown",
+                    data=comparison_markdown.encode("utf-8"),
+                    file_name=f"broker_consensus_{selected_ticker}.md",
+                    mime="text/markdown",
+                    key="daily_broker_comparison_download",
+                    use_container_width=True,
+                )
+            elif comparison_markdown:
+                st.info("Generate a comparison for the currently selected ticker to refresh the report.")
+        else:
+            st.info("No tickers currently have two or more recognized broker/source reports.")
 
     st.markdown("#### 6. Generate Daily Brief")
     brief_text = st.session_state.get("daily_brief_text") or ""
