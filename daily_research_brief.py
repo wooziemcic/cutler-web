@@ -142,6 +142,16 @@ RELEVANCE_COLUMNS = INVENTORY_COLUMNS + [
     "relevance_score", "priority_level", "reason_for_score", "score_breakdown",
     "investment_rationale",
 ]
+CROSS_DAY_CHANGE_COLUMNS = [
+    "change_type", "ticker", "category", "source_or_broker", "document_type",
+    "file_name", "previous_score", "current_score", "priority_level", "reason_for_change",
+]
+CROSS_DAY_TICKER_COLUMNS = [
+    "ticker", "previous_file_count", "current_file_count", "new_file_count",
+    "removed_file_count", "new_brokers_or_sources", "new_document_types",
+    "new_credit_report_count", "new_earnings_file_count", "new_transcript_count",
+    "new_filing_count", "current_high_priority_count", "attention_reason",
+]
 
 INSUFFICIENT_TEXT_NOTICE = (
     "No verified financial claims were generated because extracted text was insufficient. "
@@ -231,6 +241,17 @@ def daily_source_title_suffix(source_name: str, relative_paths: Optional[Iterabl
             return parsed.strftime("%B %d, %Y").replace(" 0", " ")
     stem = Path(str(source_name or "daily_research")).stem.strip() or "daily_research"
     return f"Source Folder: {stem}"
+
+
+def add_generation_method(markdown: str, method: str) -> str:
+    """Insert generation metadata immediately below a Markdown title."""
+    lines = str(markdown or "").splitlines()
+    marker = f"Generation method: {method}"
+    if any(line.strip() == marker for line in lines[:6]):
+        return markdown
+    if lines and lines[0].startswith("#"):
+        return "\n".join([lines[0], "", marker, *lines[1:]])
+    return f"{marker}\n\n{markdown}"
 
 
 def remove_session_dir(path: str | Path | None) -> None:
@@ -1463,6 +1484,306 @@ def validate_ticker_memo_grounding(text: str, snippets: List[Dict[str, Any]]) ->
             if not any(quote.lower() in _normalized_extracted_text(item).lower() for item in cited):
                 return False
     return True
+
+
+def build_cross_day_change_inventory(
+    previous: pd.DataFrame,
+    current: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compare two scored inventories using filename identity and metadata changes."""
+    if previous.empty and current.empty:
+        return pd.DataFrame(columns=CROSS_DAY_CHANGE_COLUMNS)
+
+    def keyed_rows(frame: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+        keyed: Dict[str, Dict[str, Any]] = {}
+        if frame.empty:
+            return keyed
+        for _, row in frame.sort_values(["file_name", "relative_path"]).iterrows():
+            key = str(row.get("file_name") or "").strip().lower()
+            if key and key not in keyed:
+                keyed[key] = row.to_dict()
+        return keyed
+
+    previous_rows = keyed_rows(previous)
+    current_rows = keyed_rows(current)
+    changes: List[Dict[str, Any]] = []
+
+    def append_change(change_type: str, row: Dict[str, Any], previous_score: Any, current_score: Any, reason: str) -> None:
+        changes.append(
+            {
+                "change_type": change_type,
+                "ticker": row.get("ticker") or "",
+                "category": row.get("category") or "Root",
+                "source_or_broker": row.get("source_or_broker") or "",
+                "document_type": row.get("document_type") or "other",
+                "file_name": row.get("file_name") or "",
+                "previous_score": previous_score if previous_score != "" else "",
+                "current_score": current_score if current_score != "" else "",
+                "priority_level": row.get("priority_level") or "",
+                "reason_for_change": reason,
+            }
+        )
+
+    for key in sorted(current_rows.keys() - previous_rows.keys()):
+        row = current_rows[key]
+        append_change(
+            "new",
+            row,
+            "",
+            int(row.get("relevance_score") or 0),
+            f"New {row.get('document_type') or 'document'} in {row.get('category') or 'Root'}.",
+        )
+    for key in sorted(previous_rows.keys() - current_rows.keys()):
+        row = previous_rows[key]
+        append_change(
+            "removed",
+            row,
+            int(row.get("relevance_score") or 0),
+            "",
+            "File was present in the previous-day archive but not the current-day archive.",
+        )
+    for key in sorted(previous_rows.keys() & current_rows.keys()):
+        old = previous_rows[key]
+        new = current_rows[key]
+        size_changed = float(old.get("file_size_mb") or 0) != float(new.get("file_size_mb") or 0)
+        date_changed = str(old.get("modified_date") or "") != str(new.get("modified_date") or "")
+        if size_changed or date_changed:
+            details = []
+            if size_changed:
+                details.append("file size changed")
+            if date_changed:
+                details.append("modified date changed")
+            append_change(
+                "modified",
+                new,
+                int(old.get("relevance_score") or 0),
+                int(new.get("relevance_score") or 0),
+                "; ".join(details).capitalize() + ".",
+            )
+
+    previous_expanded = _expand_rows_by_detected_ticker(previous)
+    current_expanded = _expand_rows_by_detected_ticker(current)
+    previous_high = set(
+        previous_expanded.loc[previous_expanded["priority_level"] == "High", "ticker"].astype(str)
+    ) if not previous_expanded.empty else set()
+    current_high_rows = current_expanded[
+        (current_expanded["priority_level"] == "High")
+        & (~current_expanded["ticker"].astype(str).isin(previous_high))
+    ] if not current_expanded.empty else current_expanded
+    for ticker, group in current_high_rows.groupby("ticker") if not current_high_rows.empty else []:
+        row = group.sort_values("relevance_score", ascending=False).iloc[0].to_dict()
+        append_change(
+            "moved_to_high_priority",
+            row,
+            "",
+            int(row.get("relevance_score") or 0),
+            f"{ticker} has current high-priority research and had none in the previous-day archive.",
+        )
+
+    return pd.DataFrame(changes, columns=CROSS_DAY_CHANGE_COLUMNS)
+
+
+def build_cross_day_ticker_summary(
+    previous: pd.DataFrame,
+    current: pd.DataFrame,
+    changes: pd.DataFrame,
+) -> pd.DataFrame:
+    previous_expanded = _expand_rows_by_detected_ticker(previous)
+    current_expanded = _expand_rows_by_detected_ticker(current)
+    tickers = sorted(
+        set(previous_expanded.get("ticker", pd.Series(dtype=str)).astype(str))
+        | set(current_expanded.get("ticker", pd.Series(dtype=str)).astype(str))
+    )
+    tickers = [ticker for ticker in tickers if ticker]
+    rows = []
+    for ticker in tickers:
+        old = previous_expanded[previous_expanded["ticker"].astype(str) == ticker]
+        new = current_expanded[current_expanded["ticker"].astype(str) == ticker]
+        ticker_changes = changes[changes["ticker"].astype(str) == ticker] if not changes.empty else changes
+        new_changes = ticker_changes[ticker_changes["change_type"] == "new"] if not ticker_changes.empty else ticker_changes
+        removed_changes = ticker_changes[ticker_changes["change_type"] == "removed"] if not ticker_changes.empty else ticker_changes
+        old_sources = {str(x) for x in old.get("source_or_broker", []) if str(x)}
+        new_sources = {str(x) for x in new.get("source_or_broker", []) if str(x)}
+        old_types = {str(x) for x in old.get("document_type", []) if str(x)}
+        new_types = {str(x) for x in new.get("document_type", []) if str(x)}
+        current_types = new.get("document_type", pd.Series(dtype=str)).astype(str)
+        attention = []
+        if len(new) > len(old):
+            attention.append(f"file count increased by {len(new) - len(old)}")
+        if new_sources - old_sources:
+            attention.append("new broker/source coverage")
+        if (current_types == "credit report").any() and not (old.get("document_type", pd.Series(dtype=str)).astype(str) == "credit report").any():
+            attention.append("new credit research")
+        if not old.empty and not new.empty and (new["priority_level"] == "High").any() and not (old["priority_level"] == "High").any():
+            attention.append("moved into high priority")
+        if old.empty and not new.empty:
+            attention.append("new ticker/entity")
+        if new.empty and not old.empty:
+            attention.append("removed ticker/entity")
+        rows.append(
+            {
+                "ticker": ticker,
+                "previous_file_count": len(old),
+                "current_file_count": len(new),
+                "new_file_count": len(new_changes),
+                "removed_file_count": len(removed_changes),
+                "new_brokers_or_sources": ", ".join(sorted(new_sources - old_sources)),
+                "new_document_types": ", ".join(sorted(new_types - old_types)),
+                "new_credit_report_count": int((new_changes["document_type"] == "credit report").sum()) if not new_changes.empty else 0,
+                "new_earnings_file_count": int(new_changes["document_type"].astype(str).str.startswith("earnings").sum()) if not new_changes.empty else 0,
+                "new_transcript_count": int((new_changes["document_type"] == "transcript").sum()) if not new_changes.empty else 0,
+                "new_filing_count": int(new_changes["document_type"].isin(["10-Q/10Q", "8-K/8K", "current report", "MD&A"]).sum()) if not new_changes.empty else 0,
+                "current_high_priority_count": int((new.get("priority_level", pd.Series(dtype=str)) == "High").sum()),
+                "attention_reason": "; ".join(attention) if attention else "No material metadata change detected.",
+            }
+        )
+    result = pd.DataFrame(rows, columns=CROSS_DAY_TICKER_COLUMNS)
+    return result.sort_values(
+        ["new_file_count", "current_high_priority_count", "ticker"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True) if not result.empty else result
+
+
+def build_deterministic_cross_day_report(
+    changes: pd.DataFrame,
+    ticker_summary: pd.DataFrame,
+    *,
+    previous_date: str,
+    current_date: str,
+) -> str:
+    lines = [
+        f"# Cross-Day Research Change Report - Previous: {previous_date} vs Current: {current_date}",
+        "",
+        "Generation method: deterministic_fallback",
+        "",
+        "## Executive Summary",
+        (
+            f"Detected {int((changes['change_type'] == 'new').sum()) if not changes.empty else 0} new file(s), "
+            f"{int((changes['change_type'] == 'removed').sum()) if not changes.empty else 0} removed file(s), and "
+            f"{int((changes['change_type'] == 'modified').sum()) if not changes.empty else 0} modified file(s). "
+            "This report is metadata-based and does not make financial conclusions."
+        ),
+    ]
+
+    def add_change_section(title: str, subset: pd.DataFrame, empty_text: str) -> None:
+        lines.extend(["", f"## {title}"])
+        if subset.empty:
+            lines.append(empty_text)
+            return
+        for _, row in subset.head(30).iterrows():
+            lines.append(
+                f"- `{row['file_name']}`: {row['reason_for_change']} "
+                f"Ticker: {row['ticker'] or 'uncertain'}; source: {row['source_or_broker'] or 'unknown'}; "
+                f"document type: {row['document_type']}."
+            )
+
+    add_change_section("Key Changes", changes, "No metadata changes were detected.")
+    add_change_section(
+        "New High-Priority Documents",
+        changes[(changes["change_type"] == "new") & (changes["priority_level"] == "High")] if not changes.empty else changes,
+        "No new high-priority documents were detected.",
+    )
+    lines.extend(["", "## Tickers With Increased Attention"])
+    attention = ticker_summary[
+        (ticker_summary["current_file_count"] > ticker_summary["previous_file_count"])
+        | (ticker_summary["new_brokers_or_sources"].astype(str) != "")
+        | ticker_summary["attention_reason"].astype(str).str.contains("high priority", case=False)
+    ] if not ticker_summary.empty else ticker_summary
+    if attention.empty:
+        lines.append("No ticker/entity showed increased metadata attention.")
+    else:
+        for _, row in attention.head(30).iterrows():
+            lines.append(f"- **{row['ticker']}**: {row['attention_reason']}.")
+    add_change_section(
+        "New Broker/Source Coverage",
+        changes[(changes["change_type"] == "new") & (changes["source_or_broker"].astype(str) != "")] if not changes.empty else changes,
+        "No new broker/source coverage was detected.",
+    )
+    add_change_section(
+        "New Credit Reports",
+        changes[(changes["change_type"] == "new") & (changes["document_type"] == "credit report")] if not changes.empty else changes,
+        "No new credit reports were detected.",
+    )
+    add_change_section(
+        "New Earnings/Transcript/Filing Materials",
+        changes[
+            (changes["change_type"] == "new")
+            & (
+                changes["document_type"].astype(str).str.startswith("earnings")
+                | changes["document_type"].isin(["transcript", "10-Q/10Q", "8-K/8K", "current report", "MD&A", "prepared remarks"])
+            )
+        ] if not changes.empty else changes,
+        "No new earnings, transcript, or filing materials were detected.",
+    )
+    add_change_section(
+        "Green Street/Sector Updates",
+        changes[
+            (changes["change_type"] == "new")
+            & (
+                (changes["category"] == "Green Street")
+                | changes["document_type"].isin(["Green Street report", "sector report", "recommendation change"])
+            )
+        ] if not changes.empty else changes,
+        "No new Green Street, sector, or recommendation updates were detected.",
+    )
+    add_change_section(
+        "Removed or Missing Items",
+        changes[changes["change_type"] == "removed"] if not changes.empty else changes,
+        "No removed or missing files were detected.",
+    )
+    lines.extend(
+        [
+            "",
+            "## Recommended Follow-Up for Geoff/Mitko",
+            "- Review new high-priority documents and tickers with increased file or source coverage.",
+            "- Verify removed files were intentionally absent from the current-day archive.",
+            "- Open source documents before drawing conclusions about ratings, results, guidance, or credit.",
+            "",
+            "## Source References",
+        ]
+    )
+    if changes.empty:
+        lines.append("- No changed source filenames.")
+    else:
+        for name in changes["file_name"].astype(str).drop_duplicates().head(100):
+            lines.append(f"- `{name}`")
+    return "\n".join(lines)
+
+
+def build_cross_day_evidence_payload(
+    changes: pd.DataFrame,
+    ticker_summary: pd.DataFrame,
+    *,
+    previous_date: str,
+    current_date: str,
+    max_changes: int = 80,
+    max_tickers: int = 50,
+) -> str:
+    return json.dumps(
+        {
+            "previous_date": previous_date,
+            "current_date": current_date,
+            "grounding_rule": "Metadata changes only. Do not infer financial conclusions.",
+            "change_inventory": changes.head(int(max_changes)).to_dict(orient="records"),
+            "ticker_change_summary": ticker_summary.head(int(max_tickers)).to_dict(orient="records"),
+        },
+        ensure_ascii=False,
+    )
+
+
+def validate_cross_day_report_grounding(text: str) -> bool:
+    required = [
+        "## Executive Summary", "## Key Changes", "## New High-Priority Documents",
+        "## Tickers With Increased Attention", "## New Broker/Source Coverage",
+        "## New Credit Reports", "## New Earnings/Transcript/Filing Materials",
+        "## Green Street/Sector Updates", "## Removed or Missing Items",
+        "## Recommended Follow-Up for Geoff/Mitko", "## Source References",
+    ]
+    if not all(section in text for section in required):
+        return False
+    claim_text = text.split("## Recommended Follow-Up for Geoff/Mitko", 1)[0]
+    financial_patterns = [pattern for pattern in SENSITIVE_FINANCE_PATTERNS if "miss" not in pattern]
+    return not any(re.search(pattern, claim_text, flags=re.IGNORECASE) for pattern in financial_patterns)
 
 
 def _attention_reason(group: pd.DataFrame, *, ticker: str) -> str:

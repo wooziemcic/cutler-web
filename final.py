@@ -5753,7 +5753,7 @@ def _generate_ticker_memo_with_optional_llm(
     *,
     report_date: str,
     mode: str,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     fallback = daily_research_brief.build_deterministic_ticker_memo(
         ticker,
         files_df,
@@ -5762,8 +5762,10 @@ def _generate_ticker_memo_with_optional_llm(
         mode=mode,
     )
     api_key = os.getenv("OPENAI_API_KEY") or ""
-    if not api_key or not daily_research_brief.verified_extracted_text_items(snippets):
-        return fallback, "deterministic_fallback"
+    if not api_key:
+        return fallback, "deterministic_fallback", "missing_api_key"
+    if not daily_research_brief.verified_extracted_text_items(snippets):
+        return fallback, "deterministic_fallback", "insufficient_extracted_text"
 
     evidence = daily_research_brief.build_ticker_memo_evidence_payload(
         ticker,
@@ -5811,10 +5813,85 @@ def _generate_ticker_memo_with_optional_llm(
         )
         text = response["choices"][0]["message"]["content"].strip()
         if text and daily_research_brief.validate_ticker_memo_grounding(text, snippets):
-            return text, "openai_refined"
+            return text, "openai_refined", ""
     except Exception:
-        pass
-    return fallback, "deterministic_fallback"
+        return fallback, "deterministic_fallback", "openai_call_failed"
+    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
+
+
+def _generate_cross_day_report_with_optional_llm(
+    changes_df,
+    ticker_summary_df,
+    *,
+    previous_date: str,
+    current_date: str,
+    mode: str,
+) -> Tuple[str, str, str]:
+    fallback = daily_research_brief.build_deterministic_cross_day_report(
+        changes_df,
+        ticker_summary_df,
+        previous_date=previous_date,
+        current_date=current_date,
+    )
+    api_key = os.getenv("OPENAI_API_KEY") or ""
+    if not api_key:
+        return fallback, "deterministic_fallback", "missing_api_key"
+    evidence = daily_research_brief.build_cross_day_evidence_payload(
+        changes_df,
+        ticker_summary_df,
+        previous_date=previous_date,
+        current_date=current_date,
+        max_changes=160 if mode == "Deeper comparison" else 60,
+        max_tickers=100 if mode == "Deeper comparison" else 35,
+    )
+    system_prompt = (
+        "Refine a compact cross-day research change report using structured metadata only. "
+        "Do not infer financial conclusions, ratings, targets, earnings outcomes, guidance changes, or credit "
+        "direction. Describe only file, ticker, broker/source, document-type, priority, and coverage changes. "
+        "Use cautious wording and cite source filenames for each change."
+    )
+    user_prompt = (
+        f"Create `Cross-Day Research Change Report - Previous: {previous_date} vs Current: {current_date}` "
+        "with exactly these sections: Executive Summary, Key Changes, New High-Priority Documents, "
+        "Tickers With Increased Attention, New Broker/Source Coverage, New Credit Reports, "
+        "New Earnings/Transcript/Filing Materials, Green Street/Sector Updates, Removed or Missing Items, "
+        "Recommended Follow-Up for Geoff/Mitko, and Source References. Use metadata only.\n\n"
+        f"Evidence JSON:\n{evidence}"
+    )
+    try:
+        openai.api_key = api_key
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=3200 if mode == "Deeper comparison" else 2000,
+        )
+        text = response["choices"][0]["message"]["content"].strip()
+        if text and daily_research_brief.validate_cross_day_report_grounding(text):
+            return daily_research_brief.add_generation_method(text, "openai_refined"), "openai_refined", ""
+    except Exception:
+        return fallback, "deterministic_fallback", "openai_call_failed"
+    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
+
+
+def _process_cross_day_uploaded_zip(uploaded, known_tickers: set[str]):
+    session_dir = daily_research_brief.create_session_dir()
+    zip_path = session_dir / "daily_research.zip"
+    extract_root = session_dir / "extracted"
+    try:
+        uploaded.seek(0)
+        with zip_path.open("wb") as dst:
+            shutil.copyfileobj(uploaded, dst, length=1024 * 1024)
+        records, warnings = daily_research_brief.safe_extract_zip(zip_path, extract_root)
+        inventory = daily_research_brief.build_inventory(records, known_tickers=known_tickers)
+        relevance = daily_research_brief.score_inventory(inventory)
+        return session_dir, inventory, relevance, warnings
+    except Exception:
+        daily_research_brief.remove_session_dir(session_dir)
+        raise
 
 
 def draw_daily_research_brief_section() -> None:
@@ -5834,6 +5911,13 @@ def draw_daily_research_brief_section() -> None:
         key="daily_uploaded_zip",
         help="Large archives are written to a temporary session folder and processed only when you click Process Daily Zip.",
     )
+    cached_daily_zip = Path(str(st.session_state.get("daily_session_dir") or "")) / "daily_research.zip"
+    cached_daily_zip_available = cached_daily_zip.is_file()
+    if uploaded is None and cached_daily_zip_available:
+        st.info(
+            f"Using persisted uploaded archive: "
+            f"{st.session_state.get('daily_source_name') or cached_daily_zip.name}"
+        )
 
     st.markdown("#### 2. Processing Options")
     mode = st.radio(
@@ -5883,6 +5967,8 @@ def draw_daily_research_brief_section() -> None:
 
     if reset_clicked:
         daily_research_brief.remove_session_dir(st.session_state.get("daily_session_dir"))
+        daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_previous_dir"))
+        daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_current_dir"))
         _clear_session_keys(
             exact=[
                 "daily_uploaded_zip", "daily_processing_mode", "daily_session_dir",
@@ -5891,7 +5977,7 @@ def draw_daily_research_brief_section() -> None:
                 "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
                 "daily_processing",
             ],
-            prefixes=["daily_broker_comparison_", "daily_ticker_memo_"],
+            prefixes=["daily_broker_comparison_", "daily_ticker_memo_", "daily_cross_day_"],
         )
         st.rerun()
 
@@ -5903,28 +5989,32 @@ def draw_daily_research_brief_section() -> None:
         )
 
     if process_clicked:
-        if uploaded is None:
+        if uploaded is None and not cached_daily_zip_available:
             st.warning("Upload a ZIP file before processing.")
         else:
             st.session_state["daily_processing"] = True
-            old_dir = st.session_state.get("daily_session_dir")
-            daily_research_brief.remove_session_dir(old_dir)
             _clear_session_keys(
                 exact=[
-                    "daily_session_dir", "daily_source_name", "daily_inventory_df",
+                    "daily_inventory_df",
                     "daily_relevance_df", "daily_selected_df", "daily_selected_text",
                     "daily_processing_limits", "daily_extract_warnings", "daily_brief_text",
                     "daily_brief_method",
                 ],
                 prefixes=["daily_broker_comparison_", "daily_ticker_memo_"],
             )
-            session_dir = daily_research_brief.create_session_dir()
+            if uploaded is not None:
+                old_dir = st.session_state.get("daily_session_dir")
+                daily_research_brief.remove_session_dir(old_dir)
+                session_dir = daily_research_brief.create_session_dir()
+            else:
+                session_dir = Path(str(st.session_state.get("daily_session_dir")))
             zip_path = session_dir / "daily_research.zip"
             extract_root = session_dir / "extracted"
             try:
-                uploaded.seek(0)
-                with zip_path.open("wb") as dst:
-                    shutil.copyfileobj(uploaded, dst, length=1024 * 1024)
+                if uploaded is not None:
+                    uploaded.seek(0)
+                    with zip_path.open("wb") as dst:
+                        shutil.copyfileobj(uploaded, dst, length=1024 * 1024)
 
                 records, warnings = daily_research_brief.safe_extract_zip(zip_path, extract_root)
                 known_tickers = set(tickers.keys()) if isinstance(tickers, dict) else set()
@@ -5938,7 +6028,10 @@ def draw_daily_research_brief_section() -> None:
                 )
 
                 st.session_state["daily_session_dir"] = str(session_dir)
-                st.session_state["daily_source_name"] = uploaded.name
+                st.session_state["daily_source_name"] = (
+                    uploaded.name if uploaded is not None
+                    else st.session_state.get("daily_source_name") or zip_path.name
+                )
                 st.session_state["daily_inventory_df"] = inventory_df
                 st.session_state["daily_relevance_df"] = relevance_df
                 st.session_state["daily_selected_df"] = selected_df
@@ -6134,13 +6227,15 @@ def draw_daily_research_brief_section() -> None:
                 f"Review up to {memo_limits['max_files']} same-day ticker files, "
                 f"{memo_limits['max_pdf_pages']} pages and {memo_limits['max_chars']:,} characters per file."
             )
-            memo_clicked = st.button(
+            memo_button_slot = st.empty()
+            memo_clicked = memo_button_slot.button(
                 "Generate Ticker Memo",
                 key="daily_ticker_memo_generate_btn",
                 disabled=daily_processing,
                 use_container_width=True,
             )
             if memo_clicked:
+                memo_button_slot.empty()
                 with st.spinner(f"Generating source-grounded ticker memo for {memo_ticker}..."):
                     memo_files = daily_research_brief.select_ticker_memo_files(
                         relevance_df,
@@ -6154,7 +6249,7 @@ def draw_daily_research_brief_section() -> None:
                         max_chars_per_file=memo_limits["max_chars"],
                         reuse_existing=(memo_mode == "Fast memo"),
                     )
-                    memo_markdown, memo_method = _generate_ticker_memo_with_optional_llm(
+                    memo_markdown, memo_method, memo_warning = _generate_ticker_memo_with_optional_llm(
                         memo_ticker,
                         memo_files,
                         memo_snippets,
@@ -6164,12 +6259,14 @@ def draw_daily_research_brief_section() -> None:
                         ),
                         mode=memo_mode,
                     )
+                    memo_markdown = daily_research_brief.add_generation_method(memo_markdown, memo_method)
                 st.session_state["daily_ticker_memo_files"] = memo_files
                 st.session_state["daily_ticker_memo_snippets"] = memo_snippets
                 st.session_state["daily_ticker_memo_markdown"] = memo_markdown
                 st.session_state["daily_ticker_memo_method"] = memo_method
                 st.session_state["daily_ticker_memo_generated_ticker"] = memo_ticker
                 st.session_state["daily_ticker_memo_generated_mode"] = memo_mode
+                st.session_state["daily_ticker_memo_warning"] = memo_warning
                 st.success("Ticker memo generated.")
 
             memo_markdown = st.session_state.get("daily_ticker_memo_markdown") or ""
@@ -6177,8 +6274,15 @@ def draw_daily_research_brief_section() -> None:
             if memo_markdown and generated_memo_ticker == memo_ticker:
                 st.caption(
                     "Generation method: "
-                    f"{st.session_state.get('daily_ticker_memo_method') or 'deterministic'}"
+                    f"{st.session_state.get('daily_ticker_memo_method') or 'deterministic_fallback'}"
                 )
+                memo_warning = st.session_state.get("daily_ticker_memo_warning") or ""
+                if memo_warning == "missing_api_key":
+                    st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
+                elif memo_warning in {"openai_call_failed", "openai_response_failed_grounding"}:
+                    st.warning("OpenAI refinement failed; the conservative deterministic fallback is shown.")
+                elif memo_warning == "insufficient_extracted_text":
+                    st.warning("OpenAI refinement was skipped because extracted text was insufficient.")
                 st.markdown(memo_markdown)
                 st.download_button(
                     "Download ticker memo Markdown",
@@ -6192,6 +6296,179 @@ def draw_daily_research_brief_section() -> None:
                 st.info("Generate a memo for the currently selected ticker to refresh the report.")
         else:
             st.info("No ticker/entity was identified conservatively from the uploaded research set.")
+
+    st.markdown("#### Cross-Day Comparison / What Changed?")
+    st.caption(
+        "Compare two daily research ZIPs using filename, ticker, source, document-type, priority, "
+        "size, and modified-date metadata."
+    )
+    cross_left, cross_right = st.columns(2)
+    with cross_left:
+        previous_upload = st.file_uploader(
+            "Upload Previous Day ZIP",
+            type=["zip"],
+            key="daily_cross_day_previous_upload",
+        )
+    with cross_right:
+        current_upload = st.file_uploader(
+            "Upload Current Day ZIP",
+            type=["zip"],
+            key="daily_cross_day_current_upload",
+        )
+    cross_mode = st.radio(
+        "Cross-day comparison mode",
+        options=["Fast comparison", "Deeper comparison"],
+        horizontal=True,
+        key="daily_cross_day_mode",
+    )
+    cross_ready = (
+        isinstance(st.session_state.get("daily_cross_day_previous_relevance"), pd.DataFrame)
+        and isinstance(st.session_state.get("daily_cross_day_current_relevance"), pd.DataFrame)
+        and isinstance(st.session_state.get("daily_cross_day_change_inventory"), pd.DataFrame)
+        and isinstance(st.session_state.get("daily_cross_day_ticker_summary"), pd.DataFrame)
+    )
+    cross_process_col, cross_generate_col = st.columns(2)
+    with cross_process_col:
+        cross_process_clicked = st.button(
+            "Process Cross-Day Comparison",
+            key="daily_cross_day_process_btn",
+            use_container_width=True,
+        )
+    with cross_generate_col:
+        cross_generate_clicked = st.button(
+            "Generate Change Report",
+            key="daily_cross_day_generate_btn",
+            disabled=not cross_ready,
+            use_container_width=True,
+        )
+
+    if cross_process_clicked:
+        if previous_upload is None or current_upload is None:
+            st.warning("Upload both the previous-day and current-day ZIP files before processing.")
+        else:
+            previous_dir = None
+            current_dir = None
+            try:
+                known_tickers = set(tickers.keys()) if isinstance(tickers, dict) else set()
+                with st.spinner("Processing previous-day and current-day research ZIPs..."):
+                    previous_dir, previous_inventory, previous_relevance, previous_warnings = (
+                        _process_cross_day_uploaded_zip(previous_upload, known_tickers)
+                    )
+                    current_dir, current_inventory, current_relevance, current_warnings = (
+                        _process_cross_day_uploaded_zip(current_upload, known_tickers)
+                    )
+                    change_inventory = daily_research_brief.build_cross_day_change_inventory(
+                        previous_relevance,
+                        current_relevance,
+                    )
+                    ticker_change_summary = daily_research_brief.build_cross_day_ticker_summary(
+                        previous_relevance,
+                        current_relevance,
+                        change_inventory,
+                    )
+                daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_previous_dir"))
+                daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_current_dir"))
+                st.session_state["daily_cross_day_previous_dir"] = str(previous_dir)
+                st.session_state["daily_cross_day_current_dir"] = str(current_dir)
+                st.session_state["daily_cross_day_previous_name"] = previous_upload.name
+                st.session_state["daily_cross_day_current_name"] = current_upload.name
+                st.session_state["daily_cross_day_previous_inventory"] = previous_inventory
+                st.session_state["daily_cross_day_current_inventory"] = current_inventory
+                st.session_state["daily_cross_day_previous_relevance"] = previous_relevance
+                st.session_state["daily_cross_day_current_relevance"] = current_relevance
+                st.session_state["daily_cross_day_change_inventory"] = change_inventory
+                st.session_state["daily_cross_day_ticker_summary"] = ticker_change_summary
+                st.session_state["daily_cross_day_warnings"] = previous_warnings + current_warnings
+                st.session_state["daily_cross_day_processed_mode"] = cross_mode
+                st.session_state.pop("daily_cross_day_report_markdown", None)
+                st.session_state.pop("daily_cross_day_report_method", None)
+                st.session_state.pop("daily_cross_day_report_warning", None)
+                st.success("Cross-day comparison processed.")
+                st.rerun()
+            except zipfile.BadZipFile:
+                daily_research_brief.remove_session_dir(previous_dir)
+                daily_research_brief.remove_session_dir(current_dir)
+                st.error("One of the uploaded files is not a valid ZIP archive.")
+            except Exception as exc:
+                daily_research_brief.remove_session_dir(previous_dir)
+                daily_research_brief.remove_session_dir(current_dir)
+                st.error(f"Cross-day processing failed: {exc}")
+
+    change_inventory = st.session_state.get("daily_cross_day_change_inventory")
+    ticker_change_summary = st.session_state.get("daily_cross_day_ticker_summary")
+    previous_relevance = st.session_state.get("daily_cross_day_previous_relevance")
+    current_relevance = st.session_state.get("daily_cross_day_current_relevance")
+    if cross_ready:
+        previous_date = daily_research_brief.daily_source_title_suffix(
+            st.session_state.get("daily_cross_day_previous_name") or "previous.zip",
+            previous_relevance.get("relative_path", []),
+        )
+        current_date = daily_research_brief.daily_source_title_suffix(
+            st.session_state.get("daily_cross_day_current_name") or "current.zip",
+            current_relevance.get("relative_path", []),
+        )
+        st.success(f"Ready to compare {previous_date} with {current_date}.")
+        st.markdown("**Change Inventory**")
+        st.dataframe(change_inventory, use_container_width=True, hide_index=True)
+        st.markdown("**Ticker Change Summary**")
+        st.dataframe(ticker_change_summary, use_container_width=True, hide_index=True)
+        warnings = st.session_state.get("daily_cross_day_warnings") or []
+        if warnings:
+            with st.expander(f"Cross-day extraction warnings ({len(warnings)})"):
+                for warning in warnings[:100]:
+                    st.text(warning)
+        cross_csv_left, cross_csv_right = st.columns(2)
+        with cross_csv_left:
+            st.download_button(
+                "Download Change Inventory CSV",
+                data=change_inventory.to_csv(index=False).encode("utf-8"),
+                file_name="cross_day_change_inventory.csv",
+                mime="text/csv",
+                key="daily_cross_day_download_inventory",
+                use_container_width=True,
+            )
+        with cross_csv_right:
+            st.download_button(
+                "Download Ticker Change Summary CSV",
+                data=ticker_change_summary.to_csv(index=False).encode("utf-8"),
+                file_name="cross_day_ticker_change_summary.csv",
+                mime="text/csv",
+                key="daily_cross_day_download_ticker_summary",
+                use_container_width=True,
+            )
+
+        if cross_generate_clicked:
+            with st.spinner("Generating metadata-grounded cross-day change report..."):
+                cross_report, cross_method, cross_warning = _generate_cross_day_report_with_optional_llm(
+                    change_inventory,
+                    ticker_change_summary,
+                    previous_date=previous_date,
+                    current_date=current_date,
+                    mode=st.session_state.get("daily_cross_day_processed_mode") or cross_mode,
+                )
+            st.session_state["daily_cross_day_report_markdown"] = cross_report
+            st.session_state["daily_cross_day_report_method"] = cross_method
+            st.session_state["daily_cross_day_report_warning"] = cross_warning
+            st.success("Cross-day change report generated.")
+
+        cross_report = st.session_state.get("daily_cross_day_report_markdown") or ""
+        if cross_report:
+            cross_method = st.session_state.get("daily_cross_day_report_method") or "deterministic_fallback"
+            st.caption(f"Generation method: {cross_method}")
+            cross_warning = st.session_state.get("daily_cross_day_report_warning") or ""
+            if cross_warning == "missing_api_key":
+                st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
+            elif cross_warning in {"openai_call_failed", "openai_response_failed_grounding"}:
+                st.warning("OpenAI refinement failed; the conservative deterministic fallback is shown.")
+            st.markdown(cross_report)
+            st.download_button(
+                "Download Change Report Markdown",
+                data=cross_report.encode("utf-8"),
+                file_name="cross_day_research_change_report.md",
+                mime="text/markdown",
+                key="daily_cross_day_download_report",
+                use_container_width=True,
+            )
 
     st.markdown("#### 6. Generate Daily Brief")
     brief_text = st.session_state.get("daily_brief_text") or ""
