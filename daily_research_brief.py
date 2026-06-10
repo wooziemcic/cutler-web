@@ -159,6 +159,46 @@ RESEARCH_INDEX_COLUMNS = [
     "extraction_status",
 ]
 RESEARCH_SEARCH_RESULT_COLUMNS = RESEARCH_INDEX_COLUMNS + ["search_score", "match_reason"]
+DASHBOARD_SIGNAL_COLUMNS = [
+    "ticker", "signal_type", "signal_direction", "confidence", "evidence",
+    "source_file", "broker_or_source", "source_date", "needs_manual_review", "reason",
+]
+DASHBOARD_PRIORITY_COLUMNS = [
+    "ticker", "attention_score", "file_count", "high_priority_count", "broker_source_count",
+    "credit_report_count", "earnings_transcript_filing_count", "categories_present",
+    "attention_reason",
+]
+
+DASHBOARD_SIGNAL_PATTERNS = [
+    ("Rating / Price Target", (r"\brating\b", r"\bprice target\b", r"\bpt\b", r"\boverweight\b", r"\bunderweight\b", r"\bdowngrade\b", r"\bupgrade\b")),
+    ("Earnings / Results", (r"\bearnings?\b", r"\beps\b", r"\brevenue\b", r"\bsales\b", r"\bresults?\b", r"\bbeat\b", r"\bmiss\b")),
+    ("Guidance / Estimates", (r"\bguidance\b", r"\bestimates?\b", r"\brevision\b", r"\bforecast\b")),
+    ("Credit / Liquidity", (r"\bcredit\b", r"\bliquidity\b", r"\bleverage\b", r"\bdebt\b", r"\bcovenant\b", r"\bissuance\b", r"\bcash flow\b")),
+    ("Valuation / Thesis", (r"\bvaluation\b", r"\bthesis\b", r"\bupside\b", r"\bdownside\b", r"\bmultiple\b")),
+    ("Margin / Operating Performance", (r"\bmargins?\b", r"\boperating income\b", r"\boperating performance\b")),
+    ("Capex / Investment Spend", (r"\bcapex\b", r"\bcapital expenditures?\b", r"\binvestment spend\b")),
+    ("Risk / Outlook", (r"\brisk\b", r"\boutlook\b", r"\bconcern\b")),
+]
+
+DASHBOARD_POSITIVE_PATTERNS = (
+    r"\braise[sd]?\s+(?:the\s+)?(?:price target|pt)\b",
+    r"\bprice target\s+(?:was\s+)?raise[sd]?\b",
+    r"\breiterate[sd]?\s+(?:an?\s+)?(?:overweight|outperform|buy)\b",
+    r"\bupgrade[sd]?\b",
+    r"\bbeat(?:s|en)?\b",
+    r"\bmargin expansion\b",
+    r"\bliquidity improved\b",
+    r"\bleverage decreased\b",
+)
+DASHBOARD_NEGATIVE_PATTERNS = (
+    r"\blower(?:ed|s)?\s+(?:the\s+)?(?:rating|price target|pt)\b",
+    r"\bdowngrade[sd]?\b",
+    r"\bmiss(?:es|ed)?\b",
+    r"\bliquidity concern\b",
+    r"\bleverage increased\b",
+    r"\bmargin contraction\b",
+    r"\bcredit deterioration\b",
+)
 
 INSUFFICIENT_TEXT_NOTICE = (
     "No verified financial claims were generated because extracted text was insufficient. "
@@ -1909,6 +1949,214 @@ def build_indexed_sources_summary(index_df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     return summary.sort_values(["source_date", "indexed_source"], ascending=[False, True]).reset_index(drop=True)
+
+
+def build_dashboard_priority_tickers(relevance: pd.DataFrame) -> pd.DataFrame:
+    """Create a deterministic executive ranking from existing scored inventory."""
+    if not isinstance(relevance, pd.DataFrame) or relevance.empty:
+        return pd.DataFrame(columns=DASHBOARD_PRIORITY_COLUMNS)
+    summary = build_ticker_summary(relevance)
+    if summary.empty:
+        return pd.DataFrame(columns=DASHBOARD_PRIORITY_COLUMNS)
+    rows = []
+    for _, row in summary.iterrows():
+        broker_report_count = int(row.get("broker_report_count") or 0)
+        broker_count = len(
+            [source for source in str(row.get("sources") or "").split(",") if source.strip()]
+        )
+        credit_count = int(row.get("credit_report_count") or 0)
+        coverage_count = (
+            int(row.get("earnings_file_count") or 0)
+            + int(row.get("transcript_count") or 0)
+            + int(row.get("filing_file_count") or 0)
+        )
+        high_count = int(row.get("high_priority_files") or 0)
+        attention_score = min(
+            100,
+            int(row.get("max_relevance_score") or 0)
+            + min(high_count * 3, 12)
+            + min(broker_report_count * 2, 10)
+            + min(credit_count * 3, 9)
+            + min(coverage_count * 2, 10),
+        )
+        rows.append(
+            {
+                "ticker": row.get("ticker") or "",
+                "attention_score": attention_score,
+                "file_count": int(row.get("file_count") or 0),
+                "high_priority_count": high_count,
+                "broker_source_count": broker_count,
+                "credit_report_count": credit_count,
+                "earnings_transcript_filing_count": coverage_count,
+                "categories_present": row.get("categories") or "",
+                "attention_reason": row.get("attention_reason") or "",
+            }
+        )
+    return pd.DataFrame(rows, columns=DASHBOARD_PRIORITY_COLUMNS).sort_values(
+        ["attention_score", "high_priority_count", "file_count", "ticker"],
+        ascending=[False, False, False, True],
+    ).reset_index(drop=True)
+
+
+def _dashboard_signal_types(row: pd.Series) -> List[str]:
+    text = " ".join(
+        str(row.get(column) or "")
+        for column in ["extracted_snippet", "document_type", "category", "file_name", "evidence_type"]
+    )
+    types = [
+        signal_type
+        for signal_type, patterns in DASHBOARD_SIGNAL_PATTERNS
+        if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    ]
+    document_type = str(row.get("document_type") or "")
+    category = str(row.get("category") or "")
+    source = str(row.get("source_or_broker") or "")
+    if source and document_type in {"analyst report", "credit report", "rating change", "recommendation change"}:
+        types.append("Broker Coverage")
+    if category == "Green Street" or source == "Green Street" or document_type in {
+        "Green Street report", "sector report", "recommendation change",
+    }:
+        types.append("Green Street / Sector")
+    if document_type in {"transcript", "10-Q/10Q", "8-K/8K", "current report", "MD&A", "prepared remarks"}:
+        types.append("Filing / Transcript")
+    return list(dict.fromkeys(types)) or ["Other"]
+
+
+def _dashboard_signal_direction(snippet: str) -> Tuple[str, str]:
+    positive = [pattern for pattern in DASHBOARD_POSITIVE_PATTERNS if re.search(pattern, snippet, flags=re.IGNORECASE)]
+    negative = [pattern for pattern in DASHBOARD_NEGATIVE_PATTERNS if re.search(pattern, snippet, flags=re.IGNORECASE)]
+    if positive and not negative:
+        return "Positive", positive[0]
+    if negative and not positive:
+        return "Negative", negative[0]
+    return "Unknown", ""
+
+
+def build_dashboard_signal_table(index_df: pd.DataFrame) -> pd.DataFrame:
+    """Extract conservative signals from already-indexed snippets and metadata."""
+    if not isinstance(index_df, pd.DataFrame) or index_df.empty:
+        return pd.DataFrame(columns=DASHBOARD_SIGNAL_COLUMNS)
+    rows = []
+    for _, row in index_df.iterrows():
+        snippet = str(row.get("extracted_snippet") or "").strip()
+        direction, direction_pattern = _dashboard_signal_direction(snippet) if snippet else ("Unknown", "")
+        ticker_values = [
+            value.strip()
+            for value in str(row.get("all_detected_tickers") or row.get("ticker") or "").split(",")
+            if value.strip()
+        ] or [str(row.get("ticker") or "Uncertain")]
+        signal_types = _dashboard_signal_types(row)
+        for ticker in ticker_values:
+            for signal_type in signal_types:
+                directional_type = signal_type not in {
+                    "Broker Coverage", "Green Street / Sector", "Filing / Transcript", "Other",
+                }
+                signal_direction = direction if directional_type else "Unknown"
+                if snippet and signal_direction != "Unknown":
+                    confidence = "High"
+                    manual_review = False
+                    reason = (
+                        f"Explicit directional phrase matched extracted text for {signal_type}. "
+                        "Verify in the source document before acting."
+                    )
+                elif snippet:
+                    confidence = "Medium"
+                    manual_review = True
+                    reason = (
+                        f"Extracted snippet contains {signal_type.lower()} terms, but no explicit "
+                        "positive or negative direction was verified."
+                    )
+                else:
+                    confidence = "Low"
+                    manual_review = True
+                    reason = (
+                        f"Metadata-only {signal_type.lower()} classification from document type, "
+                        "filename, folder, or broker/source."
+                    )
+                evidence = snippet[:900] if snippet else (
+                    f"Metadata match only: {row.get('document_type') or 'other'} in "
+                    f"{row.get('category') or 'Root'}."
+                )
+                if direction_pattern and directional_type:
+                    reason += f" Direction rule: {direction_pattern}."
+                rows.append(
+                    {
+                        "ticker": ticker,
+                        "signal_type": signal_type,
+                        "signal_direction": signal_direction,
+                        "confidence": confidence,
+                        "evidence": evidence,
+                        "source_file": row.get("file_name") or row.get("relative_path") or "",
+                        "broker_or_source": row.get("source_or_broker") or "",
+                        "source_date": row.get("source_date") or "",
+                        "needs_manual_review": manual_review,
+                        "reason": reason,
+                    }
+                )
+    result = pd.DataFrame(rows, columns=DASHBOARD_SIGNAL_COLUMNS).drop_duplicates(
+        subset=["ticker", "signal_type", "source_file", "evidence"]
+    )
+    confidence_order = pd.CategoricalDtype(["High", "Medium", "Low"], ordered=True)
+    result["confidence"] = result["confidence"].astype(confidence_order)
+    return result.sort_values(
+        ["needs_manual_review", "confidence", "ticker", "signal_type"],
+        ascending=[True, True, True, True],
+    ).reset_index(drop=True)
+
+
+def build_dashboard_summary_markdown(
+    relevance: pd.DataFrame,
+    priority_tickers: pd.DataFrame,
+    signals: pd.DataFrame,
+    broker_coverage: pd.DataFrame,
+    *,
+    new_file_count: int = 0,
+) -> str:
+    total_files = len(relevance) if isinstance(relevance, pd.DataFrame) else 0
+    high_files = int((relevance.get("priority_level", pd.Series(dtype=str)) == "High").sum()) if total_files else 0
+    lines = [
+        "# Daily Research Executive Dashboard",
+        "",
+        "## Overview",
+        f"- Total files processed: {total_files}",
+        f"- High-priority files: {high_files}",
+        f"- Tickers/entities covered: {len(priority_tickers)}",
+        f"- Signals identified: {len(signals)}",
+        f"- Signals needing manual review: {int(signals['needs_manual_review'].sum()) if not signals.empty else 0}",
+        f"- New cross-day files: {int(new_file_count)}",
+        "",
+        "## Top Priority Tickers",
+    ]
+    if priority_tickers.empty:
+        lines.append("- No ticker/entity summary is available.")
+    else:
+        for _, row in priority_tickers.head(15).iterrows():
+            lines.append(
+                f"- **{row['ticker']}**: attention score {row['attention_score']}; "
+                f"{row['attention_reason']}."
+            )
+    lines.extend(["", "## Broker Coverage Leaders"])
+    if broker_coverage.empty:
+        lines.append("- No normalized broker/source coverage is available.")
+    else:
+        for _, row in broker_coverage.head(15).iterrows():
+            lines.append(
+                f"- **{row['ticker']}**: {row['broker_report_count']} report(s) from "
+                f"{row['brokers_or_sources']}."
+            )
+    lines.extend(
+        [
+            "",
+            "## Signal Review",
+            (
+                f"- {int((signals['confidence'] == 'High').sum()) if not signals.empty else 0} high-confidence "
+                "explicit-direction signal(s) were found."
+            ),
+            "- Unknown-direction and metadata-only items require manual review.",
+            "- No financial conclusion should be used without checking the cited source file.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def search_research_index(
