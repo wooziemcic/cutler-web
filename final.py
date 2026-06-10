@@ -5645,7 +5645,7 @@ def _generate_daily_research_brief_with_optional_llm(
     )
     user_prompt = (
         "Create a Markdown daily research memo with these sections: Top Tickers / Entities, "
-        "Top High-Priority Documents, Category-Wise Summary, Possible Signals, Recommended Follow-Up "
+        "Top High-Priority Documents, Broker Coverage Highlights, Category-Wise Summary, Possible Signals, Recommended Follow-Up "
         "for Geoff / Mitko, Skipped or Lightly Scanned Files, and Source References.\n\n"
         f"Source archive: {source_name}\n\nEvidence JSON:\n{evidence}"
     )
@@ -5826,7 +5826,7 @@ def draw_daily_research_brief_section() -> None:
     st.markdown("#### 3. Folder/File Inventory")
     if isinstance(inventory_df, pd.DataFrame):
         inventory_display_columns = [
-            "category", "ticker", "company_or_identifier", "source_or_broker", "document_type",
+            "category", "ticker", "all_detected_tickers", "company_or_identifier", "source_or_broker", "document_type",
             "file_name", "file_extension", "file_size_mb", "relative_path", "modified_date",
             "extraction_status",
         ]
@@ -5842,8 +5842,8 @@ def draw_daily_research_brief_section() -> None:
     st.markdown("#### 4. Relevance Scoring / Selected Files")
     if isinstance(relevance_df, pd.DataFrame):
         relevance_columns = [
-            "relevance_score", "priority_level", "reason_for_score", "ticker", "category",
-            "source_or_broker", "document_type", "file_name",
+            "relevance_score", "priority_level", "ticker", "all_detected_tickers", "category",
+            "source_or_broker", "document_type", "investment_rationale", "score_breakdown", "file_name",
         ]
         st.dataframe(relevance_df[relevance_columns], use_container_width=True, hide_index=True)
         if isinstance(selected_df, pd.DataFrame):
@@ -5865,6 +5865,9 @@ def draw_daily_research_brief_section() -> None:
         with right:
             st.markdown("**Category summary**")
             st.dataframe(daily_research_brief.build_category_summary(relevance_df), use_container_width=True, hide_index=True)
+        st.markdown("**Broker coverage summary**")
+        broker_coverage_df = daily_research_brief.build_broker_coverage_summary(relevance_df)
+        st.dataframe(broker_coverage_df, use_container_width=True, hide_index=True)
 
     st.markdown("#### 6. Generate Daily Brief")
     brief_text = st.session_state.get("daily_brief_text") or ""
@@ -5877,7 +5880,8 @@ def draw_daily_research_brief_section() -> None:
 
     st.markdown("#### 7. Download Outputs")
     if isinstance(inventory_df, pd.DataFrame) and isinstance(relevance_df, pd.DataFrame):
-        d1, d2, d3 = st.columns(3)
+        broker_coverage_df = daily_research_brief.build_broker_coverage_summary(relevance_df)
+        d1, d2, d3, d4 = st.columns(4)
         with d1:
             st.download_button(
                 "Download inventory CSV",
@@ -5897,6 +5901,15 @@ def draw_daily_research_brief_section() -> None:
                 use_container_width=True,
             )
         with d3:
+            st.download_button(
+                "Download broker coverage CSV",
+                data=broker_coverage_df.to_csv(index=False).encode("utf-8"),
+                file_name="daily_research_broker_coverage.csv",
+                mime="text/csv",
+                key="daily_download_broker_coverage",
+                use_container_width=True,
+            )
+        with d4:
             st.download_button(
                 "Download daily brief Markdown",
                 data=brief_text.encode("utf-8") if brief_text else b"",

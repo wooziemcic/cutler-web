@@ -19,12 +19,14 @@ JUNK_NAMES = {".ds_store", "thumbs.db", "desktop.ini"}
 JUNK_PARTS = {"__macosx", ".git", ".svn", "__pycache__"}
 
 BROKER_PATTERNS = [
-    ("Morgan Stanley", r"\b(?:MORGAN\s+STANLEY|MS)\b"),
+    ("Morgan Stanley", r"\bMORGAN\s+STANLEY\b"),
     ("Gimme Credit", r"\bGIMME\s+CREDIT\b"),
     ("Green Street", r"\bGREEN\s+STREET\b"),
     ("Morningstar", r"\bMORNINGSTAR\b"),
-    ("JPM", r"\b(?:JPM|J\.?P\.?\s*MORGAN)\b"),
-    ("GS", r"\b(?:GS|GOLDMAN\s+SACHS)\b"),
+    ("JPMorgan", r"\b(?:JPM|J\.?\s*P\.?\s*MORGAN|JP\s*MORGAN|JPMORGAN)\b"),
+    ("Goldman Sachs", r"\b(?:GS|GOLDMAN(?:\s+SACHS)?)\b"),
+    ("Wells Fargo", r"\b(?:WF|WELLS\s+FARGO)\b"),
+    ("Bank of America", r"\b(?:BOFA|BOF\s+A|BANK\s+OF\s+AMERICA|BAML)\b"),
     ("Barclays", r"\bBARCLAYS\b"),
     ("RBC", r"\bRBC\b"),
     ("Jefferies", r"\bJEFFERIES\b"),
@@ -33,7 +35,6 @@ BROKER_PATTERNS = [
     ("Evercore", r"\bEVERCORE\b"),
     ("Mizuho", r"\bMIZUHO\b"),
     ("Guggenheim", r"\bGUGGENHEIM\b"),
-    ("WF", r"\b(?:WF|WELLS\s+FARGO)\b"),
     ("Stifel", r"\bSTIFEL\b"),
     ("Deutsche", r"\bDEUTSCHE\b"),
     ("Cantor", r"\bCANTOR\b"),
@@ -41,11 +42,27 @@ BROKER_PATTERNS = [
     ("BMO", r"\bBMO\b"),
     ("UBS", r"\bUBS\b"),
     ("Citi", r"\b(?:CITI|CITIGROUP)\b"),
-    ("BofA", r"\b(?:BOFA|BANK\s+OF\s+AMERICA|BAML)\b"),
     ("Truist", r"\bTRUIST\b"),
     ("Piper", r"\bPIPER\b"),
     ("Wedbush", r"\bWEDBUSH\b"),
+    ("Needham", r"\bNEEDHAM\b"),
+    ("Oppenheimer", r"\bOPPENHEIMER\b"),
+    ("Raymond James", r"\bRAYMOND\s+JAMES\b"),
+    ("TD Cowen", r"\b(?:TD\s+COWEN|COWEN)\b"),
+    ("KeyBanc", r"\bKEY\s*BANC\b"),
+    ("Wolfe", r"\bWOLFE\b"),
+    ("Baird", r"\bBAIRD\b"),
+    ("Stephens", r"\bSTEPHENS\b"),
 ]
+
+TOP_TIER_BROKERS = {
+    "JPMorgan", "Goldman Sachs", "Wells Fargo", "Bank of America", "Morgan Stanley",
+    "Barclays", "Citi", "UBS", "Deutsche", "RBC",
+}
+SPECIALTY_SOURCES = {
+    "Gimme Credit", "Green Street", "Morningstar", "Hovde", "Brean", "Needham",
+    "Oppenheimer", "Raymond James", "TD Cowen", "KeyBanc", "Wolfe", "Baird", "Stephens",
+}
 
 DOCUMENT_TYPES = [
     ("earnings presentation", (r"\bearnings?\s+presentation\b", r"\binvestor\s+presentation\b")),
@@ -67,8 +84,8 @@ DOCUMENT_TYPES = [
     ("dividend announcement", (r"\bdividend\b",)),
     ("insider trading", (r"\binsider\s+(?:trading|transaction|buy|sale)\b",)),
     ("fear and greed", (r"\bfear\s+(?:and|&)\s+greed\b",)),
-    ("recommendation change", (r"\b(?:recommendation|upgrade|downgrade|initiated)\b",)),
     ("rating change", (r"\brating\s+(?:change|upgrade|downgrade)\b",)),
+    ("recommendation change", (r"\b(?:recommendation|upgrade|downgrade|initiated)\b",)),
     ("guidance", (r"\bguidance\b",)),
     ("estimate revision", (r"\bestimate\s+(?:revision|change|increase|decrease)\b",)),
 ]
@@ -84,27 +101,28 @@ TICKER_STOPWORDS = {
     "PDF", "XLSX", "XLS", "CSV", "TXT", "MD", "Q", "FY", "FQ", "USD", "US",
     "USA", "UK", "EU", "SEC", "CEO", "CFO", "EPS", "EBITDA", "NAV", "REIT",
     "JPM", "GS", "MS", "RBC", "WF", "BMO", "UBS", "CITI", "BOFA", "BAML", "MD&A",
+    "HOVDE", "BREAN", "WOLFE", "BAIRD", "PIPER",
     "BANKS", "COMPANIES", "CREDIT", "RESEARCH", "ROOT", "GREEN", "STREET",
 }
 
 DOCUMENT_TYPE_SCORES = {
-    "earnings release": 25,
-    "earnings presentation": 24,
-    "earnings supplement": 23,
-    "transcript": 23,
-    "10-Q/10Q": 24,
-    "8-K/8K": 20,
+    "earnings release": 28,
+    "earnings presentation": 27,
+    "earnings supplement": 24,
+    "transcript": 28,
+    "10-Q/10Q": 28,
+    "8-K/8K": 25,
     "current report": 18,
-    "credit report": 22,
-    "analyst report": 21,
-    "sector report": 22,
-    "Green Street report": 24,
+    "credit report": 30,
+    "analyst report": 27,
+    "sector report": 26,
+    "Green Street report": 28,
     "industry report": 18,
     "prepared remarks": 22,
-    "guidance": 24,
-    "estimate revision": 23,
-    "recommendation change": 26,
-    "rating change": 21,
+    "guidance": 28,
+    "estimate revision": 27,
+    "recommendation change": 29,
+    "rating change": 28,
     "press release": 14,
     "data supplement": 15,
     "MD&A": 20,
@@ -116,11 +134,14 @@ DOCUMENT_TYPE_SCORES = {
 }
 
 INVENTORY_COLUMNS = [
-    "category", "ticker", "company_or_identifier", "source_or_broker", "document_type",
+    "category", "ticker", "all_detected_tickers", "company_or_identifier", "source_or_broker", "document_type",
     "file_name", "file_extension", "file_size_mb", "relative_path", "modified_date",
     "extraction_status", "extracted_path",
 ]
-RELEVANCE_COLUMNS = INVENTORY_COLUMNS + ["relevance_score", "priority_level", "reason_for_score"]
+RELEVANCE_COLUMNS = INVENTORY_COLUMNS + [
+    "relevance_score", "priority_level", "reason_for_score", "score_breakdown",
+    "investment_rationale",
+]
 
 
 def create_session_dir() -> Path:
@@ -255,9 +276,9 @@ def detect_document_type(text: str, *, category: str = "Root", source: str = "")
     for label, patterns in DOCUMENT_TYPES:
         if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns):
             return label
-    if category == "Credit" and source:
+    if category == "Credit" and (source or re.search(r"\bcredit\b", normalized, flags=re.IGNORECASE)):
         return "credit report"
-    if category == "Green Street":
+    if category == "Green Street" or source == "Green Street":
         return "Green Street report" if source == "Green Street" else "sector report"
     if source and category in {"Research", "Banks", "Companies", "Root"}:
         return "analyst report"
@@ -269,6 +290,7 @@ def detect_ticker(
     known_tickers: Optional[set[str]] = None,
     *,
     source: str = "",
+    category: str = "Root",
 ) -> str:
     stem = Path(file_name).stem
     tokens = re.findall(r"(?<![A-Za-z0-9])[A-Z]{1,5}(?![A-Za-z0-9])", stem)
@@ -279,9 +301,9 @@ def detect_ticker(
             return known[0]
     if not candidates:
         return ""
-    if source:
+    if source or category in {"Banks", "Companies", "Credit", "Research"}:
         # A recognized broker following a leading all-caps token is a strong,
-        # conservative filename convention even when the ticker universe is stale.
+        # conservative research-filename convention even when the ticker universe is stale.
         first_token = re.match(r"^\s*([A-Z]{1,5})(?=\s|[_\-.])", stem)
         if first_token and first_token.group(1) in candidates:
             return first_token.group(1)
@@ -289,6 +311,29 @@ def detect_ticker(
         return ""
     first = candidates[0]
     return first if stem.upper().count(first) >= 2 else ""
+
+
+def detect_all_tickers(
+    file_name: str,
+    known_tickers: Optional[set[str]] = None,
+    *,
+    source: str = "",
+    category: str = "Root",
+) -> List[str]:
+    stem = Path(file_name).stem
+    tokens = re.findall(r"(?<![A-Za-z0-9])[A-Z]{1,5}(?![A-Za-z0-9])", stem)
+    candidates = [t for t in tokens if t not in TICKER_STOPWORDS and not re.fullmatch(r"Q[1-4]", t)]
+    detected: List[str] = []
+    for token in candidates:
+        if token in detected:
+            continue
+        if known_tickers and token in known_tickers:
+            detected.append(token)
+        elif source and token == candidates[0]:
+            detected.append(token)
+        elif category == "Credit" and len(candidates) > 1:
+            detected.append(token)
+    return detected
 
 
 def company_or_identifier(file_name: str, ticker: str, source: str, document_type: str) -> str:
@@ -309,11 +354,20 @@ def build_inventory(records: List[Dict[str, Any]], known_tickers: Optional[set[s
         category = detect_category(rel)
         source = detect_source(f"{rel} {name}")
         doc_type = detect_document_type(name, category=category, source=source)
-        ticker = detect_ticker(name, known_tickers=known_tickers, source=source)
+        ticker = detect_ticker(name, known_tickers=known_tickers, source=source, category=category)
+        all_tickers = detect_all_tickers(
+            name,
+            known_tickers=known_tickers,
+            source=source,
+            category=category,
+        )
+        if ticker and ticker not in all_tickers:
+            all_tickers.insert(0, ticker)
         rows.append(
             {
                 "category": category,
                 "ticker": ticker,
+                "all_detected_tickers": ", ".join(all_tickers),
                 "company_or_identifier": company_or_identifier(name, ticker, source, doc_type),
                 "source_or_broker": source,
                 "document_type": doc_type,
@@ -334,6 +388,18 @@ def score_inventory(inventory: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=RELEVANCE_COLUMNS)
     rows: List[Dict[str, Any]] = []
     ticker_counts = Counter(str(x) for x in inventory.get("ticker", []) if str(x).strip())
+    ticker_categories: Dict[str, set[str]] = {}
+    ticker_sources: Dict[str, set[str]] = {}
+    for _, source_row in inventory.iterrows():
+        tickers_in_row = [
+            t.strip() for t in str(source_row.get("all_detected_tickers") or source_row.get("ticker") or "").split(",")
+            if t.strip()
+        ]
+        for detected in tickers_in_row:
+            ticker_categories.setdefault(detected, set()).add(str(source_row.get("category") or "Root"))
+            source = str(source_row.get("source_or_broker") or "")
+            if source:
+                ticker_sources.setdefault(detected, set()).add(source)
 
     for _, row in inventory.iterrows():
         category = str(row.get("category") or "Root")
@@ -343,52 +409,77 @@ def score_inventory(inventory: pd.DataFrame) -> pd.DataFrame:
         name = str(row.get("file_name") or "")
         status = str(row.get("extraction_status") or "")
         searchable = re.sub(r"[_\-.]+", " ", f"{name} {row.get('relative_path') or ''}").lower()
-        reasons: List[str] = []
+        breakdown: List[str] = []
         score = 0
 
         category_points = {
-            "Companies": 18, "Banks": 16, "Credit": 16, "Green Street": 18,
-            "Research": 12, "Root": 5,
-        }.get(category, 5)
+            "Credit": 20, "Companies": 18, "Banks": 18, "Research": 16,
+            "Green Street": 22, "Root": 8,
+        }.get(category, 8)
         score += category_points
-        reasons.append(f"{category} folder +{category_points}")
+        breakdown.append(f"{category} folder +{category_points}")
 
         type_points = DOCUMENT_TYPE_SCORES.get(doc_type, 4)
         score += type_points
-        reasons.append(f"{doc_type} +{type_points}")
+        breakdown.append(f"{doc_type} +{type_points}")
 
         if source:
-            score += 10
-            reasons.append(f"recognized source {source} +10")
+            score += 8
+            breakdown.append(f"recognized source {source} +8")
+            if source in TOP_TIER_BROKERS:
+                score += 5
+                breakdown.append("top-tier broker +5")
+            elif source in SPECIALTY_SOURCES:
+                score += 5
+                breakdown.append("specialty source +5")
         if ticker:
-            score += 14
-            reasons.append(f"recognized ticker {ticker} +14")
+            score += 12
+            breakdown.append(f"recognized ticker {ticker} +12")
             if ticker_counts[ticker] > 1:
                 boost = min(10, (ticker_counts[ticker] - 1) * 2)
                 score += boost
-                reasons.append(f"ticker repeated across files +{boost}")
+                breakdown.append(f"repeated ticker coverage +{boost}")
+            if len(ticker_categories.get(ticker, set())) > 1:
+                score += 6
+                breakdown.append("cross-category ticker coverage +6")
+            if len(ticker_sources.get(ticker, set())) > 1:
+                boost = min(10, len(ticker_sources[ticker]) * 2)
+                score += boost
+                breakdown.append(f"multiple broker/source coverage +{boost}")
 
         keyword_hits = sorted({kw for kw in FINANCE_KEYWORDS if kw in searchable})
         if keyword_hits:
-            boost = min(15, len(keyword_hits) * 3)
+            boost = min(12, len(keyword_hits) * 3)
             score += boost
-            reasons.append(f"finance keywords ({', '.join(keyword_hits[:4])}) +{boost}")
+            breakdown.append(f"finance keywords ({', '.join(keyword_hits[:4])}) +{boost}")
 
         if status != "extracted":
             score = max(0, score - 40)
-            reasons.append("not extracted -40")
+            breakdown.append("not extracted -40")
         if str(row.get("file_extension") or "") not in SUPPORTED_TEXT_EXTENSIONS:
             score = max(0, score - 8)
-            reasons.append("unsupported text type -8")
+            breakdown.append("unsupported text type -8")
 
         score = min(100, int(score))
-        priority = "High" if score >= 60 else "Medium" if score >= 35 else "Low"
+        priority = "High" if score >= 70 else "Medium" if score >= 45 else "Low"
+        rationale_parts = [f"{doc_type} in {category}"]
+        if ticker:
+            rationale_parts.append(f"covers {ticker}")
+        if source:
+            rationale_parts.append(f"from {source}")
+        if ticker and len(ticker_sources.get(ticker, set())) > 1:
+            rationale_parts.append("with multiple-source coverage")
+        if ticker and len(ticker_categories.get(ticker, set())) > 1:
+            rationale_parts.append("appearing across categories")
+        rationale = "; ".join(rationale_parts) + "."
         enriched = row.to_dict()
         enriched.update(
             {
                 "relevance_score": score,
                 "priority_level": priority,
-                "reason_for_score": "; ".join(reasons),
+                "reason_for_score": rationale,
+                "score_breakdown": "; ".join(breakdown),
+                "investment_rationale": rationale,
             }
         )
         rows.append(enriched)
@@ -487,21 +578,100 @@ def _extract_xlsx_preview(path: Path, max_chars: int) -> str:
 
 def build_ticker_summary(relevance: pd.DataFrame) -> pd.DataFrame:
     if relevance.empty:
-        return pd.DataFrame(columns=["ticker", "file_count", "high_priority_files", "max_relevance_score", "categories", "sources"])
-    known = relevance[relevance["ticker"].astype(str).str.strip() != ""]
+        return pd.DataFrame()
+    known = _expand_rows_by_detected_ticker(relevance)
     rows = []
     for ticker, group in known.groupby("ticker"):
+        sources = sorted({str(x) for x in group["source_or_broker"] if str(x)})
+        categories = sorted({str(x) for x in group["category"] if str(x)})
+        doc_types = group["document_type"].astype(str)
+        broker_reports = group[group["source_or_broker"].astype(str).str.strip() != ""]
+        attention = _attention_reason(group, ticker=ticker)
         rows.append(
             {
                 "ticker": ticker,
                 "file_count": len(group),
                 "high_priority_files": int((group["priority_level"] == "High").sum()),
                 "max_relevance_score": int(group["relevance_score"].max()),
-                "categories": ", ".join(sorted({str(x) for x in group["category"] if str(x)})),
-                "sources": ", ".join(sorted({str(x) for x in group["source_or_broker"] if str(x)})),
+                "broker_report_count": len(broker_reports),
+                "credit_report_count": int((doc_types == "credit report").sum()),
+                "earnings_file_count": int(doc_types.str.startswith("earnings").sum()),
+                "filing_file_count": int(doc_types.isin(["10-Q/10Q", "8-K/8K", "current report", "MD&A"]).sum()),
+                "transcript_count": int((doc_types == "transcript").sum()),
+                "has_multiple_brokers": len(sources) > 1,
+                "categories": ", ".join(categories),
+                "sources": ", ".join(sources),
+                "attention_reason": attention,
             }
         )
     return pd.DataFrame(rows).sort_values(["max_relevance_score", "file_count"], ascending=False) if rows else pd.DataFrame()
+
+
+def build_broker_coverage_summary(relevance: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "ticker", "broker_report_count", "brokers_or_sources", "analyst_report_files",
+        "credit_report_files", "categories_present", "attention_reason",
+    ]
+    if relevance.empty:
+        return pd.DataFrame(columns=columns)
+    rows = []
+    known = _expand_rows_by_detected_ticker(relevance)
+    for ticker, group in known.groupby("ticker"):
+        broker_group = group[group["source_or_broker"].astype(str).str.strip() != ""]
+        if broker_group.empty:
+            continue
+        report_group = broker_group
+        rows.append(
+            {
+                "ticker": ticker,
+                "broker_report_count": len(report_group),
+                "brokers_or_sources": ", ".join(sorted(set(report_group["source_or_broker"].astype(str)))),
+                "analyst_report_files": int((report_group["document_type"] == "analyst report").sum()),
+                "credit_report_files": int((report_group["document_type"] == "credit report").sum()),
+                "categories_present": ", ".join(sorted(set(report_group["category"].astype(str)))),
+                "attention_reason": _attention_reason(group, ticker=ticker),
+            }
+        )
+    return (
+        pd.DataFrame(rows, columns=columns).sort_values(
+            ["broker_report_count", "ticker"], ascending=[False, True]
+        )
+        if rows else pd.DataFrame(columns=columns)
+    )
+
+
+def _attention_reason(group: pd.DataFrame, *, ticker: str) -> str:
+    reasons = []
+    sources = {str(x) for x in group["source_or_broker"] if str(x)}
+    categories = {str(x) for x in group["category"] if str(x)}
+    doc_types = group["document_type"].astype(str)
+    if len(sources) > 1:
+        reasons.append(f"{len(sources)} brokers/sources")
+    if len(categories) > 1:
+        reasons.append(f"coverage across {len(categories)} categories")
+    if (doc_types == "credit report").any():
+        reasons.append("credit research present")
+    if doc_types.str.startswith("earnings").any() or (doc_types == "transcript").any():
+        reasons.append("earnings-related material present")
+    if doc_types.isin(["recommendation change", "rating change", "guidance", "estimate revision"]).any():
+        reasons.append("change-oriented document present")
+    if not reasons:
+        reasons.append(f"{len(group)} relevant file(s) for {ticker}")
+    return "; ".join(reasons)
+
+
+def _expand_rows_by_detected_ticker(relevance: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, row in relevance.iterrows():
+        tickers_in_row = [
+            t.strip() for t in str(row.get("all_detected_tickers") or row.get("ticker") or "").split(",")
+            if t.strip()
+        ]
+        for detected in tickers_in_row:
+            expanded = row.to_dict()
+            expanded["ticker"] = detected
+            rows.append(expanded)
+    return pd.DataFrame(rows, columns=relevance.columns) if rows else relevance.iloc[0:0].copy()
 
 
 def build_category_summary(relevance: pd.DataFrame) -> pd.DataFrame:
@@ -529,6 +699,7 @@ def build_deterministic_brief(
     source_name: str,
 ) -> str:
     ticker_summary = build_ticker_summary(relevance)
+    broker_summary = build_broker_coverage_summary(relevance)
     category_summary = build_category_summary(relevance)
     selected_by_path = {str(x.get("relative_path") or ""): x for x in selected_text}
     high = relevance[relevance["priority_level"] == "High"].head(15) if not relevance.empty else relevance
@@ -548,8 +719,9 @@ def build_deterministic_brief(
     else:
         for _, row in ticker_summary.head(12).iterrows():
             lines.append(
-                f"- **{row['ticker']}**: {row['file_count']} file(s), "
-                f"{row['high_priority_files']} high priority; categories: {row['categories'] or 'Unspecified'}."
+                f"- **{row['ticker']}**: {row['attention_reason']}; "
+                f"{row['file_count']} file(s), {row['high_priority_files']} high priority, "
+                f"max score {row['max_relevance_score']}."
             )
 
     lines.extend(["", "## Top High-Priority Documents"])
@@ -560,7 +732,17 @@ def build_deterministic_brief(
             lines.append(
                 f"- Score {int(row['relevance_score'])}: `{row['relative_path']}` "
                 f"({row['document_type']}; {row['source_or_broker'] or 'source unknown'}; "
-                f"{row['ticker'] or 'ticker uncertain'})."
+                f"{row['ticker'] or 'ticker uncertain'}). Rationale: {row['investment_rationale']}"
+            )
+
+    lines.extend(["", "## Broker Coverage Highlights"])
+    if broker_summary.empty:
+        lines.append("No normalized broker/source coverage was identified.")
+    else:
+        for _, row in broker_summary.head(12).iterrows():
+            lines.append(
+                f"- **{row['ticker']}**: {row['broker_report_count']} broker/source report(s) from "
+                f"{row['brokers_or_sources']}; {row['attention_reason']}."
             )
 
     lines.extend(["", "## Category Summary"])
@@ -587,6 +769,7 @@ def build_deterministic_brief(
             "",
             "## Recommended Follow-Up for Geoff / Mitko",
             "- Review the highest-scoring documents first, especially repeated tickers across multiple sources.",
+            "- Prioritize tickers with multiple brokers, cross-category coverage, or both credit and equity research.",
             "- Open source files before acting on any possible signal; this brief uses only filenames, metadata, and limited first-page text.",
             "- Validate any ratings, estimates, financial figures, or conclusions directly in the source documents.",
             "",
@@ -602,8 +785,17 @@ def build_deterministic_brief(
             lines.append(f"- ...and {len(skipped) - 30} additional inventory-only file(s).")
 
     lines.extend(["", "## Source References"])
+    reference_paths = set()
+    for _, row in high.iterrows():
+        path = str(row.get("relative_path") or "")
+        if path and path not in reference_paths:
+            lines.append(f"- `{path}` (high-priority metadata source)")
+            reference_paths.add(path)
     for item in selected_text:
-        lines.append(f"- `{item['relative_path']}` ({item['text_extraction_status']})")
+        path = str(item.get("relative_path") or "")
+        if path and path not in reference_paths:
+            lines.append(f"- `{path}` ({item['text_extraction_status']})")
+            reference_paths.add(path)
     return "\n".join(lines)
 
 
@@ -632,6 +824,19 @@ def build_llm_evidence_payload(
         records.append(record)
         used += len(encoded)
     metadata = relevance[
-        ["relative_path", "ticker", "category", "source_or_broker", "document_type", "relevance_score", "priority_level"]
+        [
+            "relative_path", "ticker", "all_detected_tickers", "category", "source_or_broker",
+            "document_type", "relevance_score", "priority_level", "investment_rationale",
+        ]
     ].head(30).to_dict(orient="records") if not relevance.empty else []
-    return json.dumps({"selected_sources": records, "top_metadata": metadata}, ensure_ascii=False)
+    broker_coverage = build_broker_coverage_summary(relevance).head(20).to_dict(orient="records")
+    ticker_summary = build_ticker_summary(relevance).head(20).to_dict(orient="records")
+    return json.dumps(
+        {
+            "selected_sources": records,
+            "top_metadata": metadata,
+            "broker_coverage": broker_coverage,
+            "ticker_summary": ticker_summary,
+        },
+        ensure_ascii=False,
+    )
