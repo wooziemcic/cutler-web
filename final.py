@@ -5877,6 +5877,64 @@ def _generate_cross_day_report_with_optional_llm(
     return fallback, "deterministic_fallback", "openai_response_failed_grounding"
 
 
+def _generate_historical_research_answer_with_optional_llm(
+    query: str,
+    results_df,
+    *,
+    mode: str,
+) -> Tuple[str, str, str]:
+    max_results = 20 if mode == "Deeper answer" else 10
+    fallback = daily_research_brief.build_deterministic_research_answer(
+        query,
+        results_df,
+        max_results=max_results,
+    )
+    api_key = os.getenv("OPENAI_API_KEY") or ""
+    if not api_key:
+        return fallback, "deterministic_fallback", "missing_api_key"
+    if results_df.empty:
+        return fallback, "deterministic_fallback", "no_search_results"
+
+    evidence = daily_research_brief.build_research_answer_payload(
+        query,
+        results_df,
+        max_results=max_results,
+    )
+    system_prompt = (
+        "Answer a historical investment-research question using only the supplied compact search results. "
+        "Never invent financial conclusions or broker views. Metadata supports only file existence, date, "
+        "ticker, broker/source, category, document type, priority, and relevance. If extracted_snippet is "
+        "empty, label the result `metadata match only`. Do not state ratings, price targets, EPS, revenue, "
+        "guidance, estimates, margins, liquidity, valuation, credit conclusions, upgrades, downgrades, "
+        "beats, or misses unless the exact claim is directly present in extracted_snippet. Every evidence "
+        "bullet must cite a supplied file_name. Use cautious wording and recommend source-PDF review when "
+        "evidence is weak."
+    )
+    user_prompt = (
+        "Create concise Markdown with exactly these sections: Answer Summary, Top Matching Evidence, "
+        "Source Files, and Caveats / Manual Verification. Do not include unsupported claims. "
+        "Do not cite files outside the supplied results.\n\n"
+        f"Search evidence JSON:\n{evidence}"
+    )
+    try:
+        openai.api_key = api_key
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=2400 if mode == "Deeper answer" else 1400,
+        )
+        text = response["choices"][0]["message"]["content"].strip()
+        if text and daily_research_brief.validate_research_answer_grounding(text, results_df.head(max_results)):
+            return daily_research_brief.add_generation_method(text, "openai_refined"), "openai_refined", ""
+    except Exception:
+        return fallback, "deterministic_fallback", "openai_call_failed"
+    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
+
+
 def _process_cross_day_uploaded_zip(uploaded, known_tickers: set[str]):
     session_dir = daily_research_brief.create_session_dir()
     zip_path = session_dir / "daily_research.zip"
@@ -6467,6 +6525,248 @@ def draw_daily_research_brief_section() -> None:
                 file_name="cross_day_research_change_report.md",
                 mime="text/markdown",
                 key="daily_cross_day_download_report",
+                use_container_width=True,
+            )
+
+    st.markdown("#### Historical Search / Research Q&A")
+    st.caption(
+        "Build a lightweight session index from already processed research, then search filenames, metadata, "
+        "relevance scores, and previously extracted limited snippets. PDFs are not rescanned when indexing."
+    )
+    research_index_df = st.session_state.get("research_index_df")
+    if not isinstance(research_index_df, pd.DataFrame):
+        research_index_df = pd.DataFrame(columns=daily_research_brief.RESEARCH_INDEX_COLUMNS)
+
+    index_daily_col, index_cross_col, clear_index_col = st.columns(3)
+    with index_daily_col:
+        add_daily_to_index = st.button(
+            "Add current daily ZIP to research index",
+            key="daily_research_search_add_daily_btn",
+            disabled=not isinstance(relevance_df, pd.DataFrame) or relevance_df.empty,
+            use_container_width=True,
+        )
+    with index_cross_col:
+        add_cross_to_index = st.button(
+            "Add processed cross-day ZIPs to research index",
+            key="daily_research_search_add_cross_btn",
+            disabled=not cross_ready,
+            use_container_width=True,
+        )
+    with clear_index_col:
+        clear_research_index = st.button(
+            "Clear research index",
+            key="daily_research_search_clear_btn",
+            disabled=research_index_df.empty,
+            use_container_width=True,
+        )
+
+    if add_daily_to_index:
+        reusable_snippets = list(selected_text)
+        reusable_snippets.extend(st.session_state.get("daily_ticker_memo_snippets") or [])
+        reusable_snippets.extend(st.session_state.get("daily_broker_comparison_snippets") or [])
+        incoming_index = daily_research_brief.build_research_index_rows(
+            relevance_df,
+            reusable_snippets,
+            source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
+        )
+        research_index_df = daily_research_brief.merge_research_index(research_index_df, incoming_index)
+        st.session_state["research_index_df"] = research_index_df
+        st.session_state["indexed_sources"] = daily_research_brief.build_indexed_sources_summary(
+            research_index_df
+        ).to_dict(orient="records")
+        st.success(f"Added current daily research to the session index ({len(incoming_index)} file row(s)).")
+        st.rerun()
+
+    if add_cross_to_index:
+        previous_index = daily_research_brief.build_research_index_rows(
+            previous_relevance,
+            [],
+            source_name=st.session_state.get("daily_cross_day_previous_name") or "previous.zip",
+        )
+        current_index = daily_research_brief.build_research_index_rows(
+            current_relevance,
+            [],
+            source_name=st.session_state.get("daily_cross_day_current_name") or "current.zip",
+        )
+        changes_index = daily_research_brief.build_cross_day_research_index_rows(
+            change_inventory,
+            source_name=st.session_state.get("daily_cross_day_current_name") or "current.zip",
+        )
+        for incoming_index in (previous_index, current_index, changes_index):
+            research_index_df = daily_research_brief.merge_research_index(research_index_df, incoming_index)
+        st.session_state["research_index_df"] = research_index_df
+        st.session_state["indexed_sources"] = daily_research_brief.build_indexed_sources_summary(
+            research_index_df
+        ).to_dict(orient="records")
+        st.success("Added processed previous-day, current-day, and cross-day change metadata to the session index.")
+        st.rerun()
+
+    if clear_research_index:
+        _clear_session_keys(
+            exact=[
+                "research_index_df", "indexed_sources", "last_search_query", "search_results_df",
+                "grounded_answer_markdown", "generation_method", "historical_answer_warning",
+            ],
+            prefixes=["daily_research_search_"],
+        )
+        st.rerun()
+
+    indexed_sources_df = daily_research_brief.build_indexed_sources_summary(research_index_df)
+    st.session_state["indexed_sources"] = indexed_sources_df.to_dict(orient="records")
+    if indexed_sources_df.empty:
+        st.info("Add a processed daily ZIP or processed cross-day ZIPs to begin searching.")
+    else:
+        st.markdown("**Indexed Dates / Folders**")
+        st.dataframe(indexed_sources_df, use_container_width=True, hide_index=True)
+
+        def _research_filter_options(column: str) -> List[str]:
+            values = {
+                str(value).strip()
+                for value in research_index_df[column]
+                if str(value).strip()
+            }
+            return ["All"] + sorted(values)
+
+        detected_ticker_options = set()
+        for value in research_index_df["all_detected_tickers"].astype(str):
+            detected_ticker_options.update(part.strip() for part in value.split(",") if part.strip())
+        search_query = st.text_input(
+            "Ask a research question",
+            placeholder="What did brokers say about AMZN?",
+            key="daily_research_search_query",
+        )
+        filter_one, filter_two, filter_three = st.columns(3)
+        with filter_one:
+            search_ticker = st.selectbox(
+                "Ticker",
+                options=["All"] + sorted(detected_ticker_options),
+                key="daily_research_search_ticker_filter",
+            )
+            search_category = st.selectbox(
+                "Category",
+                options=_research_filter_options("category"),
+                key="daily_research_search_category_filter",
+            )
+        with filter_two:
+            search_broker = st.selectbox(
+                "Broker/source",
+                options=_research_filter_options("source_or_broker"),
+                key="daily_research_search_broker_filter",
+            )
+            search_document_type = st.selectbox(
+                "Document type",
+                options=_research_filter_options("document_type"),
+                key="daily_research_search_document_filter",
+            )
+        with filter_three:
+            search_date = st.selectbox(
+                "Date/folder",
+                options=_research_filter_options("source_date"),
+                key="daily_research_search_date_filter",
+            )
+            answer_mode = st.radio(
+                "Answer mode",
+                options=["Fast answer", "Deeper answer"],
+                horizontal=True,
+                key="daily_research_search_answer_mode",
+            )
+
+        search_col, answer_col = st.columns(2)
+        with search_col:
+            search_clicked = st.button(
+                "Search Research Index",
+                key="daily_research_search_submit_btn",
+                use_container_width=True,
+            )
+        if search_clicked:
+            active_filters = {
+                "ticker": "" if search_ticker == "All" else search_ticker,
+                "source_or_broker": "" if search_broker == "All" else search_broker,
+                "category": "" if search_category == "All" else search_category,
+                "document_type": "" if search_document_type == "All" else search_document_type,
+                "source_date": "" if search_date == "All" else search_date,
+            }
+            if not search_query.strip() and not any(active_filters.values()):
+                st.warning("Enter a research question or select at least one filter.")
+            else:
+                search_results = daily_research_brief.search_research_index(
+                    research_index_df,
+                    search_query,
+                    **active_filters,
+                    max_results=200,
+                )
+                st.session_state["last_search_query"] = search_query.strip() or "Filtered research search"
+                st.session_state["search_results_df"] = search_results
+                st.session_state.pop("grounded_answer_markdown", None)
+                st.session_state.pop("generation_method", None)
+                st.session_state.pop("historical_answer_warning", None)
+
+        search_results_df = st.session_state.get("search_results_df")
+        search_results_ready = isinstance(search_results_df, pd.DataFrame) and not search_results_df.empty
+        with answer_col:
+            answer_clicked = st.button(
+                "Generate Grounded Answer",
+                key="daily_research_search_generate_answer_btn",
+                disabled=not search_results_ready,
+                use_container_width=True,
+            )
+
+        if isinstance(search_results_df, pd.DataFrame):
+            st.markdown("**Search Results**")
+            if search_results_df.empty:
+                st.info("No indexed research rows matched the question and selected filters.")
+            else:
+                result_display_columns = [
+                    "search_score", "match_reason", "source_date", "ticker", "source_or_broker",
+                    "category", "document_type", "file_name", "relevance_score", "priority_level",
+                    "evidence_type", "extraction_status", "extracted_snippet",
+                ]
+                st.dataframe(
+                    search_results_df[result_display_columns],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.download_button(
+                    "Download search results CSV",
+                    data=search_results_df.to_csv(index=False).encode("utf-8"),
+                    file_name="historical_research_search_results.csv",
+                    mime="text/csv",
+                    key="daily_research_search_download_results",
+                    use_container_width=True,
+                )
+
+        if answer_clicked and search_results_ready:
+            with st.spinner("Generating a grounded answer from compact search results..."):
+                grounded_answer, answer_method, answer_warning = (
+                    _generate_historical_research_answer_with_optional_llm(
+                        st.session_state.get("last_search_query") or search_query,
+                        search_results_df,
+                        mode=answer_mode,
+                    )
+                )
+            st.session_state["grounded_answer_markdown"] = grounded_answer
+            st.session_state["generation_method"] = answer_method
+            st.session_state["historical_answer_warning"] = answer_warning
+            st.success("Grounded research answer generated.")
+
+        grounded_answer = st.session_state.get("grounded_answer_markdown") or ""
+        if grounded_answer:
+            st.caption(
+                "Generation method: "
+                f"{st.session_state.get('generation_method') or 'deterministic_fallback'}"
+            )
+            answer_warning = st.session_state.get("historical_answer_warning") or ""
+            if answer_warning == "missing_api_key":
+                st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
+            elif answer_warning in {"openai_call_failed", "openai_response_failed_grounding"}:
+                st.warning("OpenAI refinement failed; the conservative deterministic fallback is shown.")
+            st.markdown(grounded_answer)
+            st.download_button(
+                "Download grounded answer Markdown",
+                data=grounded_answer.encode("utf-8"),
+                file_name="historical_research_grounded_answer.md",
+                mime="text/markdown",
+                key="daily_research_search_download_answer",
                 use_container_width=True,
             )
 

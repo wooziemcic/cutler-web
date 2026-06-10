@@ -152,6 +152,13 @@ CROSS_DAY_TICKER_COLUMNS = [
     "new_credit_report_count", "new_earnings_file_count", "new_transcript_count",
     "new_filing_count", "current_high_priority_count", "attention_reason",
 ]
+RESEARCH_INDEX_COLUMNS = [
+    "source_date", "indexed_source", "ticker", "all_detected_tickers",
+    "source_or_broker", "category", "document_type", "file_name", "relative_path",
+    "relevance_score", "priority_level", "extracted_snippet", "evidence_type",
+    "extraction_status",
+]
+RESEARCH_SEARCH_RESULT_COLUMNS = RESEARCH_INDEX_COLUMNS + ["search_score", "match_reason"]
 
 INSUFFICIENT_TEXT_NOTICE = (
     "No verified financial claims were generated because extracted text was insufficient. "
@@ -1784,6 +1791,360 @@ def validate_cross_day_report_grounding(text: str) -> bool:
     claim_text = text.split("## Recommended Follow-Up for Geoff/Mitko", 1)[0]
     financial_patterns = [pattern for pattern in SENSITIVE_FINANCE_PATTERNS if "miss" not in pattern]
     return not any(re.search(pattern, claim_text, flags=re.IGNORECASE) for pattern in financial_patterns)
+
+
+def build_research_index_rows(
+    relevance: pd.DataFrame,
+    snippets: List[Dict[str, Any]],
+    *,
+    source_name: str,
+) -> pd.DataFrame:
+    """Build one lightweight index row per research file without rescanning files."""
+    if not isinstance(relevance, pd.DataFrame) or relevance.empty:
+        return pd.DataFrame(columns=RESEARCH_INDEX_COLUMNS)
+
+    snippet_by_path: Dict[str, Dict[str, Any]] = {}
+    for item in snippets or []:
+        path = str(item.get("relative_path") or "")
+        if not path:
+            continue
+        evidence = best_investment_useful_snippet(item, max_chars=900)
+        current = snippet_by_path.get(path)
+        current_length = len(str(current.get("snippet") or "")) if current else -1
+        if len(str(evidence.get("snippet") or "")) > current_length:
+            snippet_by_path[path] = evidence
+
+    source_date = daily_source_title_suffix(source_name, relevance.get("relative_path", []))
+    rows = []
+    for _, row in relevance.iterrows():
+        relative_path = str(row.get("relative_path") or "")
+        evidence = snippet_by_path.get(relative_path, {})
+        rows.append(
+            {
+                "source_date": source_date,
+                "indexed_source": str(source_name or "daily_research.zip"),
+                "ticker": str(row.get("ticker") or ""),
+                "all_detected_tickers": str(row.get("all_detected_tickers") or row.get("ticker") or ""),
+                "source_or_broker": str(row.get("source_or_broker") or ""),
+                "category": str(row.get("category") or "Root"),
+                "document_type": str(row.get("document_type") or "other"),
+                "file_name": str(row.get("file_name") or ""),
+                "relative_path": relative_path,
+                "relevance_score": int(row.get("relevance_score") or 0),
+                "priority_level": str(row.get("priority_level") or ""),
+                "extracted_snippet": str(evidence.get("snippet") or ""),
+                "evidence_type": str(evidence.get("evidence_type") or "Other"),
+                "extraction_status": str(
+                    evidence.get("extraction_status")
+                    or row.get("extraction_status")
+                    or "metadata-only"
+                ),
+            }
+        )
+    return pd.DataFrame(rows, columns=RESEARCH_INDEX_COLUMNS)
+
+
+def build_cross_day_research_index_rows(
+    changes: pd.DataFrame,
+    *,
+    source_name: str,
+) -> pd.DataFrame:
+    """Index cross-day change metadata so change-oriented queries remain searchable."""
+    if not isinstance(changes, pd.DataFrame) or changes.empty:
+        return pd.DataFrame(columns=RESEARCH_INDEX_COLUMNS)
+    source_date = daily_source_title_suffix(source_name)
+    rows = []
+    for _, row in changes.iterrows():
+        reason = str(row.get("reason_for_change") or "")
+        change_type = str(row.get("change_type") or "change")
+        source = str(row.get("source_or_broker") or "")
+        if change_type == "new" and source:
+            reason = f"New broker/source coverage candidate from {source}. {reason}"
+        rows.append(
+            {
+                "source_date": source_date,
+                "indexed_source": f"Cross-day changes: {source_name}",
+                "ticker": str(row.get("ticker") or ""),
+                "all_detected_tickers": str(row.get("ticker") or ""),
+                "source_or_broker": source,
+                "category": str(row.get("category") or "Root"),
+                "document_type": str(row.get("document_type") or "other"),
+                "file_name": str(row.get("file_name") or ""),
+                "relative_path": str(row.get("file_name") or ""),
+                "relevance_score": int(row.get("current_score") or row.get("previous_score") or 0),
+                "priority_level": str(row.get("priority_level") or ""),
+                "extracted_snippet": f"{change_type}: {reason}".strip(),
+                "evidence_type": "Metadata Change",
+                "extraction_status": "metadata-only",
+            }
+        )
+    return pd.DataFrame(rows, columns=RESEARCH_INDEX_COLUMNS)
+
+
+def merge_research_index(existing: Any, incoming: pd.DataFrame) -> pd.DataFrame:
+    """Merge index rows, preserving useful snippets and avoiding rerun duplicates."""
+    frames = []
+    if isinstance(existing, pd.DataFrame) and not existing.empty:
+        frames.append(existing.reindex(columns=RESEARCH_INDEX_COLUMNS))
+    if isinstance(incoming, pd.DataFrame) and not incoming.empty:
+        frames.append(incoming.reindex(columns=RESEARCH_INDEX_COLUMNS))
+    if not frames:
+        return pd.DataFrame(columns=RESEARCH_INDEX_COLUMNS)
+    combined = pd.concat(frames, ignore_index=True)
+    combined["_snippet_length"] = combined["extracted_snippet"].astype(str).str.len()
+    combined = combined.sort_values("_snippet_length").drop_duplicates(
+        subset=["indexed_source", "relative_path"], keep="last"
+    )
+    return combined.drop(columns=["_snippet_length"]).reset_index(drop=True)
+
+
+def build_indexed_sources_summary(index_df: pd.DataFrame) -> pd.DataFrame:
+    columns = ["source_date", "indexed_source", "files_indexed", "snippets_indexed"]
+    if not isinstance(index_df, pd.DataFrame) or index_df.empty:
+        return pd.DataFrame(columns=columns)
+    summary = (
+        index_df.assign(_has_snippet=index_df["extracted_snippet"].astype(str).str.strip().ne(""))
+        .groupby(["source_date", "indexed_source"], dropna=False)
+        .agg(files_indexed=("relative_path", "nunique"), snippets_indexed=("_has_snippet", "sum"))
+        .reset_index()
+    )
+    return summary.sort_values(["source_date", "indexed_source"], ascending=[False, True]).reset_index(drop=True)
+
+
+def search_research_index(
+    index_df: pd.DataFrame,
+    query: str,
+    *,
+    ticker: str = "",
+    source_or_broker: str = "",
+    category: str = "",
+    document_type: str = "",
+    source_date: str = "",
+    max_results: int = 100,
+) -> pd.DataFrame:
+    """Rank lightweight index rows using deterministic metadata and keyword matching."""
+    if not isinstance(index_df, pd.DataFrame) or index_df.empty:
+        return pd.DataFrame(columns=RESEARCH_SEARCH_RESULT_COLUMNS)
+    result = index_df.reindex(columns=RESEARCH_INDEX_COLUMNS).copy()
+
+    filters = {
+        "source_or_broker": source_or_broker,
+        "category": category,
+        "document_type": document_type,
+        "source_date": source_date,
+    }
+    for column, value in filters.items():
+        if value:
+            result = result[result[column].astype(str).str.casefold() == str(value).casefold()]
+    if ticker:
+        ticker_upper = ticker.upper()
+        result = result[
+            result["all_detected_tickers"].astype(str).str.upper().str.split(",").apply(
+                lambda values: ticker_upper in {value.strip() for value in values}
+            )
+        ]
+    if result.empty:
+        return pd.DataFrame(columns=RESEARCH_SEARCH_RESULT_COLUMNS)
+
+    query_text = str(query or "").strip().casefold()
+    terms = [
+        term for term in re.findall(r"[a-z0-9][a-z0-9&._-]*", query_text)
+        if len(term) > 1 or term.isdigit()
+    ]
+    ticker_terms = {term.upper() for term in terms if re.fullmatch(r"[a-z]{1,5}", term)}
+    parsed_dates = {}
+    for value in result["source_date"].astype(str).drop_duplicates():
+        try:
+            parsed_dates[value] = datetime.strptime(value, "%B %d, %Y").toordinal()
+        except ValueError:
+            continue
+    newest_ordinal = max(parsed_dates.values(), default=0)
+    oldest_ordinal = min(parsed_dates.values(), default=0)
+    scored = []
+    for _, row in result.iterrows():
+        searchable_fields = {
+            "ticker": str(row.get("all_detected_tickers") or row.get("ticker") or "").casefold(),
+            "broker": str(row.get("source_or_broker") or "").casefold(),
+            "category": str(row.get("category") or "").casefold(),
+            "document": str(row.get("document_type") or "").casefold(),
+            "filename": str(row.get("file_name") or "").casefold(),
+            "path": str(row.get("relative_path") or "").casefold(),
+            "snippet": str(row.get("extracted_snippet") or "").casefold(),
+            "evidence": str(row.get("evidence_type") or "").casefold(),
+        }
+        full_text = " ".join(searchable_fields.values())
+        score = min(float(row.get("relevance_score") or 0) / 10.0, 10.0)
+        reasons = [f"relevance {int(row.get('relevance_score') or 0)}"]
+        matched_terms = []
+        if query_text and query_text in full_text:
+            score += 24
+            reasons.append("phrase match")
+        for term in terms:
+            matching_fields = [name for name, value in searchable_fields.items() if term in value]
+            if matching_fields:
+                matched_terms.append(term)
+                score += 5 + min(len(matching_fields), 3)
+                if "snippet" in matching_fields:
+                    score += 4
+                if "filename" in matching_fields:
+                    score += 3
+        detected = {
+            value.strip().upper()
+            for value in str(row.get("all_detected_tickers") or row.get("ticker") or "").split(",")
+            if value.strip()
+        }
+        exact_tickers = detected & ticker_terms
+        if exact_tickers:
+            score += 35
+            reasons.append(f"exact ticker: {', '.join(sorted(exact_tickers))}")
+        if str(row.get("priority_level") or "") == "High":
+            score += 8
+            reasons.append("high priority")
+        if str(row.get("extracted_snippet") or "").strip():
+            score += 8
+            reasons.append("snippet available")
+        if str(row.get("evidence_type") or "") not in {"", "Other"}:
+            score += 4
+            reasons.append(str(row.get("evidence_type")))
+        row_ordinal = parsed_dates.get(str(row.get("source_date") or ""), 0)
+        if row_ordinal and newest_ordinal:
+            date_span = max(newest_ordinal - oldest_ordinal, 1)
+            recency_boost = 2 + (3 * (row_ordinal - oldest_ordinal) / date_span)
+            score += recency_boost
+            reasons.append("source-date recency")
+        if matched_terms:
+            reasons.append(f"matched: {', '.join(sorted(set(matched_terms)))}")
+        if query_text and not matched_terms and not exact_tickers and query_text not in full_text:
+            continue
+        output = row.to_dict()
+        output["search_score"] = round(score, 1)
+        output["match_reason"] = "; ".join(reasons)
+        scored.append(output)
+    if not scored:
+        return pd.DataFrame(columns=RESEARCH_SEARCH_RESULT_COLUMNS)
+    return (
+        pd.DataFrame(scored, columns=RESEARCH_SEARCH_RESULT_COLUMNS)
+        .sort_values(["search_score", "relevance_score", "file_name"], ascending=[False, False, True])
+        .head(int(max_results))
+        .reset_index(drop=True)
+    )
+
+
+def build_deterministic_research_answer(
+    query: str,
+    results: pd.DataFrame,
+    *,
+    max_results: int = 10,
+) -> str:
+    """Build a conservative answer that distinguishes snippets from metadata matches."""
+    top = results.head(int(max_results)) if isinstance(results, pd.DataFrame) else pd.DataFrame()
+    lines = [
+        "# Historical Research Q&A",
+        "",
+        "Generation method: deterministic_fallback",
+        "",
+        f"Question: {query or 'Filtered research search'}",
+        "",
+        "## Answer Summary",
+    ]
+    if top.empty:
+        lines.append("No indexed research rows matched the question and selected filters.")
+    else:
+        tickers = sorted({str(value) for value in top["ticker"] if str(value)})
+        sources = sorted({str(value) for value in top["source_or_broker"] if str(value)})
+        lines.append(
+            f"Found {len(results)} matching indexed row(s); the top {len(top)} are shown below. "
+            f"Matched ticker/entity metadata: {', '.join(tickers[:12]) or 'none identified'}. "
+            f"Matched broker/source metadata: {', '.join(sources[:12]) or 'none identified'}."
+        )
+
+    lines.extend(["", "## Top Matching Evidence"])
+    if top.empty:
+        lines.append("- No matching evidence.")
+    else:
+        for _, row in top.iterrows():
+            snippet = str(row.get("extracted_snippet") or "").strip()
+            if snippet:
+                excerpt = snippet[:700] + ("..." if len(snippet) > 700 else "")
+                lines.append(
+                    f"- `{row['file_name']}` ({row['source_date']}): "
+                    f"{row['evidence_type']} extracted excerpt: \"{excerpt}\""
+                )
+            else:
+                lines.append(
+                    f"- `{row['file_name']}` ({row['source_date']}): metadata match only; "
+                    f"{row['document_type']} in {row['category']}, "
+                    f"source/broker {row['source_or_broker'] or 'unknown'}."
+                )
+
+    lines.extend(["", "## Source Files"])
+    if top.empty:
+        lines.append("- No matching source files.")
+    else:
+        for _, row in top.drop_duplicates(["indexed_source", "relative_path"]).iterrows():
+            lines.append(f"- `{row['file_name']}` - {row['indexed_source']} - {row['source_date']}")
+
+    lines.extend(
+        [
+            "",
+            "## Caveats / Manual Verification",
+            "- Search ranking is deterministic and uses filenames, metadata, relevance scores, and previously extracted limited snippets.",
+            "- A metadata match does not establish a financial claim or broker view.",
+            "- Review source PDFs before relying on ratings, price targets, EPS, revenue, guidance, estimates, margins, liquidity, valuation, or credit conclusions.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_research_answer_payload(query: str, results: pd.DataFrame, *, max_results: int) -> str:
+    fields = [
+        "source_date", "ticker", "all_detected_tickers", "source_or_broker", "category",
+        "document_type", "file_name", "relative_path", "relevance_score", "priority_level",
+        "extracted_snippet", "evidence_type", "extraction_status", "match_reason",
+    ]
+    compact = results.reindex(columns=fields).head(int(max_results)).copy()
+    compact["extracted_snippet"] = compact["extracted_snippet"].astype(str).str.slice(0, 900)
+    return json.dumps(
+        {"question": query, "results": compact.to_dict(orient="records")},
+        ensure_ascii=False,
+    )
+
+
+def validate_research_answer_grounding(text: str, results: pd.DataFrame) -> bool:
+    required = ["## Answer Summary", "## Top Matching Evidence", "## Source Files", "## Caveats / Manual Verification"]
+    if not text or not all(section in text for section in required):
+        return False
+    source_names = {
+        str(value)
+        for value in results.get("file_name", pd.Series(dtype=str)).astype(str)
+        if str(value)
+    }
+    evidence_section = text.split("## Top Matching Evidence", 1)[-1].split("## Source Files", 1)[0]
+    for line in evidence_section.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("-") and source_names and not any(name in stripped for name in source_names):
+            return False
+    claim_text = text.split("## Caveats / Manual Verification", 1)[0]
+    for line in claim_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("Question:"):
+            continue
+        if not any(re.search(pattern, stripped, flags=re.IGNORECASE) for pattern in SENSITIVE_FINANCE_PATTERNS):
+            continue
+        cited_rows = [
+            row for _, row in results.iterrows()
+            if str(row.get("file_name") or "") in stripped
+        ]
+        quotes = [quote.strip() for quote in re.findall(r'"([^"]+)"', stripped) if quote.strip()]
+        if not cited_rows or not quotes:
+            return False
+        for quote in quotes:
+            if not any(
+                quote.casefold() in str(row.get("extracted_snippet") or "").casefold()
+                for row in cited_rows
+            ):
+                return False
+    return True
 
 
 def _attention_reason(group: pd.DataFrame, *, ticker: str) -> str:
