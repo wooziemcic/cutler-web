@@ -884,7 +884,6 @@ def build_deterministic_broker_comparison(
     snippets_by_path = {str(item.get("relative_path") or ""): item for item in snippets}
     verified = verified_extracted_text_items(snippets)
     sources = sorted({str(x) for x in files["source_or_broker"] if str(x)}) if not files.empty else []
-    cited_paths = ", ".join(f"`{path}`" for path in files["relative_path"].astype(str)) if not files.empty else ""
     lines = [
         f"# Broker Consensus Report - {ticker} - {report_date}",
         "",
@@ -925,22 +924,6 @@ def build_deterministic_broker_comparison(
             f"{_markdown_table_text(evidence['extraction_status'])} |"
         )
 
-    lines.extend(["", "## Executive Takeaway"])
-    if files.empty:
-        lines.append("No qualifying same-day broker/source reports were found for this ticker.")
-    elif not verified:
-        lines.append(
-            f"{len(files)} qualifying report(s) from {len(sources)} broker/source(s) were identified for "
-            f"**{ticker}**. The comparison is based mostly on metadata because extracted text was insufficient. "
-            f"No broker-view or financial conclusions were generated. Sources: {cited_paths}"
-        )
-    else:
-        lines.append(
-            f"{len(files)} qualifying report(s) from {len(sources)} broker/source(s) were compared for "
-            f"**{ticker}**. Limited extracted snippets are quoted below; review the source PDFs before "
-            f"drawing financial conclusions. Sources: {cited_paths}"
-        )
-
     lines.extend(["", "## Broker-by-Broker Summary"])
     if files.empty:
         lines.append("No broker/source reports available.")
@@ -957,8 +940,8 @@ def build_deterministic_broker_comparison(
             )
             if evidence["snippet"]:
                 lines.append(
-                    f"  Best investment-useful excerpt from `{path}`: "
-                    f"\"{evidence['snippet']}\""
+                    f"  Investment-useful evidence is available in the Key Extracted Evidence table. "
+                    f"Source: `{path}`"
                 )
             elif evidence["quality"] == "disclosure_only":
                 lines.append(
@@ -1013,7 +996,7 @@ def build_deterministic_broker_comparison(
     lines.extend(
         [
             "",
-            "## Items to Verify Manually",
+            "## Items to Verify",
             "- Rating or price target changes in the source PDFs.",
             "- EPS or revenue beats/misses in the source PDFs.",
             "- Guidance changes and estimate revisions.",
@@ -1081,13 +1064,13 @@ def build_broker_comparison_evidence_payload(
 
 def validate_broker_comparison_grounding(text: str, snippets: List[Dict[str, Any]]) -> bool:
     required = [
-        "## Files Compared", "## Key Extracted Evidence", "## Executive Takeaway",
-        "## Broker-by-Broker Summary", "## Consensus Themes", "## Divergences / Differences",
-        "## Items to Verify Manually", "## Source References",
+        "## Files Compared", "## Key Extracted Evidence", "## Broker-by-Broker Summary",
+        "## Consensus Themes", "## Divergences / Differences", "## Items to Verify",
+        "## Source References",
     ]
     if not all(section in text for section in required):
         return False
-    key_section = text.split("## Key Extracted Evidence", 1)[1].split("## Executive Takeaway", 1)[0]
+    key_section = text.split("## Key Extracted Evidence", 1)[1].split("## Broker-by-Broker Summary", 1)[0]
     verified = verified_extracted_text_items(snippets)
     for line in key_section.splitlines():
         stripped = line.strip()
@@ -1106,9 +1089,9 @@ def validate_broker_comparison_grounding(text: str, snippets: List[Dict[str, Any
             if not any(quote.lower() in _normalized_extracted_text(item).lower() for item in cited):
                 return False
     before_evidence, after_evidence = text.split("## Key Extracted Evidence", 1)
-    after_evidence = after_evidence.split("## Executive Takeaway", 1)[1]
-    claim_text = before_evidence + "## Executive Takeaway" + after_evidence
-    claim_text = claim_text.split("## Items to Verify Manually", 1)[0]
+    after_evidence = after_evidence.split("## Broker-by-Broker Summary", 1)[1]
+    claim_text = before_evidence + "## Broker-by-Broker Summary" + after_evidence
+    claim_text = claim_text.split("## Items to Verify", 1)[0]
     if not validate_llm_brief_grounding(claim_text, snippets):
         return False
     source_names = {
@@ -1130,7 +1113,7 @@ def validate_broker_comparison_grounding(text: str, snippets: List[Dict[str, Any
             continue
         if not any(source in stripped for source in source_names):
             return False
-    divergence = text.split("## Divergences / Differences", 1)[1].split("## Items to Verify Manually", 1)[0]
+    divergence = text.split("## Divergences / Differences", 1)[1].split("## Items to Verify", 1)[0]
     if "Not enough extracted text to verify broker-level differences." not in divergence:
         cited_sources = {
             str(item.get("relative_path") or "")
@@ -1286,15 +1269,15 @@ def build_deterministic_ticker_memo(
             f"{_markdown_table_text(row['extraction_status'])} |"
         )
 
-    def add_evidence_section(title: str, selected_rows: List[Dict[str, Any]], empty_text: str) -> None:
+    def add_evidence_reference_section(title: str, selected_rows: List[Dict[str, Any]], empty_text: str) -> None:
         lines.extend(["", f"## {title}"])
         if not selected_rows:
             lines.append(empty_text)
             return
         for row in selected_rows:
             lines.append(
-                f"- Direct limited-text excerpt from `{row['relative_path']}`: "
-                f"\"{row['extracted_evidence']}\""
+                f"- **{row['evidence_type']}** evidence is available in the Key Extracted Evidence table. "
+                f"Source: `{row['relative_path']}`"
             )
 
     broker_rows = [row for row in useful if row["source_or_broker"] != "Company / filing source"]
@@ -1309,17 +1292,18 @@ def build_deterministic_ticker_memo(
             "prepared remarks", "10-Q/10Q", "8-K/8K", "MD&A",
         } or row["evidence_type"] in {"Earnings / Results", "Guidance / Estimates"}
     ]
-    add_evidence_section(
+    add_evidence_reference_section(
         "Broker / Source Views",
         broker_rows,
         "No investment-useful broker/source excerpt was found in the limited extraction.",
     )
-    add_evidence_section(
+    lines.append("For full broker-by-broker comparison, use the Broker Consensus Comparator above.")
+    add_evidence_reference_section(
         "Credit / Balance Sheet Notes",
         credit_rows,
         "No verified credit, liquidity, leverage, or debt note was found in the limited extraction.",
     )
-    add_evidence_section(
+    add_evidence_reference_section(
         "Earnings / Operating Notes",
         earnings_rows,
         "No verified earnings or operating note was found in the limited extraction.",
@@ -1328,12 +1312,12 @@ def build_deterministic_ticker_memo(
     lines.extend(
         [
             "",
-            "## Potential Bullish Points",
-            "No bullish investment conclusion was generated automatically. Review the direct extracted evidence "
+            "## Potential Bullish Evidence",
+            "No bullish investment evidence was classified automatically. Review the Key Extracted Evidence table "
             f"and source PDFs before assessing upside. Sources reviewed: {cited_paths}",
             "",
-            "## Potential Bearish Points / Risks",
-            "No bearish investment conclusion was generated automatically. Review the direct extracted evidence "
+            "## Potential Bearish / Risk Evidence",
+            "No bearish or risk evidence was classified automatically. Review the Key Extracted Evidence table "
             f"and source PDFs before assessing downside or risk. Sources reviewed: {cited_paths}",
             "",
             "## Open Questions for Geoff/Mitko",
@@ -1363,6 +1347,7 @@ def build_ticker_memo_evidence_payload(
     files: pd.DataFrame,
     snippets: List[Dict[str, Any]],
     *,
+    source_date: str = "",
     max_total_chars: int = 40000,
 ) -> str:
     records = []
@@ -1379,6 +1364,15 @@ def build_ticker_memo_evidence_payload(
     return json.dumps(
         {
             "ticker": ticker,
+            "source_date": source_date,
+            "document_coverage": (
+                files.groupby(["document_type", "category"], dropna=False).size()
+                .reset_index(name="file_count").to_dict(orient="records")
+                if not files.empty else []
+            ),
+            "brokers_or_sources": sorted({
+                str(value) for value in files.get("source_or_broker", []) if str(value)
+            }),
             "grounding_rule": (
                 "Metadata supports file/source/category/document-type observations only. Every financial or "
                 "investment claim must be a direct quote from limited_text and cite relative_path."
@@ -1393,13 +1387,14 @@ def validate_ticker_memo_grounding(text: str, snippets: List[Dict[str, Any]]) ->
     required = [
         "## Files Reviewed", "## Executive Summary", "## Document Coverage Overview",
         "## Key Extracted Evidence", "## Broker / Source Views", "## Credit / Balance Sheet Notes",
-        "## Earnings / Operating Notes", "## Potential Bullish Points",
-        "## Potential Bearish Points / Risks", "## Open Questions for Geoff/Mitko",
+        "## Earnings / Operating Notes", "## Potential Bullish Evidence",
+        "## Potential Bearish / Risk Evidence", "## Open Questions for Geoff/Mitko",
         "## Recommended Next Steps", "## Source References",
     ]
     if not all(section in text for section in required):
         return False
-    key_section = text.split("## Key Extracted Evidence", 1)[1].split("## Broker / Source Views", 1)[0]
+    before_evidence, after_evidence = text.split("## Key Extracted Evidence", 1)
+    key_section, after_evidence = after_evidence.split("## Broker / Source Views", 1)
     for line in key_section.splitlines():
         stripped = line.strip()
         if not stripped.startswith("|") or "source/broker" in stripped.lower() or bool(re.fullmatch(r"[\s|:-]+", stripped)):
@@ -1415,6 +1410,21 @@ def validate_ticker_memo_grounding(text: str, snippets: List[Dict[str, Any]]) ->
                 continue
             if not any(quote.lower() in _normalized_extracted_text(item).lower() for item in cited):
                 return False
+    if re.search(
+        r"\b(?:we|investors?|geoff|mitko|you)\s+should\s+(?:buy|sell)\b"
+        r"|\bwe recommend (?:buying|selling)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    if re.search(
+        r"(?:^|\n)\s*[-*]?\s*(?:buy|sell)\b|\b(?:recommendation|stance)\s*:\s*(?:buy|sell)\b",
+        before_evidence + after_evidence,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    if re.search(r'"[^"]{20,}"', before_evidence + after_evidence):
+        return False
     source_names = {
         value
         for item in snippets
@@ -1422,7 +1432,11 @@ def validate_ticker_memo_grounding(text: str, snippets: List[Dict[str, Any]]) ->
         if value
     }
     claim_text = text.split("## Open Questions for Geoff/Mitko", 1)[0]
-    if not validate_llm_brief_grounding(claim_text, snippets):
+    financial_claim_text = "\n".join(
+        line for line in claim_text.splitlines()
+        if "evidence is available in Key Extracted Evidence" not in line
+    )
+    if not validate_llm_brief_grounding(financial_claim_text, snippets):
         return False
     for line in claim_text.splitlines():
         stripped = line.strip()
@@ -1433,6 +1447,7 @@ def validate_ticker_memo_grounding(text: str, snippets: List[Dict[str, Any]]) ->
             or (stripped.startswith("|") and "file" in stripped.lower())
             or stripped.startswith("Memo mode:")
             or stripped == "Limited extracted text was available; review source PDFs before making investment conclusions."
+            or stripped == "For full broker-by-broker comparison, use the Broker Consensus Comparator above."
         ):
             continue
         if not any(source in stripped for source in source_names):

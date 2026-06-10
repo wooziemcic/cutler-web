@@ -5715,14 +5715,16 @@ def _generate_broker_comparison_with_optional_llm(
     )
     user_prompt = (
         f"Create `Broker Consensus Report - {ticker} - {report_date}` as Markdown with exactly these sections: "
-        "Files Compared, Key Extracted Evidence, Executive Takeaway, Broker-by-Broker Summary, "
-        "Consensus Themes, Divergences / Differences, Items to Verify Manually, and Source References. "
+        "Files Compared, Key Extracted Evidence, Broker-by-Broker Summary, Consensus Themes, "
+        "Divergences / Differences, Items to Verify, and Source References. "
+        "This is a broker comparison only, not a full investment memo. "
         "Files Compared and Key Extracted Evidence must be tables. Use only supplied limited_text in Key "
         "Extracted Evidence and preserve its evidence_type and evidence_quality. If evidence_quality is not "
         "investment_useful, write `No investment-useful snippet found in limited extraction.` In Divergences / "
         "Differences, write exactly "
         "`Not enough extracted text to verify broker-level differences.` unless direct verified excerpts "
-        "clearly establish a difference. Items to Verify Manually are recommendations, not claims.\n\n"
+        "clearly establish a difference. Items to Verify are recommendations, not claims. Do not repeat full "
+        "snippets outside Key Extracted Evidence.\n\n"
         f"Evidence JSON:\n{evidence}"
     )
     try:
@@ -5761,28 +5763,39 @@ def _generate_ticker_memo_with_optional_llm(
     )
     api_key = os.getenv("OPENAI_API_KEY") or ""
     if not api_key or not daily_research_brief.verified_extracted_text_items(snippets):
-        return fallback, "deterministic"
+        return fallback, "deterministic_fallback"
 
-    evidence = daily_research_brief.build_ticker_memo_evidence_payload(ticker, files_df, snippets)
+    evidence = daily_research_brief.build_ticker_memo_evidence_payload(
+        ticker,
+        files_df,
+        snippets,
+        source_date=report_date,
+    )
     system_prompt = (
-        "Create a strictly source-grounded same-day ticker investment memo. Never hallucinate financial "
-        "conclusions. Metadata supports only file existence, source/broker, ticker, category, document type, "
-        "and relevance score. Do not state ratings, price targets, upgrades/downgrades, EPS, revenue, guidance, "
+        "Refine a compact, strictly source-grounded same-day ticker investment memo using only the supplied "
+        "structured context. Never hallucinate financial conclusions. Metadata supports only file existence, "
+        "source/broker, ticker, source date, category, document type, extraction status, and relevance score. "
+        "Do not state ratings, price targets, upgrades/downgrades, EPS, revenue, guidance, "
         "valuation, liquidity, margins, credit claims, bullish points, or bearish points unless supplied "
         "limited_text explicitly supports the exact statement. Financial and investment claims must be direct "
         "quotes with relative_path cited on the same bullet. Every other factual observation must cite one or "
-        "more relative_path values. Never infer direction, magnitude, causality, agreement, or investment stance. "
+        "more relative_path values. Never provide a buy/sell recommendation. Never infer direction, magnitude, "
+        "causality, agreement, or investment stance. Keep sections concise and do not repeat full snippets after "
+        "Key Extracted Evidence. Put direct extracted quotes only in Key Extracted Evidence; later sections should "
+        "briefly reference evidence types and filenames. "
         "If evidence is weak, say exactly: `Limited extracted text was available; review source PDFs before "
         "making investment conclusions.`"
     )
     user_prompt = (
         f"Create `Ticker Investment Memo - {ticker} - {report_date}` with exactly these sections: Files Reviewed, "
         "Executive Summary, Document Coverage Overview, Key Extracted Evidence, Broker / Source Views, "
-        "Credit / Balance Sheet Notes, Earnings / Operating Notes, Potential Bullish Points, "
-        "Potential Bearish Points / Risks, Open Questions for Geoff/Mitko, Recommended Next Steps, and "
+        "Credit / Balance Sheet Notes, Earnings / Operating Notes, Potential Bullish Evidence, "
+        "Potential Bearish / Risk Evidence, Open Questions for Geoff/Mitko, Recommended Next Steps, and "
         "Source References. Files Reviewed and Key Extracted Evidence must be tables. Use only supplied "
-        "limited_text for evidence. Do not turn keyword overlap into a conclusion. Leave bullish/bearish "
-        "conclusions unverified unless direct quoted evidence supports them.\n\n"
+        "limited_text for evidence. Keep Broker / Source Views concise, reference filenames, do not repeat "
+        "full snippets, and include: `For full broker-by-broker comparison, use the Broker Consensus Comparator "
+        "above.` Do not turn keyword overlap into a conclusion. Leave bullish/bearish evidence unclassified "
+        "unless direct quoted evidence supports it.\n\n"
         f"Evidence JSON:\n{evidence}"
     )
     try:
@@ -5798,7 +5811,7 @@ def _generate_ticker_memo_with_optional_llm(
         )
         text = response["choices"][0]["message"]["content"].strip()
         if text and daily_research_brief.validate_ticker_memo_grounding(text, snippets):
-            return text, "openai"
+            return text, "openai_refined"
     except Exception:
         pass
     return fallback, "deterministic_fallback"
@@ -6008,6 +6021,7 @@ def draw_daily_research_brief_section() -> None:
         st.dataframe(broker_coverage_df, use_container_width=True, hide_index=True)
 
         st.markdown("#### Broker Consensus Comparator")
+        st.caption("Compare broker/source reports side-by-side for a selected ticker.")
         comparable_tickers = [
             str(ticker)
             for ticker in broker_coverage_df["ticker"].astype(str)
@@ -6094,6 +6108,10 @@ def draw_daily_research_brief_section() -> None:
             st.info("No tickers currently have two or more recognized broker/source reports.")
 
         st.markdown("#### Ticker-Level Investment Memo")
+        st.caption(
+            "Generate a broader ticker memo using all same-day documents: earnings, filings, transcripts, "
+            "credit reports, broker reports, and extracted evidence."
+        )
         ticker_summary_df = daily_research_brief.build_ticker_summary(relevance_df)
         memo_tickers = ticker_summary_df["ticker"].astype(str).tolist() if not ticker_summary_df.empty else []
         if memo_tickers:
