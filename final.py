@@ -5703,15 +5703,31 @@ def draw_daily_research_brief_section() -> None:
         f"{limits['max_pdf_pages']} PDF pages per file, and {limits['max_chars']:,} characters per file."
     )
 
+    daily_inventory_state = st.session_state.get("daily_inventory_df")
+    daily_relevance_state = st.session_state.get("daily_relevance_df")
+    daily_selected_state = st.session_state.get("daily_selected_df")
+    daily_processing = bool(st.session_state.get("daily_processing", False))
+    daily_ready = (
+        isinstance(daily_inventory_state, pd.DataFrame)
+        and isinstance(daily_relevance_state, pd.DataFrame)
+        and isinstance(daily_selected_state, pd.DataFrame)
+        and "daily_selected_text" in st.session_state
+    )
+
     process_col, generate_col, reset_col = st.columns(3)
     with process_col:
-        process_clicked = st.button("Process Daily Zip", key="daily_process_btn", use_container_width=True)
+        process_clicked = st.button(
+            "Process Daily Zip",
+            key="daily_process_btn",
+            use_container_width=True,
+            disabled=daily_processing,
+        )
     with generate_col:
         generate_clicked = st.button(
             "Generate Daily Brief",
             key="daily_generate_btn",
             use_container_width=True,
-            disabled="daily_relevance_df" not in st.session_state,
+            disabled=(not daily_ready) or daily_processing,
         )
     with reset_col:
         reset_clicked = st.button("Reset Daily Research Brief", key="daily_reset_btn", use_container_width=True)
@@ -5724,14 +5740,23 @@ def draw_daily_research_brief_section() -> None:
                 "daily_source_name", "daily_inventory_df", "daily_relevance_df",
                 "daily_selected_df", "daily_selected_text", "daily_processing_limits",
                 "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
+                "daily_processing",
             ]
         )
         st.rerun()
+
+    if daily_ready and not daily_processing:
+        st.success(
+            f"Processed {len(daily_inventory_state)} file(s); lightly scanned "
+            f"{len(st.session_state.get('daily_selected_text') or [])} selected file(s). "
+            "Ready to generate daily brief."
+        )
 
     if process_clicked:
         if uploaded is None:
             st.warning("Upload a ZIP file before processing.")
         else:
+            st.session_state["daily_processing"] = True
             old_dir = st.session_state.get("daily_session_dir")
             daily_research_brief.remove_session_dir(old_dir)
             _clear_session_keys(
@@ -5769,15 +5794,16 @@ def draw_daily_research_brief_section() -> None:
                 st.session_state["daily_selected_text"] = selected_text
                 st.session_state["daily_processing_limits"] = limits
                 st.session_state["daily_extract_warnings"] = warnings
+                st.session_state["daily_processing"] = False
                 st.session_state.pop("daily_brief_text", None)
                 st.session_state.pop("daily_brief_method", None)
-                st.success(
-                    f"Processed {len(inventory_df)} file(s); lightly scanned {len(selected_text)} selected file(s)."
-                )
+                st.rerun()
             except zipfile.BadZipFile:
+                st.session_state["daily_processing"] = False
                 daily_research_brief.remove_session_dir(session_dir)
                 st.error("The uploaded file is not a valid ZIP archive.")
             except Exception as exc:
+                st.session_state["daily_processing"] = False
                 daily_research_brief.remove_session_dir(session_dir)
                 st.error(f"Daily ZIP processing failed: {exc}")
 

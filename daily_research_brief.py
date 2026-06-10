@@ -77,6 +77,7 @@ FINANCE_KEYWORDS = {
     "earnings", "revenue", "margin", "guidance", "estimate", "credit", "rating",
     "dividend", "liquidity", "leverage", "capital", "cash flow", "valuation",
     "outlook", "quarter", "results", "transcript", "10-q", "8-k", "research",
+    "recommendation", "sector", "upgrade", "downgrade",
 }
 
 TICKER_STOPWORDS = {
@@ -96,12 +97,13 @@ DOCUMENT_TYPE_SCORES = {
     "current report": 18,
     "credit report": 22,
     "analyst report": 21,
-    "sector report": 18,
+    "sector report": 22,
+    "Green Street report": 24,
     "industry report": 18,
     "prepared remarks": 22,
     "guidance": 24,
     "estimate revision": 23,
-    "recommendation change": 21,
+    "recommendation change": 26,
     "rating change": 21,
     "press release": 14,
     "data supplement": 15,
@@ -234,22 +236,40 @@ def detect_category(relative_path: str) -> str:
 
 
 def detect_source(text: str) -> str:
-    normalized = re.sub(r"[_\-.]+", " ", text)
+    normalized = _normalize_metadata_text(text)
     for label, pattern in BROKER_PATTERNS:
         if re.search(pattern, normalized, flags=re.IGNORECASE):
             return label
     return ""
 
 
-def detect_document_type(text: str) -> str:
-    normalized = re.sub(r"[_\-.]+", " ", text)
+def _normalize_metadata_text(text: str) -> str:
+    normalized = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text)
+    normalized = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", normalized)
+    normalized = re.sub(r"[_\-.]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def detect_document_type(text: str, *, category: str = "Root", source: str = "") -> str:
+    normalized = _normalize_metadata_text(text)
     for label, patterns in DOCUMENT_TYPES:
         if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns):
             return label
+    if category == "Credit" and source:
+        return "credit report"
+    if category == "Green Street":
+        return "Green Street report" if source == "Green Street" else "sector report"
+    if source and category in {"Research", "Banks", "Companies", "Root"}:
+        return "analyst report"
     return "other"
 
 
-def detect_ticker(file_name: str, known_tickers: Optional[set[str]] = None) -> str:
+def detect_ticker(
+    file_name: str,
+    known_tickers: Optional[set[str]] = None,
+    *,
+    source: str = "",
+) -> str:
     stem = Path(file_name).stem
     tokens = re.findall(r"(?<![A-Za-z0-9])[A-Z]{1,5}(?![A-Za-z0-9])", stem)
     candidates = [t for t in tokens if t not in TICKER_STOPWORDS and not re.fullmatch(r"Q[1-4]", t)]
@@ -257,8 +277,15 @@ def detect_ticker(file_name: str, known_tickers: Optional[set[str]] = None) -> s
         known = [t for t in candidates if t in known_tickers]
         if known:
             return known[0]
-        return ""
     if not candidates:
+        return ""
+    if source:
+        # A recognized broker following a leading all-caps token is a strong,
+        # conservative filename convention even when the ticker universe is stale.
+        first_token = re.match(r"^\s*([A-Z]{1,5})(?=\s|[_\-.])", stem)
+        if first_token and first_token.group(1) in candidates:
+            return first_token.group(1)
+    if known_tickers:
         return ""
     first = candidates[0]
     return first if stem.upper().count(first) >= 2 else ""
@@ -281,8 +308,8 @@ def build_inventory(records: List[Dict[str, Any]], known_tickers: Optional[set[s
         name = str(record.get("file_name") or Path(rel).name)
         category = detect_category(rel)
         source = detect_source(f"{rel} {name}")
-        doc_type = detect_document_type(name)
-        ticker = detect_ticker(name, known_tickers=known_tickers)
+        doc_type = detect_document_type(name, category=category, source=source)
+        ticker = detect_ticker(name, known_tickers=known_tickers, source=source)
         rows.append(
             {
                 "category": category,
@@ -320,7 +347,7 @@ def score_inventory(inventory: pd.DataFrame) -> pd.DataFrame:
         score = 0
 
         category_points = {
-            "Companies": 18, "Banks": 16, "Credit": 16, "Green Street": 14,
+            "Companies": 18, "Banks": 16, "Credit": 16, "Green Street": 18,
             "Research": 12, "Root": 5,
         }.get(category, 5)
         score += category_points
