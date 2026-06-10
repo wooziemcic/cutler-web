@@ -1148,6 +1148,308 @@ def validate_broker_comparison_grounding(text: str, snippets: List[Dict[str, Any
     return True
 
 
+def select_ticker_memo_files(
+    relevance: pd.DataFrame,
+    ticker: str,
+    *,
+    max_files: int,
+) -> pd.DataFrame:
+    """Select a capped, diversified set of same-day documents for one ticker."""
+    if relevance.empty or not ticker:
+        return relevance.iloc[0:0].copy()
+    expanded = _expand_rows_by_detected_ticker(relevance)
+    rows = expanded[
+        (expanded["ticker"].astype(str).str.upper() == ticker.upper())
+    ].drop_duplicates(subset=["relative_path"]).copy()
+    if rows.empty:
+        return rows
+
+    rows["_memo_type_rank"] = rows["document_type"].astype(str).map(
+        {
+            "credit report": 0, "earnings release": 0, "earnings presentation": 0,
+            "transcript": 0, "10-Q/10Q": 0, "8-K/8K": 0, "analyst report": 1,
+            "earnings supplement": 1, "prepared remarks": 1, "guidance": 1,
+            "estimate revision": 1, "rating change": 1, "recommendation change": 1,
+        }
+    ).fillna(2)
+    rows = rows.sort_values(
+        ["_memo_type_rank", "relevance_score", "source_or_broker", "file_name"],
+        ascending=[True, False, True, True],
+    )
+    selected_indices = []
+    for _, group in rows.groupby("document_type", sort=False):
+        selected_indices.append(group.index[0])
+        if len(selected_indices) >= int(max_files):
+            break
+    for index in rows.index:
+        if len(selected_indices) >= int(max_files):
+            break
+        if index not in selected_indices:
+            selected_indices.append(index)
+    return rows.loc[selected_indices].drop(columns=["_memo_type_rank"]).reset_index(drop=True)
+
+
+def build_ticker_memo_evidence_rows(
+    files: pd.DataFrame,
+    snippets: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    snippets_by_path = {str(item.get("relative_path") or ""): item for item in snippets}
+    rows = []
+    for _, row in files.iterrows():
+        path = str(row.get("relative_path") or "")
+        item = snippets_by_path.get(path, {})
+        evidence = best_investment_useful_snippet(item)
+        rows.append(
+            {
+                "source_or_broker": row.get("source_or_broker") or "Company / filing source",
+                "file_name": row.get("file_name") or path,
+                "document_type": row.get("document_type") or "other",
+                "category": row.get("category") or "Unknown",
+                "evidence_type": evidence["evidence_type"],
+                "extracted_evidence": evidence["snippet"],
+                "evidence_quality": evidence["quality"],
+                "extraction_status": evidence["extraction_status"],
+                "relative_path": path,
+            }
+        )
+    return rows
+
+
+def build_deterministic_ticker_memo(
+    ticker: str,
+    files: pd.DataFrame,
+    snippets: List[Dict[str, Any]],
+    *,
+    report_date: str,
+    mode: str,
+) -> str:
+    """Build a source-grounded ticker memo without inferring financial conclusions."""
+    evidence_rows = build_ticker_memo_evidence_rows(files, snippets)
+    paths = files["relative_path"].astype(str).tolist() if not files.empty else []
+    cited_paths = ", ".join(f"`{path}`" for path in paths)
+    useful = [row for row in evidence_rows if row["extracted_evidence"]]
+    lines = [
+        f"# Ticker Investment Memo - {ticker} - {report_date}",
+        "",
+        f"Memo mode: {mode}",
+        "",
+        "## Files Reviewed",
+        "",
+        "| Source/broker | File name | Document type | Category | Extraction status | Relevance score |",
+        "|---|---|---|---|---|---:|",
+    ]
+    snippets_by_path = {str(item.get("relative_path") or ""): item for item in snippets}
+    for _, row in files.iterrows():
+        path = str(row.get("relative_path") or "")
+        status = str(snippets_by_path.get(path, {}).get("text_extraction_status") or "metadata-only")
+        lines.append(
+            f"| {_markdown_table_text(row.get('source_or_broker') or 'Company / filing source')} | "
+            f"`{_markdown_table_text(row.get('file_name') or path)}` | "
+            f"{_markdown_table_text(row.get('document_type') or 'other')} | "
+            f"{_markdown_table_text(row.get('category') or 'Unknown')} | {status} | "
+            f"{int(row.get('relevance_score') or 0)} |"
+        )
+
+    lines.extend(["", "## Executive Summary"])
+    if files.empty:
+        lines.append("No qualifying same-day files were identified for this ticker.")
+    else:
+        lines.append(
+            f"{len(files)} same-day file(s) were reviewed for **{ticker}** across "
+            f"{files['document_type'].nunique()} detected document type(s). "
+            f"Limited extracted text was available; review source PDFs before making investment conclusions. "
+            f"Sources: {cited_paths}"
+        )
+
+    lines.extend(["", "## Document Coverage Overview"])
+    if files.empty:
+        lines.append("No document coverage available.")
+    else:
+        for document_type, group in files.groupby("document_type", sort=True):
+            group_paths = ", ".join(f"`{path}`" for path in group["relative_path"].astype(str))
+            lines.append(f"- **{document_type}**: {len(group)} file(s). Sources: {group_paths}")
+
+    lines.extend(
+        [
+            "",
+            "## Key Extracted Evidence",
+            "",
+            "| Source/broker | File name | Evidence type | Extracted evidence | Extraction status |",
+            "|---|---|---|---|---|",
+        ]
+    )
+    for row in evidence_rows:
+        snippet = row["extracted_evidence"] or "No investment-useful snippet found in limited extraction."
+        lines.append(
+            f"| {_markdown_table_text(row['source_or_broker'])} | `{_markdown_table_text(row['file_name'])}` | "
+            f"{row['evidence_type']} | \"{_markdown_table_text(snippet)}\" | "
+            f"{_markdown_table_text(row['extraction_status'])} |"
+        )
+
+    def add_evidence_section(title: str, selected_rows: List[Dict[str, Any]], empty_text: str) -> None:
+        lines.extend(["", f"## {title}"])
+        if not selected_rows:
+            lines.append(empty_text)
+            return
+        for row in selected_rows:
+            lines.append(
+                f"- Direct limited-text excerpt from `{row['relative_path']}`: "
+                f"\"{row['extracted_evidence']}\""
+            )
+
+    broker_rows = [row for row in useful if row["source_or_broker"] != "Company / filing source"]
+    credit_rows = [
+        row for row in useful
+        if row["document_type"] == "credit report" or row["evidence_type"] == "Credit / Liquidity"
+    ]
+    earnings_rows = [
+        row for row in useful
+        if row["document_type"] in {
+            "earnings release", "earnings presentation", "earnings supplement", "transcript",
+            "prepared remarks", "10-Q/10Q", "8-K/8K", "MD&A",
+        } or row["evidence_type"] in {"Earnings / Results", "Guidance / Estimates"}
+    ]
+    add_evidence_section(
+        "Broker / Source Views",
+        broker_rows,
+        "No investment-useful broker/source excerpt was found in the limited extraction.",
+    )
+    add_evidence_section(
+        "Credit / Balance Sheet Notes",
+        credit_rows,
+        "No verified credit, liquidity, leverage, or debt note was found in the limited extraction.",
+    )
+    add_evidence_section(
+        "Earnings / Operating Notes",
+        earnings_rows,
+        "No verified earnings or operating note was found in the limited extraction.",
+    )
+
+    lines.extend(
+        [
+            "",
+            "## Potential Bullish Points",
+            "No bullish investment conclusion was generated automatically. Review the direct extracted evidence "
+            f"and source PDFs before assessing upside. Sources reviewed: {cited_paths}",
+            "",
+            "## Potential Bearish Points / Risks",
+            "No bearish investment conclusion was generated automatically. Review the direct extracted evidence "
+            f"and source PDFs before assessing downside or risk. Sources reviewed: {cited_paths}",
+            "",
+            "## Open Questions for Geoff/Mitko",
+            "- Do the source PDFs contain explicit rating or price-target changes?",
+            "- Do company materials verify any EPS, revenue, margin, guidance, or estimate change?",
+            "- Do credit documents identify liquidity, leverage, debt, or covenant concerns?",
+            "- Which extracted evidence warrants full-document review?",
+            "",
+            "## Recommended Next Steps",
+            "- Open the highest-relevance source documents and verify all financial figures and conclusions.",
+            "- Compare company-provided materials with broker and credit-source commentary.",
+            "- Record any verified rating, estimate, guidance, valuation, or credit changes manually.",
+            "",
+            "## Source References",
+        ]
+    )
+    for row in evidence_rows:
+        lines.append(
+            f"- `{row['relative_path']}` ({row['document_type']}; {row['source_or_broker']}; "
+            f"{row['extraction_status']})"
+        )
+    return "\n".join(lines)
+
+
+def build_ticker_memo_evidence_payload(
+    ticker: str,
+    files: pd.DataFrame,
+    snippets: List[Dict[str, Any]],
+    *,
+    max_total_chars: int = 40000,
+) -> str:
+    records = []
+    used = 0
+    for row in build_ticker_memo_evidence_rows(files, snippets):
+        record = dict(row)
+        record["verified_text_available"] = bool(row["extracted_evidence"])
+        record["limited_text"] = record.pop("extracted_evidence") or INSUFFICIENT_TEXT_NOTICE
+        encoded = json.dumps(record, ensure_ascii=False)
+        if used + len(encoded) > max_total_chars:
+            break
+        records.append(record)
+        used += len(encoded)
+    return json.dumps(
+        {
+            "ticker": ticker,
+            "grounding_rule": (
+                "Metadata supports file/source/category/document-type observations only. Every financial or "
+                "investment claim must be a direct quote from limited_text and cite relative_path."
+            ),
+            "files": records,
+        },
+        ensure_ascii=False,
+    )
+
+
+def validate_ticker_memo_grounding(text: str, snippets: List[Dict[str, Any]]) -> bool:
+    required = [
+        "## Files Reviewed", "## Executive Summary", "## Document Coverage Overview",
+        "## Key Extracted Evidence", "## Broker / Source Views", "## Credit / Balance Sheet Notes",
+        "## Earnings / Operating Notes", "## Potential Bullish Points",
+        "## Potential Bearish Points / Risks", "## Open Questions for Geoff/Mitko",
+        "## Recommended Next Steps", "## Source References",
+    ]
+    if not all(section in text for section in required):
+        return False
+    key_section = text.split("## Key Extracted Evidence", 1)[1].split("## Broker / Source Views", 1)[0]
+    for line in key_section.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or "source/broker" in stripped.lower() or bool(re.fullmatch(r"[\s|:-]+", stripped)):
+            continue
+        cited = [
+            item for item in snippets
+            if str(item.get("relative_path") or "") in line or str(item.get("file_name") or "") in line
+        ]
+        if not cited:
+            return False
+        for quote in [part.strip() for part in re.findall(r'"([^"]+)"', line) if part.strip()]:
+            if quote == "No investment-useful snippet found in limited extraction.":
+                continue
+            if not any(quote.lower() in _normalized_extracted_text(item).lower() for item in cited):
+                return False
+    source_names = {
+        value
+        for item in snippets
+        for value in [str(item.get("relative_path") or ""), str(item.get("file_name") or "")]
+        if value
+    }
+    claim_text = text.split("## Open Questions for Geoff/Mitko", 1)[0]
+    if not validate_llm_brief_grounding(claim_text, snippets):
+        return False
+    for line in claim_text.splitlines():
+        stripped = line.strip()
+        if (
+            not stripped
+            or stripped.startswith("#")
+            or bool(re.fullmatch(r"[\s|:-]+", stripped))
+            or (stripped.startswith("|") and "file" in stripped.lower())
+            or stripped.startswith("Memo mode:")
+            or stripped == "Limited extracted text was available; review source PDFs before making investment conclusions."
+        ):
+            continue
+        if not any(source in stripped for source in source_names):
+            return False
+        quotes = [part.strip() for part in re.findall(r'"([^"]+)"', stripped) if part.strip()]
+        for quote in quotes:
+            if quote == "No investment-useful snippet found in limited extraction.":
+                continue
+            cited = [
+                item for item in snippets
+                if str(item.get("relative_path") or "") in stripped or str(item.get("file_name") or "") in stripped
+            ]
+            if not any(quote.lower() in _normalized_extracted_text(item).lower() for item in cited):
+                return False
+    return True
+
+
 def _attention_reason(group: pd.DataFrame, *, ticker: str) -> str:
     reasons = []
     sources = {str(x) for x in group["source_or_broker"] if str(x)}

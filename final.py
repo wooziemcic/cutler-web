@@ -5744,6 +5744,66 @@ def _generate_broker_comparison_with_optional_llm(
     return fallback, "deterministic_fallback"
 
 
+def _generate_ticker_memo_with_optional_llm(
+    ticker: str,
+    files_df,
+    snippets: List[Dict[str, Any]],
+    *,
+    report_date: str,
+    mode: str,
+) -> Tuple[str, str]:
+    fallback = daily_research_brief.build_deterministic_ticker_memo(
+        ticker,
+        files_df,
+        snippets,
+        report_date=report_date,
+        mode=mode,
+    )
+    api_key = os.getenv("OPENAI_API_KEY") or ""
+    if not api_key or not daily_research_brief.verified_extracted_text_items(snippets):
+        return fallback, "deterministic"
+
+    evidence = daily_research_brief.build_ticker_memo_evidence_payload(ticker, files_df, snippets)
+    system_prompt = (
+        "Create a strictly source-grounded same-day ticker investment memo. Never hallucinate financial "
+        "conclusions. Metadata supports only file existence, source/broker, ticker, category, document type, "
+        "and relevance score. Do not state ratings, price targets, upgrades/downgrades, EPS, revenue, guidance, "
+        "valuation, liquidity, margins, credit claims, bullish points, or bearish points unless supplied "
+        "limited_text explicitly supports the exact statement. Financial and investment claims must be direct "
+        "quotes with relative_path cited on the same bullet. Every other factual observation must cite one or "
+        "more relative_path values. Never infer direction, magnitude, causality, agreement, or investment stance. "
+        "If evidence is weak, say exactly: `Limited extracted text was available; review source PDFs before "
+        "making investment conclusions.`"
+    )
+    user_prompt = (
+        f"Create `Ticker Investment Memo - {ticker} - {report_date}` with exactly these sections: Files Reviewed, "
+        "Executive Summary, Document Coverage Overview, Key Extracted Evidence, Broker / Source Views, "
+        "Credit / Balance Sheet Notes, Earnings / Operating Notes, Potential Bullish Points, "
+        "Potential Bearish Points / Risks, Open Questions for Geoff/Mitko, Recommended Next Steps, and "
+        "Source References. Files Reviewed and Key Extracted Evidence must be tables. Use only supplied "
+        "limited_text for evidence. Do not turn keyword overlap into a conclusion. Leave bullish/bearish "
+        "conclusions unverified unless direct quoted evidence supports them.\n\n"
+        f"Evidence JSON:\n{evidence}"
+    )
+    try:
+        openai.api_key = api_key
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=3000,
+        )
+        text = response["choices"][0]["message"]["content"].strip()
+        if text and daily_research_brief.validate_ticker_memo_grounding(text, snippets):
+            return text, "openai"
+    except Exception:
+        pass
+    return fallback, "deterministic_fallback"
+
+
 def draw_daily_research_brief_section() -> None:
     import pandas as pd
     import zipfile
@@ -5818,7 +5878,7 @@ def draw_daily_research_brief_section() -> None:
                 "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
                 "daily_processing",
             ],
-            prefixes=["daily_broker_comparison_"],
+            prefixes=["daily_broker_comparison_", "daily_ticker_memo_"],
         )
         st.rerun()
 
@@ -5843,7 +5903,7 @@ def draw_daily_research_brief_section() -> None:
                     "daily_processing_limits", "daily_extract_warnings", "daily_brief_text",
                     "daily_brief_method",
                 ],
-                prefixes=["daily_broker_comparison_"],
+                prefixes=["daily_broker_comparison_", "daily_ticker_memo_"],
             )
             session_dir = daily_research_brief.create_session_dir()
             zip_path = session_dir / "daily_research.zip"
@@ -6032,6 +6092,88 @@ def draw_daily_research_brief_section() -> None:
                 st.info("Generate a comparison for the currently selected ticker to refresh the report.")
         else:
             st.info("No tickers currently have two or more recognized broker/source reports.")
+
+        st.markdown("#### Ticker-Level Investment Memo")
+        ticker_summary_df = daily_research_brief.build_ticker_summary(relevance_df)
+        memo_tickers = ticker_summary_df["ticker"].astype(str).tolist() if not ticker_summary_df.empty else []
+        if memo_tickers:
+            memo_ticker = st.selectbox(
+                "Select ticker/entity",
+                options=memo_tickers,
+                key="daily_ticker_memo_ticker",
+            )
+            memo_mode = st.radio(
+                "Ticker memo mode",
+                options=["Fast memo", "Deeper memo"],
+                horizontal=True,
+                key="daily_ticker_memo_mode",
+            )
+            if memo_mode == "Deeper memo":
+                memo_limits = {"max_files": 18, "max_pdf_pages": 5, "max_chars": 10000}
+            else:
+                memo_limits = {"max_files": 10, "max_pdf_pages": 2, "max_chars": 4000}
+            st.caption(
+                f"Review up to {memo_limits['max_files']} same-day ticker files, "
+                f"{memo_limits['max_pdf_pages']} pages and {memo_limits['max_chars']:,} characters per file."
+            )
+            memo_clicked = st.button(
+                "Generate Ticker Memo",
+                key="daily_ticker_memo_generate_btn",
+                disabled=daily_processing,
+                use_container_width=True,
+            )
+            if memo_clicked:
+                with st.spinner(f"Generating source-grounded ticker memo for {memo_ticker}..."):
+                    memo_files = daily_research_brief.select_ticker_memo_files(
+                        relevance_df,
+                        memo_ticker,
+                        max_files=memo_limits["max_files"],
+                    )
+                    memo_snippets = daily_research_brief.prepare_broker_comparison_text(
+                        memo_files,
+                        selected_text,
+                        max_pdf_pages=memo_limits["max_pdf_pages"],
+                        max_chars_per_file=memo_limits["max_chars"],
+                        reuse_existing=(memo_mode == "Fast memo"),
+                    )
+                    memo_markdown, memo_method = _generate_ticker_memo_with_optional_llm(
+                        memo_ticker,
+                        memo_files,
+                        memo_snippets,
+                        report_date=daily_research_brief.daily_source_title_suffix(
+                            st.session_state.get("daily_source_name") or "daily_research.zip",
+                            relevance_df.get("relative_path", []),
+                        ),
+                        mode=memo_mode,
+                    )
+                st.session_state["daily_ticker_memo_files"] = memo_files
+                st.session_state["daily_ticker_memo_snippets"] = memo_snippets
+                st.session_state["daily_ticker_memo_markdown"] = memo_markdown
+                st.session_state["daily_ticker_memo_method"] = memo_method
+                st.session_state["daily_ticker_memo_generated_ticker"] = memo_ticker
+                st.session_state["daily_ticker_memo_generated_mode"] = memo_mode
+                st.success("Ticker memo generated.")
+
+            memo_markdown = st.session_state.get("daily_ticker_memo_markdown") or ""
+            generated_memo_ticker = st.session_state.get("daily_ticker_memo_generated_ticker") or ""
+            if memo_markdown and generated_memo_ticker == memo_ticker:
+                st.caption(
+                    "Generation method: "
+                    f"{st.session_state.get('daily_ticker_memo_method') or 'deterministic'}"
+                )
+                st.markdown(memo_markdown)
+                st.download_button(
+                    "Download ticker memo Markdown",
+                    data=memo_markdown.encode("utf-8"),
+                    file_name=f"ticker_investment_memo_{memo_ticker}.md",
+                    mime="text/markdown",
+                    key="daily_ticker_memo_download",
+                    use_container_width=True,
+                )
+            elif memo_markdown:
+                st.info("Generate a memo for the currently selected ticker to refresh the report.")
+        else:
+            st.info("No ticker/entity was identified conservatively from the uploaded research set.")
 
     st.markdown("#### 6. Generate Daily Brief")
     brief_text = st.session_state.get("daily_brief_text") or ""
