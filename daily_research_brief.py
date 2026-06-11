@@ -2414,17 +2414,34 @@ def validate_openai_rewrite_preservation(
     for heading in required_headings:
         if heading not in refined_text:
             return False, f"Required heading was removed: {heading}"
+    original_headings = Counter(
+        line.strip() for line in original_text.splitlines() if line.strip().startswith("#")
+    )
+    refined_headings = Counter(
+        line.strip() for line in refined_text.splitlines() if line.strip().startswith("#")
+    )
+    if original_headings != refined_headings:
+        return False, "One or more deterministic headings were added, removed, or changed."
+
+    original_table_rows = Counter(
+        line.rstrip() for line in original_text.splitlines() if line.lstrip().startswith("|")
+    )
+    refined_table_rows = Counter(
+        line.rstrip() for line in refined_text.splitlines() if line.lstrip().startswith("|")
+    )
+    if original_table_rows != refined_table_rows:
+        return False, "One or more deterministic Markdown table rows were changed."
 
     citation_pattern = r"\[Source:\s*[^\]\n]+\]"
     original_citations = Counter(re.findall(citation_pattern, original_text, flags=re.IGNORECASE))
     refined_citations = Counter(re.findall(citation_pattern, refined_text, flags=re.IGNORECASE))
-    if any(refined_citations[citation] < count for citation, count in original_citations.items()):
-        return False, "One or more exact source citations were removed or changed."
+    if original_citations != refined_citations:
+        return False, "One or more exact source citations were added, removed, or changed."
 
     sources = {str(source or "").strip() for source in allowed_sources if str(source or "").strip()}
     protected_sources = {source for source in sources if source in original_text}
-    if any(refined_text.count(source) < original_text.count(source) for source in protected_sources):
-        return False, "One or more source filenames were removed."
+    if any(refined_text.count(source) != original_text.count(source) for source in protected_sources):
+        return False, "One or more source filename occurrences were added, removed, or changed."
 
     unknown_sources = {
         value.strip()
@@ -2433,6 +2450,12 @@ def validate_openai_rewrite_preservation(
     }
     if unknown_sources:
         return False, "The rewrite introduced a source filename outside the deterministic report."
+    for line in refined_text.splitlines():
+        scrubbed = line
+        for source in sorted(sources, key=len, reverse=True):
+            scrubbed = scrubbed.replace(source, "")
+        if re.search(r"\.(?:pdf|xlsx?|csv|txt|md)\b", scrubbed, flags=re.IGNORECASE):
+            return False, "The rewrite introduced or changed a filename."
 
     protected_quotes = Counter(
         quote.strip()
@@ -2444,8 +2467,42 @@ def validate_openai_rewrite_preservation(
         for quote in re.findall(r'"([^"]+)"', refined_text)
         if len(quote.strip()) >= 20
     )
-    if any(refined_quotes[quote] < count for quote, count in protected_quotes.items()):
-        return False, "Quoted extracted evidence was removed or paraphrased."
+    if protected_quotes != refined_quotes:
+        return False, "Quoted extracted evidence was added, removed, or paraphrased."
+
+    financial_keyword_patterns = {
+        "rating": r"\bratings?\b",
+        "price target": r"\bprice[-\s]+targets?\b",
+        "EPS": r"\beps\b",
+        "revenue": r"\brevenue\b",
+        "guidance": r"\bguidance\b",
+        "estimate": r"\bestimates?\b",
+        "capex": r"\bcapex\b|\bcapital[-\s]+expenditures?\b",
+        "free cash flow": r"\bfree[-\s]+cash[-\s]+flow\b|\bfcf\b",
+        "margin": r"\bmargins?\b",
+        "liquidity": r"\bliquidity\b",
+        "leverage": r"\bleverage\b",
+        "debt": r"\bdebt\b",
+        "valuation": r"\bvaluation\b",
+        "credit": r"\bcredit\b",
+        "upgrade": r"\bupgrades?\b",
+        "downgrade": r"\bdowngrades?\b",
+        "beat": r"\bbeats?\b",
+        "miss": r"\bmiss(?:es|ed|ing)?\b",
+        "bullish": r"\bbullish\b",
+        "bearish": r"\bbearish\b",
+    }
+    original_keywords = {
+        name for name, pattern in financial_keyword_patterns.items()
+        if re.search(pattern, original_text, flags=re.IGNORECASE)
+    }
+    refined_keywords = {
+        name for name, pattern in financial_keyword_patterns.items()
+        if re.search(pattern, refined_text, flags=re.IGNORECASE)
+    }
+    new_keywords = sorted(refined_keywords - original_keywords)
+    if new_keywords:
+        return False, "The rewrite introduced new financial claim keyword(s): " + ", ".join(new_keywords)
     return True, ""
 
 

@@ -5698,13 +5698,15 @@ def _generate_broker_comparison_with_optional_llm(
     )
     api_key = os.getenv("OPENAI_API_KEY") or ""
     if not api_key:
-        return fallback, "deterministic_fallback", "missing_api_key"
+        return fallback, "grounded_deterministic", "missing_api_key"
     if not daily_research_brief.verified_extracted_text_items(snippets):
-        return fallback, "deterministic_fallback", "insufficient_extracted_text"
+        return fallback, "grounded_deterministic", "insufficient_extracted_text"
 
     system_prompt = (
-        "Rewrite only for clarity. Do not add any new facts. Do not paraphrase financial claims. Preserve every "
-        "filename citation, Markdown table row, quoted excerpt, required heading, and source reference exactly. "
+        "Rewrite only for clarity and readability. Do not add facts. Do not remove headings. Do not remove or "
+        "change filenames. Do not rewrite financial claims. Preserve every citation exactly. If you cannot "
+        "improve safely, return the original text unchanged. Preserve every Markdown table row, quoted excerpt, "
+        "required heading, filename, citation, and source reference exactly. Do not regenerate or reformat tables. "
         "You may only make surrounding wording concise, reduce jargon, and improve readability. The deterministic "
         "evidence tables and broker comparison are the source of truth. Do not create new consensus themes, broker "
         "views, differences, or conclusions. If unsure, return the original text unchanged."
@@ -5725,7 +5727,7 @@ def _generate_broker_comparison_with_optional_llm(
         max_tokens=2200,
     )
     if error:
-        return fallback, "deterministic_fallback", error
+        return fallback, "grounded_deterministic", error
     sources = [
         value
         for item in snippets
@@ -5748,8 +5750,8 @@ def _generate_broker_comparison_with_optional_llm(
         snippets,
     )
     if preserved and claims_safe:
-        return text, "openai_refined", ""
-    return fallback, "deterministic_fallback", (
+        return text, "openai_polished", ""
+    return fallback, "grounded_deterministic", (
         f"grounding_failed: {preservation_reason or claims_reason or 'rewrite failed grounding'}"
     )
 
@@ -5771,13 +5773,15 @@ def _generate_ticker_memo_with_optional_llm(
     )
     api_key = os.getenv("OPENAI_API_KEY") or ""
     if not api_key:
-        return fallback, "deterministic_fallback", "missing_api_key"
+        return fallback, "grounded_deterministic", "missing_api_key"
     if not daily_research_brief.verified_extracted_text_items(snippets):
-        return fallback, "deterministic_fallback", "insufficient_extracted_text"
+        return fallback, "grounded_deterministic", "insufficient_extracted_text"
 
     system_prompt = (
-        "Rewrite only for clarity. Do not add any new facts. Do not paraphrase financial claims. Preserve every "
-        "filename citation, Markdown table row, quoted excerpt, required heading, and source reference exactly. "
+        "Rewrite only for clarity and readability. Do not add facts. Do not remove headings. Do not remove or "
+        "change filenames. Do not rewrite financial claims. Preserve every citation exactly. If you cannot "
+        "improve safely, return the original text unchanged. Preserve every Markdown table row, quoted excerpt, "
+        "required heading, filename, citation, and source reference exactly. Do not regenerate or reformat tables. "
         "You may only make surrounding wording concise, less repetitive, and easier to read. The deterministic "
         "evidence table is the source of truth. Do not create bullish or bearish conclusions. If unsure, return "
         "the original text unchanged."
@@ -5798,7 +5802,7 @@ def _generate_ticker_memo_with_optional_llm(
         max_tokens=3000,
     )
     if error:
-        return fallback, "deterministic_fallback", error
+        return fallback, "grounded_deterministic", error
     sources = [
         value
         for item in snippets
@@ -5823,8 +5827,8 @@ def _generate_ticker_memo_with_optional_llm(
         snippets,
     )
     if preserved and claims_safe:
-        return text, "openai_refined", ""
-    return fallback, "deterministic_fallback", (
+        return text, "openai_polished", ""
+    return fallback, "grounded_deterministic", (
         f"grounding_failed: {preservation_reason or claims_reason or 'rewrite failed grounding'}"
     )
 
@@ -5899,13 +5903,18 @@ def _generate_historical_research_answer_with_optional_llm(
     )
     api_key = os.getenv("OPENAI_API_KEY") or ""
     if not api_key:
-        return fallback, "deterministic_fallback", "missing_api_key", {}
+        return fallback, "grounded_deterministic", "missing_api_key", {
+            "reason": "OpenAI polish skipped",
+            "detail": "OPENAI_API_KEY is missing.",
+        }
     if results_df.empty:
-        return fallback, "deterministic_fallback", "no_search_results", {}
+        return fallback, "grounded_deterministic", "no_search_results", {}
 
     system_prompt = (
-        "Rewrite only for clarity. Do not add any new facts. Do not paraphrase financial claims. Preserve every "
-        "filename citation, quoted excerpt, required heading, and source reference exactly. Keep Answer Summary "
+        "Rewrite only for clarity and readability. Do not add facts. Do not remove headings. Do not remove or "
+        "change filenames. Do not rewrite financial claims. Preserve every citation exactly. If you cannot "
+        "improve safely, return the original text unchanged. Preserve every quoted excerpt, required heading, "
+        "filename citation, and source reference exactly. Keep Answer Summary "
         "to 2-3 bullets and Top Matching Evidence to no more than 5 bullets. Do not create broad summary claims. "
         "You may only make wording concise, reduce jargon, and improve readability. If unsure, return the original "
         "text unchanged."
@@ -5926,7 +5935,10 @@ def _generate_historical_research_answer_with_optional_llm(
         max_tokens=1400 if mode == "Deeper answer" else 900,
     )
     if error:
-        return fallback, "deterministic_fallback", error, {}
+        return fallback, "grounded_deterministic", error, {
+            "reason": "OpenAI polish failed",
+            "detail": error,
+        }
     top_results = results_df.head(max_results)
     preserved, preservation_reason = daily_research_brief.validate_openai_rewrite_preservation(
         fallback,
@@ -5940,8 +5952,8 @@ def _generate_historical_research_answer_with_optional_llm(
     valid, reason, detail = daily_research_brief.validate_research_answer_grounding_detailed(text, top_results)
     if preserved and valid:
         return (
-            daily_research_brief.add_generation_method(text, "openai_refined"),
-            "openai_refined",
+            daily_research_brief.add_generation_method(text, "openai_polished"),
+            "openai_polished",
             "",
             {},
         )
@@ -5950,19 +5962,18 @@ def _generate_historical_research_answer_with_optional_llm(
         "detail": preservation_reason or detail or "Grounding validation failed without additional detail.",
         "response_preview": str(text or "")[:1000],
         "expected_format": (
-            "Every substantive/evidence bullet must cite an exact top-result filename using "
-            "`Source: <exact file_name>` or `[Source: <exact file_name>]`. Sensitive financial "
-            "claims must use direct snippet wording in the evidence-organizer format."
+            "OpenAI polish must preserve every deterministic heading, filename, citation, quoted excerpt, "
+            "source reference, and financial keyword exactly."
         ),
     }
-    return fallback, "deterministic_fallback", f"grounding_failed: {debug['reason']}", debug
+    return fallback, "grounded_deterministic", f"grounding_failed: {debug['reason']}", debug
 
 
 def _show_openai_fallback_warning(warning: str, *, compact: bool = False) -> None:
     if not warning:
         return
     if compact:
-        st.info("OpenAI refinement skipped; showing grounded deterministic answer.")
+        st.info("OpenAI polish skipped; showing grounded answer.")
     elif warning == "missing_api_key":
         st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
     elif warning.startswith("openai_call_failed:"):
@@ -5974,6 +5985,19 @@ def _show_openai_fallback_warning(warning: str, *, compact: bool = False) -> Non
         st.warning("OpenAI refinement failed grounding checks; the conservative deterministic fallback is shown.")
     elif warning == "insufficient_extracted_text":
         st.warning("OpenAI refinement was skipped because extracted text was insufficient.")
+
+
+def _show_openai_polish_debug(warning: str, *, key: str) -> None:
+    if not warning:
+        return
+    with st.expander("OpenAI polish debug"):
+        st.text_area(
+            "Technical reason",
+            value=warning,
+            height=100,
+            disabled=True,
+            key=key,
+        )
 
 
 def _process_cross_day_uploaded_zip(uploaded, known_tickers: set[str]):
@@ -6532,11 +6556,15 @@ def draw_daily_research_brief_section() -> None:
                 if comparison_markdown and generated_ticker == selected_ticker:
                     st.caption(
                         "Generation method: "
-                        f"{st.session_state.get('daily_broker_comparison_method') or 'deterministic_fallback'}"
+                        f"{st.session_state.get('daily_broker_comparison_method') or 'grounded_deterministic'}"
                     )
                     _show_openai_fallback_warning(
                         st.session_state.get("daily_broker_comparison_warning") or "",
                         compact=True,
+                    )
+                    _show_openai_polish_debug(
+                        st.session_state.get("daily_broker_comparison_warning") or "",
+                        key="daily_broker_comparison_polish_debug",
                     )
                     st.markdown(comparison_markdown)
                     st.download_button(
@@ -6631,11 +6659,15 @@ def draw_daily_research_brief_section() -> None:
                 if memo_markdown and generated_memo_ticker == memo_ticker:
                     st.caption(
                         "Generation method: "
-                        f"{st.session_state.get('daily_ticker_memo_method') or 'deterministic_fallback'}"
+                        f"{st.session_state.get('daily_ticker_memo_method') or 'grounded_deterministic'}"
                     )
                     _show_openai_fallback_warning(
                         st.session_state.get("daily_ticker_memo_warning") or "",
                         compact=True,
+                    )
+                    _show_openai_polish_debug(
+                        st.session_state.get("daily_ticker_memo_warning") or "",
+                        key="daily_ticker_memo_polish_debug",
                     )
                     st.markdown(memo_markdown)
                     st.download_button(
@@ -7054,7 +7086,7 @@ def draw_daily_research_brief_section() -> None:
             if grounded_answer:
                 st.caption(
                     "Generation method: "
-                    f"{st.session_state.get('generation_method') or 'deterministic_fallback'}"
+                    f"{st.session_state.get('generation_method') or 'grounded_deterministic'}"
                 )
                 _show_openai_fallback_warning(
                     st.session_state.get("historical_answer_warning") or "",
@@ -7062,9 +7094,9 @@ def draw_daily_research_brief_section() -> None:
                 )
                 grounding_debug = st.session_state.get("historical_answer_grounding_debug") or {}
                 if grounding_debug:
-                    with st.expander("OpenAI grounding validation debug"):
-                        st.write(f"**Reason validation failed:** {grounding_debug.get('reason') or 'Unknown'}")
-                        st.write(f"**Validation detail:** {grounding_debug.get('detail') or 'No detail available.'}")
+                    with st.expander("OpenAI polish debug"):
+                        st.write(f"**Reason polish was skipped:** {grounding_debug.get('reason') or 'Unknown'}")
+                        st.write(f"**Technical detail:** {grounding_debug.get('detail') or 'No detail available.'}")
                         st.write(
                             "**Expected citation/source format:** "
                             f"{grounding_debug.get('expected_format') or 'Source: <exact file_name>'}"
