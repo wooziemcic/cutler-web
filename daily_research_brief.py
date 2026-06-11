@@ -2335,46 +2335,48 @@ def build_deterministic_research_answer(
 ) -> str:
     """Build a conservative answer that distinguishes snippets from metadata matches."""
     top = results.head(int(max_results)) if isinstance(results, pd.DataFrame) else pd.DataFrame()
-    lines = [
-        "# Historical Research Q&A",
-        "",
-        "Generation method: deterministic_fallback",
-        "",
-        f"Question: {query or 'Filtered research search'}",
-        "",
-        "## Answer Summary",
-    ]
+    lines = ["## Answer Summary"]
     if top.empty:
         lines.append("No indexed research rows matched the question and selected filters.")
     else:
-        tickers = sorted({str(value) for value in top["ticker"] if str(value)})
-        sources = sorted({str(value) for value in top["source_or_broker"] if str(value)})
         snippet_count = int(top["extracted_snippet"].astype(str).str.strip().ne("").sum())
         metadata_only_count = len(top) - snippet_count
+        first_file = str(top.iloc[0].get("file_name") or "")
         lines.append(
-            f"Found {len(results)} matching indexed row(s); the top {len(top)} are shown below. "
-            f"{snippet_count} top result(s) include extracted snippets and {metadata_only_count} are metadata-only. "
-            f"Matched ticker/entity metadata: {', '.join(tickers[:12]) or 'none identified'}. "
-            f"Matched broker/source metadata: {', '.join(sources[:12]) or 'none identified'}."
+            f"- Metadata shows {len(results)} matching indexed row(s); {snippet_count} top result(s) include "
+            f"extracted snippets and {metadata_only_count} are metadata-only. [Source: {first_file}]"
         )
+        for _, row in top.head(2).iterrows():
+            source = str(row.get("file_name") or "")
+            snippet = str(row.get("extracted_snippet") or "").strip()
+            if snippet:
+                excerpt = snippet[:240]
+                lines.append(
+                    f"- The extracted snippet from {source} mentions: \"{excerpt}\" [Source: {source}]"
+                )
+            else:
+                lines.append(
+                    f"- Metadata shows a {row.get('document_type') or 'research'} file from "
+                    f"{row.get('source_or_broker') or 'an unidentified source'}. [Source: {source}]"
+                )
 
     lines.extend(["", "## Top Matching Evidence"])
     if top.empty:
         lines.append("No matching evidence.")
     else:
-        for _, row in top.iterrows():
+        for _, row in top.head(5).iterrows():
             snippet = str(row.get("extracted_snippet") or "").strip()
             if snippet:
-                excerpt = snippet[:700] + ("..." if len(snippet) > 700 else "")
+                excerpt = snippet[:700]
                 lines.append(
-                    f"- `{row['file_name']}` ({row['source_date']}): "
-                    f"{row['evidence_type']} extracted excerpt: \"{excerpt}\""
+                    f"- The extracted snippet from {row['file_name']} mentions: \"{excerpt}\" "
+                    f"[Source: {row['file_name']}]"
                 )
             else:
                 lines.append(
-                    f"- `{row['file_name']}` ({row['source_date']}): metadata match only; "
+                    f"- Metadata shows {row['file_name']} is a metadata-only match; "
                     f"{row['document_type']} in {row['category']}, "
-                    f"source/broker {row['source_or_broker'] or 'unknown'}."
+                    f"source/broker {row['source_or_broker'] or 'unknown'}. [Source: {row['file_name']}]"
                 )
 
     lines.extend(["", "## Source Files"])
@@ -2382,7 +2384,7 @@ def build_deterministic_research_answer(
         lines.append("No matching source files.")
     else:
         for _, row in top.drop_duplicates(["indexed_source", "relative_path"]).iterrows():
-            lines.append(f"- `{row['file_name']}` - {row['indexed_source']} - {row['source_date']}")
+            lines.append(f"- Source: {row['file_name']}")
 
     lines.extend(
         [
@@ -2394,6 +2396,83 @@ def build_deterministic_research_answer(
         ]
     )
     return "\n".join(lines)
+
+
+def validate_openai_rewrite_preservation(
+    original: str,
+    refined: str,
+    *,
+    required_headings: Iterable[str],
+    allowed_sources: Iterable[str],
+) -> Tuple[bool, str]:
+    """Reject rewrites that alter the deterministic report's grounded structure or evidence."""
+    original_text = str(original or "")
+    refined_text = str(refined or "")
+    if not refined_text.strip():
+        return False, "OpenAI returned an empty rewrite."
+
+    for heading in required_headings:
+        if heading not in refined_text:
+            return False, f"Required heading was removed: {heading}"
+
+    citation_pattern = r"\[Source:\s*[^\]\n]+\]"
+    original_citations = Counter(re.findall(citation_pattern, original_text, flags=re.IGNORECASE))
+    refined_citations = Counter(re.findall(citation_pattern, refined_text, flags=re.IGNORECASE))
+    if any(refined_citations[citation] < count for citation, count in original_citations.items()):
+        return False, "One or more exact source citations were removed or changed."
+
+    sources = {str(source or "").strip() for source in allowed_sources if str(source or "").strip()}
+    protected_sources = {source for source in sources if source in original_text}
+    if any(refined_text.count(source) < original_text.count(source) for source in protected_sources):
+        return False, "One or more source filenames were removed."
+
+    unknown_sources = {
+        value.strip()
+        for value in re.findall(r"(?:Source:\s*|`)([^`\]\n]+\.(?:pdf|xlsx?|csv|txt|md))", refined_text, flags=re.IGNORECASE)
+        if value.strip() not in sources
+    }
+    if unknown_sources:
+        return False, "The rewrite introduced a source filename outside the deterministic report."
+
+    protected_quotes = Counter(
+        quote.strip()
+        for quote in re.findall(r'"([^"]+)"', original_text)
+        if len(quote.strip()) >= 20
+    )
+    refined_quotes = Counter(
+        quote.strip()
+        for quote in re.findall(r'"([^"]+)"', refined_text)
+        if len(quote.strip()) >= 20
+    )
+    if any(refined_quotes[quote] < count for quote, count in protected_quotes.items()):
+        return False, "Quoted extracted evidence was removed or paraphrased."
+    return True, ""
+
+
+def validate_openai_rewrite_new_claims(
+    original: str,
+    refined: str,
+    snippets: List[Dict[str, Any]],
+) -> Tuple[bool, str]:
+    """Apply strict grounding only to lines newly introduced by a constrained rewrite."""
+    advice_pattern = (
+        r"\b(?:we|investors?|geoff|mitko|you)\s+should\s+(?:buy|sell)\b"
+        r"|\bwe recommend (?:buying|selling)\b"
+        r"|(?:^|\n)\s*[-*]?\s*(?:buy|sell)\s+(?:recommendation|rating)?\b"
+    )
+    if re.search(advice_pattern, refined, flags=re.IGNORECASE):
+        return False, "The rewrite introduced investment advice."
+
+    original_lines = Counter(line.strip() for line in str(original or "").splitlines() if line.strip())
+    refined_lines = Counter(line.strip() for line in str(refined or "").splitlines() if line.strip())
+    added_lines = [
+        line
+        for line, count in refined_lines.items()
+        for _ in range(max(0, count - original_lines[line]))
+    ]
+    if added_lines and not validate_llm_brief_grounding("\n".join(added_lines), snippets):
+        return False, "The rewrite introduced an unsupported financial claim."
+    return True, ""
 
 
 def build_research_answer_payload(query: str, results: pd.DataFrame, *, max_results: int) -> str:

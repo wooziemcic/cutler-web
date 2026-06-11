@@ -5702,37 +5702,17 @@ def _generate_broker_comparison_with_optional_llm(
     if not daily_research_brief.verified_extracted_text_items(snippets):
         return fallback, "deterministic_fallback", "insufficient_extracted_text"
 
-    evidence = daily_research_brief.build_broker_comparison_evidence_payload(ticker, files_df, snippets)
     system_prompt = (
-        "You are not an analyst. You are an evidence organizer. Create a strictly source-grounded same-day "
-        "broker comparison without creating new broker conclusions. Never hallucinate broker views. "
-        "Metadata may establish only file existence, source/broker, ticker, category, document type, and "
-        "relevance score. Do not infer, conclude, or paraphrase beyond the provided snippets. For extracted "
-        "evidence bullets, use exactly this pattern: `The extracted snippet from <exact_file_name> mentions: "
-        "\"<short direct quote or near-direct phrase>\" [Source: <exact_file_name>]`. For rating, price target, "
-        "EPS, revenue, guidance, estimate, capex, free cash flow, margin, liquidity, leverage, debt, valuation, "
-        "credit, upgrade/downgrade, or beat/miss topics, use direct snippet wording only. Do not write broad "
-        "claims beginning with `Brokers noted`, `Reports indicate`, `This suggests`, or `The investment case is`. "
-        "Every substantive bullet must end with `[Source: <exact_file_name>]`; metadata bullets must say "
-        "`Metadata shows`. Consensus themes require support from at least two cited sources. If evidence "
-        "is weak, clearly say the comparison is based mostly on metadata and limited snippets. Do not infer "
-        "agreement, disagreement, direction, magnitude, causality, or investment conclusions."
+        "Rewrite only for clarity. Do not add any new facts. Do not paraphrase financial claims. Preserve every "
+        "filename citation, Markdown table row, quoted excerpt, required heading, and source reference exactly. "
+        "You may only make surrounding wording concise, reduce jargon, and improve readability. The deterministic "
+        "evidence tables and broker comparison are the source of truth. Do not create new consensus themes, broker "
+        "views, differences, or conclusions. If unsure, return the original text unchanged."
     )
     user_prompt = (
-        f"Create `Broker Consensus Report - {ticker} - {report_date}` as Markdown with exactly these sections: "
-        "Files Compared, Key Extracted Evidence, Broker-by-Broker Summary, Consensus Themes, "
-        "Divergences / Differences, Items to Verify, and Source References. "
-        "This is a broker comparison only, not a full investment memo. "
-        "Use OpenAI only to organize broker-by-broker evidence, consensus themes, and items to verify; do not "
-        "create new broker conclusions. "
-        "Files Compared and Key Extracted Evidence must be tables. Use only supplied limited_text in Key "
-        "Extracted Evidence and preserve its evidence_type and evidence_quality. If evidence_quality is not "
-        "investment_useful, write `No investment-useful snippet found in limited extraction.` In Divergences / "
-        "Differences, write exactly "
-        "`Not enough extracted text to verify broker-level differences.` unless direct verified excerpts "
-        "clearly establish a difference. Items to Verify are recommendations, not claims. Do not repeat full "
-        "snippets outside Key Extracted Evidence.\n\n"
-        f"Evidence JSON:\n{evidence}"
+        "Polish the following grounded deterministic Broker Consensus Comparator Markdown. Return only the "
+        "complete Markdown report. Preserve all evidence and protected content exactly.\n\n"
+        f"{fallback}"
     )
     text, error = chat_completion_text(
         api_key=api_key,
@@ -5746,10 +5726,31 @@ def _generate_broker_comparison_with_optional_llm(
     )
     if error:
         return fallback, "deterministic_fallback", error
-    if text and daily_research_brief.validate_broker_comparison_grounding(text, snippets):
+    sources = [
+        value
+        for item in snippets
+        for value in [item.get("relative_path"), item.get("file_name")]
+        if value
+    ]
+    preserved, preservation_reason = daily_research_brief.validate_openai_rewrite_preservation(
+        fallback,
+        text,
+        required_headings=[
+            "## Files Compared", "## Key Extracted Evidence", "## Broker-by-Broker Summary",
+            "## Consensus Themes", "## Divergences / Differences", "## Items to Verify",
+            "## Source References",
+        ],
+        allowed_sources=sources,
+    )
+    claims_safe, claims_reason = daily_research_brief.validate_openai_rewrite_new_claims(
+        fallback,
+        text,
+        snippets,
+    )
+    if preserved and claims_safe:
         return text, "openai_refined", ""
     return fallback, "deterministic_fallback", (
-        "grounding_failed: broker comparison contained uncited or unsupported evidence"
+        f"grounding_failed: {preservation_reason or claims_reason or 'rewrite failed grounding'}"
     )
 
 
@@ -5774,43 +5775,17 @@ def _generate_ticker_memo_with_optional_llm(
     if not daily_research_brief.verified_extracted_text_items(snippets):
         return fallback, "deterministic_fallback", "insufficient_extracted_text"
 
-    evidence = daily_research_brief.build_ticker_memo_evidence_payload(
-        ticker,
-        files_df,
-        snippets,
-        source_date=report_date,
-    )
     system_prompt = (
-        "You are not an analyst. You are an evidence organizer. Refine a compact, strictly source-grounded "
-        "same-day ticker investment memo using only the supplied structured context. Never hallucinate financial "
-        "conclusions. Metadata supports only file existence, "
-        "source/broker, ticker, source date, category, document type, extraction status, and relevance score. "
-        "Do not infer, conclude, or paraphrase beyond the provided snippets. For extracted evidence bullets, use "
-        "exactly this pattern: `The extracted snippet from <exact_file_name> mentions: \"<short direct quote or "
-        "near-direct phrase>\" [Source: <exact_file_name>]`. For rating, price target, EPS, revenue, guidance, "
-        "estimate, capex, free cash flow, margin, liquidity, leverage, debt, valuation, credit, upgrade/downgrade, "
-        "or beat/miss topics, use direct snippet wording only. Every substantive bullet must end with "
-        "`[Source: <exact_file_name>]`; metadata bullets must say `Metadata shows`. Never write `Brokers noted`, "
-        "`Reports indicate`, `This suggests`, `The investment case is`, or unsupported performance conclusions. "
-        "Never provide a buy/sell recommendation. Never infer direction, magnitude, "
-        "causality, agreement, or investment stance. Keep sections concise and do not repeat full snippets after "
-        "Key Extracted Evidence. Put direct extracted quotes only in Key Extracted Evidence; later sections should "
-        "briefly reference evidence types and filenames. "
-        "If evidence is weak, say exactly: `Limited extracted text was available; review source PDFs before "
-        "making investment conclusions.`"
+        "Rewrite only for clarity. Do not add any new facts. Do not paraphrase financial claims. Preserve every "
+        "filename citation, Markdown table row, quoted excerpt, required heading, and source reference exactly. "
+        "You may only make surrounding wording concise, less repetitive, and easier to read. The deterministic "
+        "evidence table is the source of truth. Do not create bullish or bearish conclusions. If unsure, return "
+        "the original text unchanged."
     )
     user_prompt = (
-        f"Create `Ticker Investment Memo - {ticker} - {report_date}` with exactly these sections: Files Reviewed, "
-        "Executive Summary, Document Coverage Overview, Key Extracted Evidence, Broker / Source Views, "
-        "Credit / Balance Sheet Notes, Earnings / Operating Notes, Potential Bullish Evidence, "
-        "Potential Bearish / Risk Evidence, Open Questions for Geoff/Mitko, Recommended Next Steps, and "
-        "Source References. Files Reviewed and Key Extracted Evidence must be tables. Use only supplied "
-        "limited_text for evidence. Keep Broker / Source Views concise, reference filenames, do not repeat "
-        "full snippets, and include: `For full broker-by-broker comparison, use the Broker Consensus Comparator "
-        "above.` Do not turn keyword overlap into a conclusion. Leave bullish/bearish evidence unclassified "
-        "unless direct quoted evidence supports it. When evidence cannot safely be classified, write exactly: "
-        "`Insufficient extracted evidence to classify this as bullish or bearish.`\n\n"
-        f"Evidence JSON:\n{evidence}"
+        "Polish the following grounded deterministic Ticker-Level Memo Markdown. Return only the complete "
+        "Markdown report. Preserve all evidence and protected content exactly.\n\n"
+        f"{fallback}"
     )
     text, error = chat_completion_text(
         api_key=api_key,
@@ -5824,10 +5799,33 @@ def _generate_ticker_memo_with_optional_llm(
     )
     if error:
         return fallback, "deterministic_fallback", error
-    if text and daily_research_brief.validate_ticker_memo_grounding(text, snippets):
+    sources = [
+        value
+        for item in snippets
+        for value in [item.get("relative_path"), item.get("file_name")]
+        if value
+    ]
+    preserved, preservation_reason = daily_research_brief.validate_openai_rewrite_preservation(
+        fallback,
+        text,
+        required_headings=[
+            "## Files Reviewed", "## Executive Summary", "## Document Coverage Overview",
+            "## Key Extracted Evidence", "## Broker / Source Views", "## Credit / Balance Sheet Notes",
+            "## Earnings / Operating Notes", "## Potential Bullish Evidence",
+            "## Potential Bearish / Risk Evidence", "## Open Questions for Geoff/Mitko",
+            "## Recommended Next Steps", "## Source References",
+        ],
+        allowed_sources=sources,
+    )
+    claims_safe, claims_reason = daily_research_brief.validate_openai_rewrite_new_claims(
+        fallback,
+        text,
+        snippets,
+    )
+    if preserved and claims_safe:
         return text, "openai_refined", ""
     return fallback, "deterministic_fallback", (
-        "grounding_failed: ticker memo contained uncited or unsupported evidence"
+        f"grounding_failed: {preservation_reason or claims_reason or 'rewrite failed grounding'}"
     )
 
 
@@ -5905,55 +5903,17 @@ def _generate_historical_research_answer_with_optional_llm(
     if results_df.empty:
         return fallback, "deterministic_fallback", "no_search_results", {}
 
-    evidence = daily_research_brief.build_research_answer_payload(
-        query,
-        results_df,
-        max_results=max_results,
-    )
     system_prompt = (
-        "You are not an analyst. You are an evidence organizer. Answer a historical investment-research question "
-        "using only the supplied compact search results. Do not infer, conclude, or paraphrase beyond the provided "
-        "snippets. "
-        "You may not cite, mention, or rely on any file that is not present in the supplied results. "
-        "Never invent financial conclusions or broker views. Metadata supports only file existence, date, "
-        "ticker, broker/source, category, document type, priority, and relevance. If extracted_snippet is "
-        "empty, label the result `metadata match only`. Do not state ratings, price targets, EPS, revenue, "
-        "guidance, estimates, margins, liquidity, valuation, credit conclusions, upgrades, downgrades, "
-        "beats, or misses unless the exact statement is copied as a direct quote from extracted_snippet. "
-        "Do not provide a buy or sell recommendation. Every bullet in Answer Summary and Top Matching Evidence, "
-        "and every source-file bullet, must cite at least one exact supplied file_name using "
-        "`Source: <exact file_name>` or `[Source: <exact file_name>]`. When one bullet uses multiple sources, "
-        "put the exact filenames in one citation separated by semicolons, for example "
-        "`[Source: file one.pdf; file two.pdf]`. Copy every file_name exactly, including spaces and extension. "
-        "Answer Summary bullets must be narrow source-grounded observations, not broad uncited claims. "
-        "For extracted evidence bullets, use exactly this pattern: `The extracted snippet from <exact_file_name> "
-        "mentions: \"<short direct quote or near-direct phrase>\" [Source: <exact_file_name>]`. For rating, price "
-        "target, EPS, revenue, guidance, estimate, capex, free cash flow, margin, liquidity, leverage, debt, "
-        "valuation, credit, upgrade/downgrade, or beat/miss topics, use direct snippet wording only. Metadata "
-        "bullets must begin with `Metadata shows` and cite the exact file. Do not write broad claims beginning "
-        "with `Brokers noted`, `Reports indicate`, `This suggests`, or `The investment case is`. "
-        "Clearly distinguish extracted-"
-        "snippet evidence from metadata-only matches. Keep the answer short, practical, and free of unnecessary "
-        "investment jargon. Use cautious wording and recommend source-PDF review when evidence is weak."
+        "Rewrite only for clarity. Do not add any new facts. Do not paraphrase financial claims. Preserve every "
+        "filename citation, quoted excerpt, required heading, and source reference exactly. Keep Answer Summary "
+        "to 2-3 bullets and Top Matching Evidence to no more than 5 bullets. Do not create broad summary claims. "
+        "You may only make wording concise, reduce jargon, and improve readability. If unsure, return the original "
+        "text unchanged."
     )
     user_prompt = (
-        "Return concise Markdown using exactly these heading lines and no other headings:\n"
-        "## Answer Summary\n"
-        "## Top Matching Evidence\n"
-        "## Source Files\n"
-        "## Caveats / Manual Verification\n\n"
-        "Use 1-3 short bullets in Answer Summary and no more than 5 short bullets in Top Matching Evidence. "
-        "Do not write long essays or include unsupported claims. "
-        "Do not cite files outside the supplied results. State how many top results contain extracted snippets "
-        "versus metadata-only matches. Every Answer Summary bullet must be a narrow observation supported by "
-        "the cited results; never write broad phrases such as `brokers provided various insights`. In Answer "
-        "Summary and Top Matching Evidence, use bullets and end every bullet with `[Source: <exact file_name>]`, "
-        "or `[Source: <exact file_name>; <exact file_name>]` when multiple supplied files support one bullet. "
-        "In Source Files, list only exact file_name values and use "
-        "`Source: <exact file_name>`. Keep Caveats to 1-2 brief uncited sentences. Extracted-evidence bullets must "
-        "use `The extracted snippet from <exact_file_name> mentions: \"<short direct quote>\" [Source: "
-        "<exact_file_name>]`. Metadata-only bullets must use `Metadata shows ... [Source: <exact_file_name>]`.\n\n"
-        f"Search evidence JSON:\n{evidence}"
+        "Polish the following grounded deterministic Historical Research Q&A Markdown. Return only the complete "
+        "Markdown answer. Preserve all evidence and protected content exactly.\n\n"
+        f"{fallback}"
     )
     text, error = chat_completion_text(
         api_key=api_key,
@@ -5967,11 +5927,18 @@ def _generate_historical_research_answer_with_optional_llm(
     )
     if error:
         return fallback, "deterministic_fallback", error, {}
-    valid, reason, detail = daily_research_brief.validate_research_answer_grounding_detailed(
+    top_results = results_df.head(max_results)
+    preserved, preservation_reason = daily_research_brief.validate_openai_rewrite_preservation(
+        fallback,
         text,
-        results_df.head(max_results),
+        required_headings=[
+            "## Answer Summary", "## Top Matching Evidence",
+            "## Source Files", "## Caveats / Manual Verification",
+        ],
+        allowed_sources=top_results.get("file_name", []),
     )
-    if valid:
+    valid, reason, detail = daily_research_brief.validate_research_answer_grounding_detailed(text, top_results)
+    if preserved and valid:
         return (
             daily_research_brief.add_generation_method(text, "openai_refined"),
             "openai_refined",
@@ -5979,8 +5946,8 @@ def _generate_historical_research_answer_with_optional_llm(
             {},
         )
     debug = {
-        "reason": reason or "parsing/format issue",
-        "detail": detail or "Grounding validation failed without additional detail.",
+        "reason": reason or ("rewrite preservation failed" if not preserved else "parsing/format issue"),
+        "detail": preservation_reason or detail or "Grounding validation failed without additional detail.",
         "response_preview": str(text or "")[:1000],
         "expected_format": (
             "Every substantive/evidence bullet must cite an exact top-result filename using "
@@ -5991,28 +5958,22 @@ def _generate_historical_research_answer_with_optional_llm(
     return fallback, "deterministic_fallback", f"grounding_failed: {debug['reason']}", debug
 
 
-def _show_openai_fallback_warning(warning: str) -> None:
-    if warning == "missing_api_key":
+def _show_openai_fallback_warning(warning: str, *, compact: bool = False) -> None:
+    if not warning:
+        return
+    if compact:
+        st.info("OpenAI refinement skipped; showing grounded deterministic answer.")
+    elif warning == "missing_api_key":
         st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
     elif warning.startswith("openai_call_failed:"):
         st.warning(
             "OpenAI refinement failed; the conservative deterministic fallback is shown. "
             f"{warning.split(':', 1)[1].strip()}"
         )
-    elif warning == "openai_response_failed_grounding":
-        st.warning(
-            "OpenAI refinement returned an answer that failed grounding checks; "
-            "the conservative deterministic fallback is shown."
-        )
-    elif warning.startswith("grounding_failed:"):
-        st.warning(
-            "OpenAI refinement failed grounding validation; the conservative deterministic fallback is shown. "
-            f"Reason: {warning.split(':', 1)[1].strip()}."
-        )
+    elif warning in {"openai_response_failed_grounding", "empty_response"} or warning.startswith("grounding_failed:"):
+        st.warning("OpenAI refinement failed grounding checks; the conservative deterministic fallback is shown.")
     elif warning == "insufficient_extracted_text":
         st.warning("OpenAI refinement was skipped because extracted text was insufficient.")
-    elif warning == "empty_response":
-        st.warning("OpenAI returned an empty response; the conservative deterministic fallback is shown.")
 
 
 def _process_cross_day_uploaded_zip(uploaded, known_tickers: set[str]):
@@ -6574,7 +6535,8 @@ def draw_daily_research_brief_section() -> None:
                         f"{st.session_state.get('daily_broker_comparison_method') or 'deterministic_fallback'}"
                     )
                     _show_openai_fallback_warning(
-                        st.session_state.get("daily_broker_comparison_warning") or ""
+                        st.session_state.get("daily_broker_comparison_warning") or "",
+                        compact=True,
                     )
                     st.markdown(comparison_markdown)
                     st.download_button(
@@ -6671,7 +6633,10 @@ def draw_daily_research_brief_section() -> None:
                         "Generation method: "
                         f"{st.session_state.get('daily_ticker_memo_method') or 'deterministic_fallback'}"
                     )
-                    _show_openai_fallback_warning(st.session_state.get("daily_ticker_memo_warning") or "")
+                    _show_openai_fallback_warning(
+                        st.session_state.get("daily_ticker_memo_warning") or "",
+                        compact=True,
+                    )
                     st.markdown(memo_markdown)
                     st.download_button(
                         "Download ticker memo Markdown",
@@ -7091,7 +7056,10 @@ def draw_daily_research_brief_section() -> None:
                     "Generation method: "
                     f"{st.session_state.get('generation_method') or 'deterministic_fallback'}"
                 )
-                _show_openai_fallback_warning(st.session_state.get("historical_answer_warning") or "")
+                _show_openai_fallback_warning(
+                    st.session_state.get("historical_answer_warning") or "",
+                    compact=True,
+                )
                 grounding_debug = st.session_state.get("historical_answer_grounding_debug") or {}
                 if grounding_debug:
                     with st.expander("OpenAI grounding validation debug"):
