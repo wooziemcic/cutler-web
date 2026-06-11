@@ -22,7 +22,6 @@ import shutil
 import traceback
 import json
 import hashlib
-import openai
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -30,6 +29,7 @@ from typing import List, Dict, Optional, Tuple, Any
 import re as _re
 import html as html_lib
 import streamlit as st
+from openai_legacy import chat_completion_text
 
 
 # --- Playwright sync API sometimes fails after asyncio.run() closes the default loop (Streamlit 'Run All').
@@ -1798,7 +1798,7 @@ def build_sa_analysis_digest(
     )
 
     try:
-        resp = openai.ChatCompletion.create(
+        digest, error = chat_completion_text(
             model=model,
             messages=[
                 {"role": "system", "content": system_msg},
@@ -1807,7 +1807,8 @@ def build_sa_analysis_digest(
             temperature=0.3,
             max_tokens=600,
         )
-        digest = resp["choices"][0]["message"]["content"].strip()
+        if error:
+            raise RuntimeError(error)
         return digest
     except Exception as e:
         return f"Error while calling OpenAI: {e}"
@@ -5624,7 +5625,7 @@ def _generate_daily_research_brief_with_optional_llm(
     selected_text: List[Dict[str, Any]],
     *,
     source_name: str,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     fallback = daily_research_brief.build_deterministic_brief(
         relevance_df,
         selected_text,
@@ -5632,11 +5633,11 @@ def _generate_daily_research_brief_with_optional_llm(
     )
     api_key = os.getenv("OPENAI_API_KEY") or ""
     if not api_key:
-        return fallback, "deterministic"
+        return fallback, "deterministic_fallback", "missing_api_key"
 
     verified_text = daily_research_brief.verified_extracted_text_items(selected_text)
     if not verified_text:
-        return fallback, "deterministic_metadata_only"
+        return fallback, "deterministic_fallback", "insufficient_extracted_text"
 
     evidence = daily_research_brief.build_llm_evidence_payload(relevance_df, selected_text)
     system_prompt = (
@@ -5663,23 +5664,21 @@ def _generate_daily_research_brief_with_optional_llm(
         "Cite a source filename/path for every extracted-text claim.\n\n"
         f"Source archive: {source_name}\n\nEvidence JSON:\n{evidence}"
     )
-    try:
-        openai.api_key = api_key
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=1800,
-        )
-        text = response["choices"][0]["message"]["content"].strip()
-        if text and daily_research_brief.validate_llm_brief_grounding(text, selected_text):
-            return text, "openai"
-    except Exception:
-        pass
-    return fallback, "deterministic_fallback"
+    text, error = chat_completion_text(
+        api_key=api_key,
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+        max_tokens=1800,
+    )
+    if error:
+        return fallback, "deterministic_fallback", error
+    if text and daily_research_brief.validate_llm_brief_grounding(text, selected_text):
+        return text, "openai_refined", ""
+    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
 
 
 def _generate_broker_comparison_with_optional_llm(
@@ -5689,7 +5688,7 @@ def _generate_broker_comparison_with_optional_llm(
     *,
     report_date: str,
     mode: str,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     fallback = daily_research_brief.build_deterministic_broker_comparison(
         ticker,
         files_df,
@@ -5698,8 +5697,10 @@ def _generate_broker_comparison_with_optional_llm(
         mode=mode,
     )
     api_key = os.getenv("OPENAI_API_KEY") or ""
-    if not api_key or not daily_research_brief.verified_extracted_text_items(snippets):
-        return fallback, "deterministic"
+    if not api_key:
+        return fallback, "deterministic_fallback", "missing_api_key"
+    if not daily_research_brief.verified_extracted_text_items(snippets):
+        return fallback, "deterministic_fallback", "insufficient_extracted_text"
 
     evidence = daily_research_brief.build_broker_comparison_evidence_payload(ticker, files_df, snippets)
     system_prompt = (
@@ -5727,23 +5728,21 @@ def _generate_broker_comparison_with_optional_llm(
         "snippets outside Key Extracted Evidence.\n\n"
         f"Evidence JSON:\n{evidence}"
     )
-    try:
-        openai.api_key = api_key
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0,
-            max_tokens=2200,
-        )
-        text = response["choices"][0]["message"]["content"].strip()
-        if text and daily_research_brief.validate_broker_comparison_grounding(text, snippets):
-            return text, "openai"
-    except Exception:
-        pass
-    return fallback, "deterministic_fallback"
+    text, error = chat_completion_text(
+        api_key=api_key,
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.0,
+        max_tokens=2200,
+    )
+    if error:
+        return fallback, "deterministic_fallback", error
+    if text and daily_research_brief.validate_broker_comparison_grounding(text, snippets):
+        return text, "openai_refined", ""
+    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
 
 
 def _generate_ticker_memo_with_optional_llm(
@@ -5800,22 +5799,20 @@ def _generate_ticker_memo_with_optional_llm(
         "unless direct quoted evidence supports it.\n\n"
         f"Evidence JSON:\n{evidence}"
     )
-    try:
-        openai.api_key = api_key
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0,
-            max_tokens=3000,
-        )
-        text = response["choices"][0]["message"]["content"].strip()
-        if text and daily_research_brief.validate_ticker_memo_grounding(text, snippets):
-            return text, "openai_refined", ""
-    except Exception:
-        return fallback, "deterministic_fallback", "openai_call_failed"
+    text, error = chat_completion_text(
+        api_key=api_key,
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.0,
+        max_tokens=3000,
+    )
+    if error:
+        return fallback, "deterministic_fallback", error
+    if text and daily_research_brief.validate_ticker_memo_grounding(text, snippets):
+        return text, "openai_refined", ""
     return fallback, "deterministic_fallback", "openai_response_failed_grounding"
 
 
@@ -5858,59 +5855,21 @@ def _generate_cross_day_report_with_optional_llm(
         "Recommended Follow-Up for Geoff/Mitko, and Source References. Use metadata only.\n\n"
         f"Evidence JSON:\n{evidence}"
     )
-    try:
-        openai.api_key = api_key
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0,
-            max_tokens=3200 if mode == "Deeper comparison" else 2000,
-        )
-        text = response["choices"][0]["message"]["content"].strip()
-        if text and daily_research_brief.validate_cross_day_report_grounding(text):
-            return daily_research_brief.add_generation_method(text, "openai_refined"), "openai_refined", ""
-    except Exception:
-        return fallback, "deterministic_fallback", "openai_call_failed"
-    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
-
-
-def _openai_chat_completion_compatible(
-    *,
-    api_key: str,
-    messages: List[Dict[str, str]],
-    model: str,
-    temperature: float,
-    max_tokens: int,
-) -> str:
-    """Call either the modern or legacy OpenAI Python SDK without exposing keys."""
-    if hasattr(openai, "OpenAI"):
-        client = openai.OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return str(response.choices[0].message.content or "").strip()
-
-    openai.api_key = api_key
-    response = openai.ChatCompletion.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
+    text, error = chat_completion_text(
+        api_key=api_key,
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.0,
+        max_tokens=3200 if mode == "Deeper comparison" else 2000,
     )
-    return str(response["choices"][0]["message"]["content"] or "").strip()
-
-
-def _concise_openai_error(exc: Exception) -> str:
-    message = " ".join(str(exc).split())
-    if len(message) > 240:
-        message = message[:237] + "..."
-    return f"{type(exc).__name__}: {message or 'OpenAI request failed'}"
+    if error:
+        return fallback, "deterministic_fallback", error
+    if text and daily_research_brief.validate_cross_day_report_grounding(text):
+        return daily_research_brief.add_generation_method(text, "openai_refined"), "openai_refined", ""
+    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
 
 
 def _generate_historical_research_answer_with_optional_llm(
@@ -5954,22 +5913,40 @@ def _generate_historical_research_answer_with_optional_llm(
         "versus metadata-only matches.\n\n"
         f"Search evidence JSON:\n{evidence}"
     )
-    try:
-        text = _openai_chat_completion_compatible(
-            api_key=api_key,
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0,
-            max_tokens=2400 if mode == "Deeper answer" else 1400,
-        )
-        if text and daily_research_brief.validate_research_answer_grounding(text, results_df.head(max_results)):
-            return daily_research_brief.add_generation_method(text, "openai_refined"), "openai_refined", ""
-    except Exception as exc:
-        return fallback, "deterministic_fallback", f"openai_call_failed: {_concise_openai_error(exc)}"
+    text, error = chat_completion_text(
+        api_key=api_key,
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.0,
+        max_tokens=2400 if mode == "Deeper answer" else 1400,
+    )
+    if error:
+        return fallback, "deterministic_fallback", error
+    if text and daily_research_brief.validate_research_answer_grounding(text, results_df.head(max_results)):
+        return daily_research_brief.add_generation_method(text, "openai_refined"), "openai_refined", ""
     return fallback, "deterministic_fallback", "openai_response_failed_grounding"
+
+
+def _show_openai_fallback_warning(warning: str) -> None:
+    if warning == "missing_api_key":
+        st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
+    elif warning.startswith("openai_call_failed:"):
+        st.warning(
+            "OpenAI refinement failed; the conservative deterministic fallback is shown. "
+            f"{warning.split(':', 1)[1].strip()}"
+        )
+    elif warning == "openai_response_failed_grounding":
+        st.warning(
+            "OpenAI refinement returned an answer that failed grounding checks; "
+            "the conservative deterministic fallback is shown."
+        )
+    elif warning == "insufficient_extracted_text":
+        st.warning("OpenAI refinement was skipped because extracted text was insufficient.")
+    elif warning == "empty_response":
+        st.warning("OpenAI returned an empty response; the conservative deterministic fallback is shown.")
 
 
 def _process_cross_day_uploaded_zip(uploaded, known_tickers: set[str]):
@@ -6294,7 +6271,7 @@ def draw_daily_research_brief_section() -> None:
                 "daily_source_name", "daily_inventory_df", "daily_relevance_df",
                 "daily_selected_df", "daily_selected_text", "daily_processing_limits",
                 "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
-                "daily_processing",
+                "daily_brief_warning", "daily_processing",
             ],
             prefixes=["daily_broker_comparison_", "daily_ticker_memo_", "daily_cross_day_"],
         )
@@ -6317,7 +6294,7 @@ def draw_daily_research_brief_section() -> None:
                     "daily_inventory_df",
                     "daily_relevance_df", "daily_selected_df", "daily_selected_text",
                     "daily_processing_limits", "daily_extract_warnings", "daily_brief_text",
-                    "daily_brief_method",
+                    "daily_brief_method", "daily_brief_warning",
                 ],
                 prefixes=["daily_broker_comparison_", "daily_ticker_memo_"],
             )
@@ -6377,13 +6354,14 @@ def draw_daily_research_brief_section() -> None:
 
     if generate_clicked and isinstance(relevance_df, pd.DataFrame):
         with st.spinner("Generating source-grounded daily brief..."):
-            brief, method = _generate_daily_research_brief_with_optional_llm(
+            brief, method, brief_warning = _generate_daily_research_brief_with_optional_llm(
                 relevance_df,
                 selected_text,
                 source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
             )
         st.session_state["daily_brief_text"] = brief
         st.session_state["daily_brief_method"] = method
+        st.session_state["daily_brief_warning"] = brief_warning
         st.success("Daily brief generated.")
 
     st.markdown("#### 3. Folder/File Inventory")
@@ -6480,7 +6458,7 @@ def draw_daily_research_brief_section() -> None:
                         max_chars_per_file=comparison_limits["max_chars"],
                         reuse_existing=(comparison_mode == "Fast comparison"),
                     )
-                    comparison_markdown, comparison_method = _generate_broker_comparison_with_optional_llm(
+                    comparison_markdown, comparison_method, comparison_warning = _generate_broker_comparison_with_optional_llm(
                         selected_ticker,
                         comparison_files,
                         comparison_snippets,
@@ -6494,6 +6472,7 @@ def draw_daily_research_brief_section() -> None:
                 st.session_state["daily_broker_comparison_snippets"] = comparison_snippets
                 st.session_state["daily_broker_comparison_markdown"] = comparison_markdown
                 st.session_state["daily_broker_comparison_method"] = comparison_method
+                st.session_state["daily_broker_comparison_warning"] = comparison_warning
                 st.session_state["daily_broker_comparison_generated_ticker"] = selected_ticker
                 st.session_state["daily_broker_comparison_generated_mode"] = comparison_mode
                 st.success("Broker comparison generated.")
@@ -6503,7 +6482,10 @@ def draw_daily_research_brief_section() -> None:
             if comparison_markdown and generated_ticker == selected_ticker:
                 st.caption(
                     "Generation method: "
-                    f"{st.session_state.get('daily_broker_comparison_method') or 'deterministic'}"
+                    f"{st.session_state.get('daily_broker_comparison_method') or 'deterministic_fallback'}"
+                )
+                _show_openai_fallback_warning(
+                    st.session_state.get("daily_broker_comparison_warning") or ""
                 )
                 st.markdown(comparison_markdown)
                 st.download_button(
@@ -6595,13 +6577,7 @@ def draw_daily_research_brief_section() -> None:
                     "Generation method: "
                     f"{st.session_state.get('daily_ticker_memo_method') or 'deterministic_fallback'}"
                 )
-                memo_warning = st.session_state.get("daily_ticker_memo_warning") or ""
-                if memo_warning == "missing_api_key":
-                    st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
-                elif memo_warning in {"openai_call_failed", "openai_response_failed_grounding"}:
-                    st.warning("OpenAI refinement failed; the conservative deterministic fallback is shown.")
-                elif memo_warning == "insufficient_extracted_text":
-                    st.warning("OpenAI refinement was skipped because extracted text was insufficient.")
+                _show_openai_fallback_warning(st.session_state.get("daily_ticker_memo_warning") or "")
                 st.markdown(memo_markdown)
                 st.download_button(
                     "Download ticker memo Markdown",
@@ -6774,11 +6750,7 @@ def draw_daily_research_brief_section() -> None:
         if cross_report:
             cross_method = st.session_state.get("daily_cross_day_report_method") or "deterministic_fallback"
             st.caption(f"Generation method: {cross_method}")
-            cross_warning = st.session_state.get("daily_cross_day_report_warning") or ""
-            if cross_warning == "missing_api_key":
-                st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
-            elif cross_warning in {"openai_call_failed", "openai_response_failed_grounding"}:
-                st.warning("OpenAI refinement failed; the conservative deterministic fallback is shown.")
+            _show_openai_fallback_warning(st.session_state.get("daily_cross_day_report_warning") or "")
             st.markdown(cross_report)
             st.download_button(
                 "Download Change Report Markdown",
@@ -7016,19 +6988,7 @@ def draw_daily_research_brief_section() -> None:
                 "Generation method: "
                 f"{st.session_state.get('generation_method') or 'deterministic_fallback'}"
             )
-            answer_warning = st.session_state.get("historical_answer_warning") or ""
-            if answer_warning == "missing_api_key":
-                st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
-            elif answer_warning.startswith("openai_call_failed:"):
-                st.warning(
-                    "OpenAI refinement failed; the conservative deterministic fallback is shown. "
-                    f"{answer_warning.split(':', 1)[1].strip()}"
-                )
-            elif answer_warning == "openai_response_failed_grounding":
-                st.warning(
-                    "OpenAI refinement returned an answer that failed grounding checks; "
-                    "the conservative deterministic fallback is shown."
-                )
+            _show_openai_fallback_warning(st.session_state.get("historical_answer_warning") or "")
             st.markdown(grounded_answer)
             st.download_button(
                 "Download grounded answer Markdown",
@@ -7042,8 +7002,9 @@ def draw_daily_research_brief_section() -> None:
     st.markdown("#### 6. Generate Daily Brief")
     brief_text = st.session_state.get("daily_brief_text") or ""
     if brief_text:
-        method = st.session_state.get("daily_brief_method") or "deterministic"
+        method = st.session_state.get("daily_brief_method") or "deterministic_fallback"
         st.caption(f"Generation method: {method}")
+        _show_openai_fallback_warning(st.session_state.get("daily_brief_warning") or "")
         st.markdown(brief_text)
     else:
         st.info("After processing, click Generate Daily Brief to create the memo.")

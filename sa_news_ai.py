@@ -6,12 +6,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
-import openai
 import requests
 from bs4 import BeautifulSoup
-
-# Configure OpenAI using the classic client style (same as ai_insights.py)
-openai.api_key = os.getenv("OPENAI_API_KEY")
+from openai_legacy import chat_completion_text
 
 
 # ---------------------------------------------------------------------
@@ -340,7 +337,7 @@ Recent headlines:
 """
 
     try:
-        resp = openai.ChatCompletion.create(
+        text, error = chat_completion_text(
             model=model,
             messages=[
                 {"role": "system", "content": "You are a financial analyst."},
@@ -348,10 +345,12 @@ Recent headlines:
             ],
             temperature=0.3,
         )
+        if error:
+            raise RuntimeError(error)
     except Exception as exc:  # noqa: BLE001
         return f"[AI digest unavailable: {exc}]\n\nHeadlines:\n{headlines_block}"
 
     try:
-        return resp["choices"][0]["message"]["content"].strip()
+        return text
     except Exception:
         return "Model returned an unexpected response format."

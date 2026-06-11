@@ -495,15 +495,14 @@ def _openai_score_paragraph(
     if key in cache:
         return cache[key]
 
-    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_APIKEY")
+    api_key = os.getenv("OPENAI_API_KEY") or ""
     if not api_key:
         out = {"rating": 3, "rationale": "No OPENAI_API_KEY set; defaulted to 3."}
         cache[key] = out
         return out
 
     try:
-        import openai  # type: ignore
-        openai.api_key = api_key
+        from openai_legacy import chat_completion_text
 
         sys_prompt = (
             "You are a strict equity-research analyst helping a buy-side firm. "
@@ -522,7 +521,8 @@ Return JSON with:
 - rationale: 1 short sentence explaining why.
 """
 
-        resp = openai.ChatCompletion.create(
+        content, error = chat_completion_text(
+            api_key=api_key,
             model=model,
             messages=[
                 {"role": "system", "content": sys_prompt},
@@ -530,8 +530,8 @@ Return JSON with:
             ],
             temperature=0.1,
         )
-
-        content = (resp["choices"][0]["message"]["content"] or "").strip()
+        if error:
+            raise RuntimeError(error)
         parsed = json.loads(content)
         rating = int(parsed.get("rating", 3))
         rating = 1 if rating < 1 else 5 if rating > 5 else rating

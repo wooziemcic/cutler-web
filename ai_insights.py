@@ -14,14 +14,13 @@ import os
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
-import openai
 import importlib.util
+from openai_legacy import chat_completion_text
 
 HERE = Path(__file__).resolve().parent
 
-# Load .env file automatically and set API key
+# Load .env file automatically
 load_dotenv(dotenv_path=HERE / ".env")
-openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Import tickers mapping so we can show company names
 import importlib.util
@@ -201,23 +200,13 @@ Now, respond ONLY as JSON with this exact schema:
         {"role": "user", "content": user_prompt},
     ]
 
-    # IMPORTANT: use ChatCompletion for compatibility (no `openai.chat` namespace)
-    response = openai.ChatCompletion.create(
+    text, error = chat_completion_text(
         model=model,
         messages=messages,
         temperature=0,
     )
-
-    # Handle both dict-like and object-like responses
-    try:
-        choice = response.choices[0]
-        msg = choice["message"] if isinstance(choice, dict) else getattr(choice, "message", choice)
-        if isinstance(msg, dict):
-            text = msg.get("content", "")
-        else:
-            text = getattr(msg, "content", str(msg))
-    except Exception:
-        text = str(response)
+    if error:
+        raise RuntimeError(error)
 
     try:
         data = json.loads(text)

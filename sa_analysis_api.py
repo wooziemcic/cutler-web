@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Any, Dict
 import requests
 from dotenv import load_dotenv
-import openai
+from openai_legacy import chat_completion_text
 
 load_dotenv()
 
@@ -31,20 +31,6 @@ def _get_rapidapi_key() -> str:
             "SA_RAPIDAPI_KEY is not set. Please add it to your .env or environment."
         )
     return key
-
-def _get_openai_key() -> str:
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError(
-            "OPENAI_API_KEY is not set. Please add it to your .env or environment."
-        )
-    return key
-
-# Set OpenAI key if present; don't crash app on import if missing.
-try:
-    openai.api_key = _get_openai_key()
-except RuntimeError:
-    openai.api_key = None
 
 BASE_HOST = "seeking-alpha.p.rapidapi.com"
 BASE_URL = f"https://{BASE_HOST}"
@@ -488,13 +474,14 @@ def build_sa_analysis_digest(
     ]
 
     try:
-        resp = openai.ChatCompletion.create(
+        digest, error = chat_completion_text(
             model=model,
             messages=messages,
             temperature=0.35,
             max_tokens=700,
         )
-        digest = resp["choices"][0]["message"]["content"].strip()
+        if error:
+            raise RuntimeError(error)
     except Exception as e:
         log.error("OpenAI error while building SA analysis digest: %s", e)
         digest = (

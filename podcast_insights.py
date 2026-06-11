@@ -2,28 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import re
 
-import openai
+from openai_legacy import chat_completion_text
 
 # Try to pull full Cutler universe for nicer company labels (optional)
 try:
     from tickers import tickers as CUTLER_TICKERS
 except Exception:
     CUTLER_TICKERS = {}
-
-# ------------------------------
-# OpenAI setup
-# ------------------------------
-
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_KEY")
-if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
-
 
 @dataclass
 class PodcastSnippet:
@@ -185,9 +175,7 @@ def build_episode_user_message(ep: EpisodeRecord, max_chars: int = 6000) -> str:
 # ---------------------------------------------------------------------
 
 def call_chat_completion(model: str, system_prompt: str, user_message: str) -> str:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY (or OPENAI_KEY) is not set in environment.")
-    resp = openai.ChatCompletion.create(
+    text, error = chat_completion_text(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -195,7 +183,9 @@ def call_chat_completion(model: str, system_prompt: str, user_message: str) -> s
         ],
         temperature=0.2,
     )
-    return resp["choices"][0]["message"]["content"]
+    if error:
+        raise RuntimeError(error)
+    return text
 
 
 def generate_company_insight(
