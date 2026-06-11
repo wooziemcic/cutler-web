@@ -5704,13 +5704,17 @@ def _generate_broker_comparison_with_optional_llm(
 
     evidence = daily_research_brief.build_broker_comparison_evidence_payload(ticker, files_df, snippets)
     system_prompt = (
-        "Create a strictly source-grounded same-day broker comparison. Never hallucinate broker views. "
+        "You are not an analyst. You are an evidence organizer. Create a strictly source-grounded same-day "
+        "broker comparison without creating new broker conclusions. Never hallucinate broker views. "
         "Metadata may establish only file existence, source/broker, ticker, category, document type, and "
-        "relevance score. Do not claim an upgrade, downgrade, rating, price target, estimate, EPS, revenue, "
-        "guidance, valuation, beat/miss, credit change, or broker-level difference unless verified limited "
-        "text explicitly supports the exact statement. Any such claim must be a direct quote and cite its "
-        "source relative_path on the same bullet. Every other factual observation must also cite source "
-        "relative_path values. Consensus themes require support from at least two cited sources. If evidence "
+        "relevance score. Do not infer, conclude, or paraphrase beyond the provided snippets. For extracted "
+        "evidence bullets, use exactly this pattern: `The extracted snippet from <exact_file_name> mentions: "
+        "\"<short direct quote or near-direct phrase>\" [Source: <exact_file_name>]`. For rating, price target, "
+        "EPS, revenue, guidance, estimate, capex, free cash flow, margin, liquidity, leverage, debt, valuation, "
+        "credit, upgrade/downgrade, or beat/miss topics, use direct snippet wording only. Do not write broad "
+        "claims beginning with `Brokers noted`, `Reports indicate`, `This suggests`, or `The investment case is`. "
+        "Every substantive bullet must end with `[Source: <exact_file_name>]`; metadata bullets must say "
+        "`Metadata shows`. Consensus themes require support from at least two cited sources. If evidence "
         "is weak, clearly say the comparison is based mostly on metadata and limited snippets. Do not infer "
         "agreement, disagreement, direction, magnitude, causality, or investment conclusions."
     )
@@ -5719,6 +5723,8 @@ def _generate_broker_comparison_with_optional_llm(
         "Files Compared, Key Extracted Evidence, Broker-by-Broker Summary, Consensus Themes, "
         "Divergences / Differences, Items to Verify, and Source References. "
         "This is a broker comparison only, not a full investment memo. "
+        "Use OpenAI only to organize broker-by-broker evidence, consensus themes, and items to verify; do not "
+        "create new broker conclusions. "
         "Files Compared and Key Extracted Evidence must be tables. Use only supplied limited_text in Key "
         "Extracted Evidence and preserve its evidence_type and evidence_quality. If evidence_quality is not "
         "investment_useful, write `No investment-useful snippet found in limited extraction.` In Divergences / "
@@ -5742,7 +5748,9 @@ def _generate_broker_comparison_with_optional_llm(
         return fallback, "deterministic_fallback", error
     if text and daily_research_brief.validate_broker_comparison_grounding(text, snippets):
         return text, "openai_refined", ""
-    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
+    return fallback, "deterministic_fallback", (
+        "grounding_failed: broker comparison contained uncited or unsupported evidence"
+    )
 
 
 def _generate_ticker_memo_with_optional_llm(
@@ -5773,14 +5781,18 @@ def _generate_ticker_memo_with_optional_llm(
         source_date=report_date,
     )
     system_prompt = (
-        "Refine a compact, strictly source-grounded same-day ticker investment memo using only the supplied "
-        "structured context. Never hallucinate financial conclusions. Metadata supports only file existence, "
+        "You are not an analyst. You are an evidence organizer. Refine a compact, strictly source-grounded "
+        "same-day ticker investment memo using only the supplied structured context. Never hallucinate financial "
+        "conclusions. Metadata supports only file existence, "
         "source/broker, ticker, source date, category, document type, extraction status, and relevance score. "
-        "Do not state ratings, price targets, upgrades/downgrades, EPS, revenue, guidance, "
-        "valuation, liquidity, margins, credit claims, bullish points, or bearish points unless supplied "
-        "limited_text explicitly supports the exact statement. Financial and investment claims must be direct "
-        "quotes with relative_path cited on the same bullet. Every other factual observation must cite one or "
-        "more relative_path values. Never provide a buy/sell recommendation. Never infer direction, magnitude, "
+        "Do not infer, conclude, or paraphrase beyond the provided snippets. For extracted evidence bullets, use "
+        "exactly this pattern: `The extracted snippet from <exact_file_name> mentions: \"<short direct quote or "
+        "near-direct phrase>\" [Source: <exact_file_name>]`. For rating, price target, EPS, revenue, guidance, "
+        "estimate, capex, free cash flow, margin, liquidity, leverage, debt, valuation, credit, upgrade/downgrade, "
+        "or beat/miss topics, use direct snippet wording only. Every substantive bullet must end with "
+        "`[Source: <exact_file_name>]`; metadata bullets must say `Metadata shows`. Never write `Brokers noted`, "
+        "`Reports indicate`, `This suggests`, `The investment case is`, or unsupported performance conclusions. "
+        "Never provide a buy/sell recommendation. Never infer direction, magnitude, "
         "causality, agreement, or investment stance. Keep sections concise and do not repeat full snippets after "
         "Key Extracted Evidence. Put direct extracted quotes only in Key Extracted Evidence; later sections should "
         "briefly reference evidence types and filenames. "
@@ -5796,7 +5808,8 @@ def _generate_ticker_memo_with_optional_llm(
         "limited_text for evidence. Keep Broker / Source Views concise, reference filenames, do not repeat "
         "full snippets, and include: `For full broker-by-broker comparison, use the Broker Consensus Comparator "
         "above.` Do not turn keyword overlap into a conclusion. Leave bullish/bearish evidence unclassified "
-        "unless direct quoted evidence supports it.\n\n"
+        "unless direct quoted evidence supports it. When evidence cannot safely be classified, write exactly: "
+        "`Insufficient extracted evidence to classify this as bullish or bearish.`\n\n"
         f"Evidence JSON:\n{evidence}"
     )
     text, error = chat_completion_text(
@@ -5813,7 +5826,9 @@ def _generate_ticker_memo_with_optional_llm(
         return fallback, "deterministic_fallback", error
     if text and daily_research_brief.validate_ticker_memo_grounding(text, snippets):
         return text, "openai_refined", ""
-    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
+    return fallback, "deterministic_fallback", (
+        "grounding_failed: ticker memo contained uncited or unsupported evidence"
+    )
 
 
 def _generate_cross_day_report_with_optional_llm(
@@ -5896,7 +5911,9 @@ def _generate_historical_research_answer_with_optional_llm(
         max_results=max_results,
     )
     system_prompt = (
-        "Answer a historical investment-research question using only the supplied compact search results. "
+        "You are not an analyst. You are an evidence organizer. Answer a historical investment-research question "
+        "using only the supplied compact search results. Do not infer, conclude, or paraphrase beyond the provided "
+        "snippets. "
         "You may not cite, mention, or rely on any file that is not present in the supplied results. "
         "Never invent financial conclusions or broker views. Metadata supports only file existence, date, "
         "ticker, broker/source, category, document type, priority, and relevance. If extracted_snippet is "
@@ -5909,8 +5926,12 @@ def _generate_historical_research_answer_with_optional_llm(
         "put the exact filenames in one citation separated by semicolons, for example "
         "`[Source: file one.pdf; file two.pdf]`. Copy every file_name exactly, including spaces and extension. "
         "Answer Summary bullets must be narrow source-grounded observations, not broad uncited claims. "
-        "Cautious wording such as `the cited snippets mention ... language` is allowed only when those terms "
-        "actually appear in the cited extracted_snippet values. "
+        "For extracted evidence bullets, use exactly this pattern: `The extracted snippet from <exact_file_name> "
+        "mentions: \"<short direct quote or near-direct phrase>\" [Source: <exact_file_name>]`. For rating, price "
+        "target, EPS, revenue, guidance, estimate, capex, free cash flow, margin, liquidity, leverage, debt, "
+        "valuation, credit, upgrade/downgrade, or beat/miss topics, use direct snippet wording only. Metadata "
+        "bullets must begin with `Metadata shows` and cite the exact file. Do not write broad claims beginning "
+        "with `Brokers noted`, `Reports indicate`, `This suggests`, or `The investment case is`. "
         "Clearly distinguish extracted-"
         "snippet evidence from metadata-only matches. Keep the answer short, practical, and free of unnecessary "
         "investment jargon. Use cautious wording and recommend source-PDF review when evidence is weak."
@@ -5929,10 +5950,9 @@ def _generate_historical_research_answer_with_optional_llm(
         "Summary and Top Matching Evidence, use bullets and end every bullet with `[Source: <exact file_name>]`, "
         "or `[Source: <exact file_name>; <exact file_name>]` when multiple supplied files support one bullet. "
         "In Source Files, list only exact file_name values and use "
-        "`Source: <exact file_name>`. Keep Caveats to 1-2 brief uncited sentences. For sensitive financial "
-        "conclusions, quote the supplied extracted_snippet verbatim and cite that same source filename. A cautious "
-        "`the cited snippet mentions <term> language` observation may summarize terms that actually appear in the "
-        "cited snippet without drawing a financial conclusion.\n\n"
+        "`Source: <exact file_name>`. Keep Caveats to 1-2 brief uncited sentences. Extracted-evidence bullets must "
+        "use `The extracted snippet from <exact_file_name> mentions: \"<short direct quote>\" [Source: "
+        "<exact_file_name>]`. Metadata-only bullets must use `Metadata shows ... [Source: <exact_file_name>]`.\n\n"
         f"Search evidence JSON:\n{evidence}"
     )
     text, error = chat_completion_text(
@@ -5965,7 +5985,7 @@ def _generate_historical_research_answer_with_optional_llm(
         "expected_format": (
             "Every substantive/evidence bullet must cite an exact top-result filename using "
             "`Source: <exact file_name>` or `[Source: <exact file_name>]`. Sensitive financial "
-            "claims must be direct quotes from the cited extracted_snippet."
+            "claims must use direct snippet wording in the evidence-organizer format."
         ),
     }
     return fallback, "deterministic_fallback", f"grounding_failed: {debug['reason']}", debug

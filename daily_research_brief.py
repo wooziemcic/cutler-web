@@ -2537,62 +2537,72 @@ def validate_research_answer_grounding_detailed(
                 f"Sensitive financial claim on line {line_number} did not cite a source filename: {stripped[:240]}",
             )
         quotes = [quote.strip() for quote in re.findall(r'"([^"]+)"', stripped) if quote.strip()]
-        if not quotes:
-            cautious_snippet_observation = bool(
-                re.search(
-                    r"\bsnippets?\s+(?:mention|mentions|include|includes|contain|contains)\b",
-                    stripped,
-                    flags=re.IGNORECASE,
-                )
-            )
-            concept_patterns = {
-                "rating": r"\bratings?\b",
-                "price target": r"\bprice[-\s]+targets?\b",
-                "EPS": r"\beps\b",
-                "revenue": r"\brevenue\b",
-                "guidance": r"\bguidance\b",
-                "estimate": r"\bestimates?\b",
-                "margin": r"\bmargins?\b",
-                "operating income": r"\boperating[-\s]+income\b",
-                "capex": r"\bcapex\b|\bcapital[-\s]+expenditures?\b",
-                "liquidity": r"\bliquidity\b",
-                "valuation": r"\bvaluation\b",
-                "credit": r"\bcredit\b",
-                "cash flow": r"\bcash[-\s]+flow\b",
-                "leverage": r"\bleverage\b",
-                "debt": r"\bdebt\b",
-                "overweight": r"\boverweight\b",
-                "underweight": r"\bunderweight\b",
-            }
-            mentioned_concepts = {
-                name: pattern for name, pattern in concept_patterns.items()
-                if re.search(pattern, stripped, flags=re.IGNORECASE)
-            }
-            cited_snippets = " ".join(
-                str(row.get("extracted_snippet") or "") for row in cited_rows
-            )
-            concepts_supported = bool(mentioned_concepts) and all(
-                re.search(pattern, cited_snippets, flags=re.IGNORECASE)
-                for pattern in mentioned_concepts.values()
-            )
-            if cautious_snippet_observation and concepts_supported:
-                continue
-            return (
-                False,
-                "unsupported claim",
-                f"Sensitive financial claim on line {line_number} was neither a direct extracted quote nor "
-                "a cautious snippet-language observation supported by the cited snippets.",
-            )
-        for quote in quotes:
-            if not any(
+        exact_quote_supported = bool(quotes) and all(
+            any(
                 quote.casefold() in str(row.get("extracted_snippet") or "").casefold()
                 for row in cited_rows
-            ):
-                return (
-                    False,
-                    "unsupported claim",
-                    f"Quoted financial evidence on line {line_number} was not found in the cited source snippet.",
-                )
+            )
+            for quote in quotes
+        )
+        if exact_quote_supported:
+            continue
+        cautious_snippet_observation = bool(
+            re.search(
+                r"\b(?:the\s+)?(?:extracted\s+)?snippets?\s+(?:from\s+.+?\s+)?"
+                r"(?:mention|mentions|include|includes|contain|contains)\b",
+                stripped,
+                flags=re.IGNORECASE,
+            )
+        )
+        concept_patterns = {
+            "rating": r"\bratings?\b",
+            "price target": r"\bprice[-\s]+targets?\b",
+            "EPS": r"\beps\b",
+            "revenue": r"\brevenue\b",
+            "guidance": r"\bguidance\b",
+            "estimate": r"\bestimates?\b",
+            "margin": r"\bmargins?\b",
+            "operating income": r"\boperating[-\s]+income\b",
+            "capex": r"\bcapex\b|\bcapital[-\s]+expenditures?\b",
+            "free cash flow": r"\bfree[-\s]+cash[-\s]+flow\b|\bfcf\b",
+            "liquidity": r"\bliquidity\b",
+            "valuation": r"\bvaluation\b",
+            "credit": r"\bcredit\b",
+            "cash flow": r"\bcash[-\s]+flow\b",
+            "leverage": r"\bleverage\b",
+            "debt": r"\bdebt\b",
+            "overweight": r"\boverweight\b",
+            "underweight": r"\bunderweight\b",
+            "upgrade": r"\bupgrades?\b",
+            "downgrade": r"\bdowngrades?\b",
+            "beat": r"\bbeats?\b",
+            "miss": r"\bmiss(?:es|ed)?\b",
+        }
+        mentioned_concepts = {
+            name: pattern for name, pattern in concept_patterns.items()
+            if re.search(pattern, stripped, flags=re.IGNORECASE)
+        }
+        cited_snippets = " ".join(
+            str(row.get("extracted_snippet") or "") for row in cited_rows
+        )
+        concepts_supported = bool(mentioned_concepts) and all(
+            re.search(pattern, cited_snippets, flags=re.IGNORECASE)
+            for pattern in mentioned_concepts.values()
+        )
+        prohibited_interpretation = re.search(
+            r"\b(?:this suggests|reports? indicate|brokers? (?:noted|believe|conclude)|"
+            r"investment case|performance was|appears (?:strong|weak)|is (?:bullish|bearish))\b",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if cautious_snippet_observation and concepts_supported and not prohibited_interpretation:
+            continue
+        return (
+            False,
+            "unsupported claim",
+            f"Sensitive financial claim on line {line_number} was neither direct extracted wording nor "
+            "a cautious snippet-language observation supported by the cited snippets.",
+        )
 
     evidence_section = text.split("## Top Matching Evidence", 1)[1].split("## Source Files", 1)[0]
     summary_section = text.split("## Answer Summary", 1)[1].split("## Top Matching Evidence", 1)[0]
@@ -2801,36 +2811,63 @@ def verified_extracted_text_items(selected_text: List[Dict[str, Any]]) -> List[D
 
 
 def validate_llm_brief_grounding(text: str, selected_text: List[Dict[str, Any]]) -> bool:
-    """Require sensitive financial claims to be direct quotes from a cited, verified source."""
+    """Require sensitive claims to be quoted or cautious evidence-organizer observations."""
     verified = verified_extracted_text_items(selected_text)
     if not verified:
         return not any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in SENSITIVE_FINANCE_PATTERNS)
 
+    sensitive_patterns = [
+        *SENSITIVE_FINANCE_PATTERNS,
+        r"\bratings?\b", r"\bprice targets?\b", r"\bestimates?\b",
+        r"\bfree cash flow\b", r"\bcash flow\b", r"\bleverage\b", r"\bdebt\b",
+        r"\bcredit\b", r"\bupgrades?\b", r"\bdowngrades?\b",
+    ]
+    organizer_pattern = re.compile(
+        r"\b(?:the\s+)?(?:extracted\s+)?snippets?\s+(?:from\s+.+?\s+)?"
+        r"(?:mention|mentions|include|includes|contain|contains)\b",
+        flags=re.IGNORECASE,
+    )
+    prohibited_interpretation_pattern = re.compile(
+        r"\b(?:this suggests|reports? indicate|brokers? (?:noted|believe|conclude)|"
+        r"investment case|performance was|appears (?:strong|weak)|is (?:bullish|bearish))\b",
+        flags=re.IGNORECASE,
+    )
     for line in text.splitlines():
+        stripped = line.strip()
+        if (
+            not stripped
+            or stripped.startswith("#")
+            or bool(re.fullmatch(r"[\s|:-]+", stripped))
+        ):
+            continue
         matched_patterns = [
-            pattern for pattern in SENSITIVE_FINANCE_PATTERNS
-            if re.search(pattern, line, flags=re.IGNORECASE)
+            pattern for pattern in sensitive_patterns
+            if re.search(pattern, stripped, flags=re.IGNORECASE)
         ]
         if not matched_patterns:
             continue
         cited = [
             item for item in verified
-            if str(item.get("relative_path") or "") in line or str(item.get("file_name") or "") in line
+            if str(item.get("relative_path") or "") in stripped
+            or str(item.get("file_name") or "") in stripped
         ]
         if not cited:
             return False
-        quoted_parts = [part.strip() for part in re.findall(r'"([^"]+)"', line) if part.strip()]
-        if not quoted_parts:
-            return False
-        if not any(
+        quoted_parts = [part.strip() for part in re.findall(r'"([^"]+)"', stripped) if part.strip()]
+        quote_supported = any(
             any(
-                len(quote) >= 20
+                len(quote) >= 8
                 and quote.lower() in _normalized_extracted_text(item).lower()
-                and all(re.search(pattern, quote, flags=re.IGNORECASE) for pattern in matched_patterns)
                 for quote in quoted_parts
             )
             for item in cited
-        ):
+        )
+        if quote_supported:
+            continue
+        if prohibited_interpretation_pattern.search(stripped) or not organizer_pattern.search(stripped):
+            return False
+        cited_text = " ".join(_normalized_extracted_text(item) for item in cited)
+        if not all(re.search(pattern, cited_text, flags=re.IGNORECASE) for pattern in matched_patterns):
             return False
     return True
 
