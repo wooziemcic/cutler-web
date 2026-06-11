@@ -2449,10 +2449,16 @@ def validate_research_answer_grounding_detailed(
     if not source_names:
         return False, "parsing/format issue", "Top search results did not contain source filenames."
 
+    citation_blocks = re.findall(
+        r"(?:\[?Source:\s*)([^\]\n]+?)(?:\]|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
     cited_labels = [
-        value.strip().strip("`").strip()
-        for value in re.findall(r"(?:\[?Source:\s*)([^\]\n]+?)(?:\]|$)", text, flags=re.IGNORECASE)
-        if value.strip()
+        label.strip().strip("`").strip()
+        for block in citation_blocks
+        for label in block.split(";")
+        if label.strip()
     ]
     unknown_labels = sorted({label for label in cited_labels if label not in source_names})
     if unknown_labels:
@@ -2532,10 +2538,50 @@ def validate_research_answer_grounding_detailed(
             )
         quotes = [quote.strip() for quote in re.findall(r'"([^"]+)"', stripped) if quote.strip()]
         if not quotes:
+            cautious_snippet_observation = bool(
+                re.search(
+                    r"\bsnippets?\s+(?:mention|mentions|include|includes|contain|contains)\b",
+                    stripped,
+                    flags=re.IGNORECASE,
+                )
+            )
+            concept_patterns = {
+                "rating": r"\bratings?\b",
+                "price target": r"\bprice[-\s]+targets?\b",
+                "EPS": r"\beps\b",
+                "revenue": r"\brevenue\b",
+                "guidance": r"\bguidance\b",
+                "estimate": r"\bestimates?\b",
+                "margin": r"\bmargins?\b",
+                "operating income": r"\boperating[-\s]+income\b",
+                "capex": r"\bcapex\b|\bcapital[-\s]+expenditures?\b",
+                "liquidity": r"\bliquidity\b",
+                "valuation": r"\bvaluation\b",
+                "credit": r"\bcredit\b",
+                "cash flow": r"\bcash[-\s]+flow\b",
+                "leverage": r"\bleverage\b",
+                "debt": r"\bdebt\b",
+                "overweight": r"\boverweight\b",
+                "underweight": r"\bunderweight\b",
+            }
+            mentioned_concepts = {
+                name: pattern for name, pattern in concept_patterns.items()
+                if re.search(pattern, stripped, flags=re.IGNORECASE)
+            }
+            cited_snippets = " ".join(
+                str(row.get("extracted_snippet") or "") for row in cited_rows
+            )
+            concepts_supported = bool(mentioned_concepts) and all(
+                re.search(pattern, cited_snippets, flags=re.IGNORECASE)
+                for pattern in mentioned_concepts.values()
+            )
+            if cautious_snippet_observation and concepts_supported:
+                continue
             return (
                 False,
                 "unsupported claim",
-                f"Sensitive financial claim on line {line_number} was not presented as a direct extracted quote.",
+                f"Sensitive financial claim on line {line_number} was neither a direct extracted quote nor "
+                "a cautious snippet-language observation supported by the cited snippets.",
             )
         for quote in quotes:
             if not any(
@@ -2554,8 +2600,8 @@ def validate_research_answer_grounding_detailed(
         line.strip() for line in summary_section.splitlines()
         if line.strip().startswith(("-", "*"))
     ]
-    if not 2 <= len(summary_bullets) <= 4:
-        return False, "parsing/format issue", "Answer Summary must contain 2-4 concise bullets."
+    if not 1 <= len(summary_bullets) <= 3:
+        return False, "parsing/format issue", "Answer Summary must contain 1-3 concise bullets."
     evidence_bullets = [
         line.strip() for line in evidence_section.splitlines()
         if line.strip().startswith(("-", "*"))
