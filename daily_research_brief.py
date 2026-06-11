@@ -2410,40 +2410,148 @@ def build_research_answer_payload(query: str, results: pd.DataFrame, *, max_resu
     )
 
 
-def validate_research_answer_grounding(text: str, results: pd.DataFrame) -> bool:
-    required = ["## Answer Summary", "## Top Matching Evidence", "## Source Files", "## Caveats / Manual Verification"]
-    if not text or not all(section in text for section in required):
-        return False
+def validate_research_answer_grounding_detailed(
+    text: str,
+    results: pd.DataFrame,
+) -> Tuple[bool, str, str]:
+    """Validate Historical Q&A answers and return a user-readable failure reason."""
+    required = [
+        "## Answer Summary", "## Top Matching Evidence",
+        "## Source Files", "## Caveats / Manual Verification",
+    ]
+    if not str(text or "").strip():
+        return False, "empty response", "OpenAI returned no answer text."
+    missing_sections = [section for section in required if section not in text]
+    if missing_sections:
+        return (
+            False,
+            "parsing/format issue",
+            "Missing required section(s): " + ", ".join(missing_sections),
+        )
+    if not isinstance(results, pd.DataFrame) or results.empty:
+        return False, "parsing/format issue", "No top search results were available for validation."
+
+    rows = results.to_dict(orient="records")
     source_names = {
-        str(value)
-        for value in results.get("file_name", pd.Series(dtype=str)).astype(str)
-        if str(value)
+        str(row.get("file_name") or "").strip()
+        for row in rows
+        if str(row.get("file_name") or "").strip()
     }
-    for line in text.splitlines():
+    if not source_names:
+        return False, "parsing/format issue", "Top search results did not contain source filenames."
+
+    cited_labels = [
+        value.strip().strip("`").strip()
+        for value in re.findall(r"(?:\[?Source:\s*)([^\]\n]+?)(?:\]|$)", text, flags=re.IGNORECASE)
+        if value.strip()
+    ]
+    unknown_labels = sorted({label for label in cited_labels if label not in source_names})
+    if unknown_labels:
+        return (
+            False,
+            "unknown source",
+            "Cited source filename(s) were not present in the provided top results: "
+            + ", ".join(unknown_labels[:10]),
+        )
+    mentioned_files = {
+        match.strip()
+        for match in re.findall(
+            r"`([^`\n]+\.(?:pdf|xlsx?|csv|txt|md))`",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match.strip()
+    }
+    unknown_mentions = sorted(
+        mentioned for mentioned in mentioned_files
+        if mentioned not in source_names
+    )
+    if unknown_mentions:
+        return (
+            False,
+            "unknown source",
+            "Mentioned source filename(s) were not present in the provided top results: "
+            + ", ".join(unknown_mentions[:10]),
+        )
+
+    buy_sell_pattern = (
+        r"\b(?:we|investors?|geoff|mitko|you)\s+should\s+(?:buy|sell)\b"
+        r"|\bwe recommend (?:buying|selling)\b"
+        r"|(?:^|\n)\s*[-*]?\s*(?:buy|sell)\s+(?:recommendation|rating)?\b"
+    )
+    if re.search(buy_sell_pattern, text, flags=re.IGNORECASE):
+        return False, "unsupported claim", "The answer included a prohibited buy/sell recommendation."
+
+    research_sensitive_patterns = [
+        *SENSITIVE_FINANCE_PATTERNS,
+        r"\bratings?\b", r"\bprice targets?\b", r"\bestimates?\b",
+        r"\b(?:buy|sell|outperform|underperform|overweight|underweight|market weight|neutral)\b",
+        r"\bleverage\b", r"\bdebt\b", r"\bcash flow\b", r"\bcredit concern\b",
+    ]
+    section = ""
+    substantive_sections = {"## Answer Summary", "## Top Matching Evidence"}
+    for line_number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
-        if stripped.startswith("-") and source_names and not any(name in stripped for name in source_names):
-            return False
-    claim_text = text.split("## Caveats / Manual Verification", 1)[0]
-    for line in claim_text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or stripped.startswith("Question:"):
+        if stripped in required:
+            section = stripped
             continue
-        if not any(re.search(pattern, stripped, flags=re.IGNORECASE) for pattern in SENSITIVE_FINANCE_PATTERNS):
+        if not stripped or stripped.startswith("#") or stripped.startswith("Generation method:"):
             continue
+
         cited_rows = [
-            row for _, row in results.iterrows()
-            if str(row.get("file_name") or "") in stripped
+            row for row in rows
+            if str(row.get("file_name") or "") and str(row.get("file_name") or "") in stripped
         ]
+        if section in substantive_sections and not cited_rows:
+            return (
+                False,
+                "missing source filenames",
+                f"Substantive claim on line {line_number} did not cite an exact top-result filename: {stripped[:240]}",
+            )
+
+        sensitive = any(
+            re.search(pattern, stripped, flags=re.IGNORECASE)
+            for pattern in research_sensitive_patterns
+        )
+        if not sensitive or section == "## Caveats / Manual Verification":
+            continue
+        if not cited_rows:
+            return (
+                False,
+                "unsupported claim",
+                f"Sensitive financial claim on line {line_number} did not cite a source filename: {stripped[:240]}",
+            )
         quotes = [quote.strip() for quote in re.findall(r'"([^"]+)"', stripped) if quote.strip()]
-        if not cited_rows or not quotes:
-            return False
+        if not quotes:
+            return (
+                False,
+                "unsupported claim",
+                f"Sensitive financial claim on line {line_number} was not presented as a direct extracted quote.",
+            )
         for quote in quotes:
             if not any(
                 quote.casefold() in str(row.get("extracted_snippet") or "").casefold()
                 for row in cited_rows
             ):
-                return False
-    return True
+                return (
+                    False,
+                    "unsupported claim",
+                    f"Quoted financial evidence on line {line_number} was not found in the cited source snippet.",
+                )
+
+    evidence_section = text.split("## Top Matching Evidence", 1)[1].split("## Source Files", 1)[0]
+    evidence_bullets = [
+        line.strip() for line in evidence_section.splitlines()
+        if line.strip().startswith(("-", "*"))
+    ]
+    if evidence_bullets and not all(any(name in bullet for name in source_names) for bullet in evidence_bullets):
+        return False, "missing source filenames", "One or more evidence bullets omitted an exact source filename."
+    return True, "", ""
+
+
+def validate_research_answer_grounding(text: str, results: pd.DataFrame) -> bool:
+    valid, _, _ = validate_research_answer_grounding_detailed(text, results)
+    return valid
 
 
 def _attention_reason(group: pd.DataFrame, *, ticker: str) -> str:

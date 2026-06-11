@@ -5877,7 +5877,7 @@ def _generate_historical_research_answer_with_optional_llm(
     results_df,
     *,
     mode: str,
-) -> Tuple[str, str, str]:
+) -> Tuple[str, str, str, Dict[str, str]]:
     max_results = 20 if mode == "Deeper answer" else 10
     fallback = daily_research_brief.build_deterministic_research_answer(
         query,
@@ -5886,9 +5886,9 @@ def _generate_historical_research_answer_with_optional_llm(
     )
     api_key = os.getenv("OPENAI_API_KEY") or ""
     if not api_key:
-        return fallback, "deterministic_fallback", "missing_api_key"
+        return fallback, "deterministic_fallback", "missing_api_key", {}
     if results_df.empty:
-        return fallback, "deterministic_fallback", "no_search_results"
+        return fallback, "deterministic_fallback", "no_search_results", {}
 
     evidence = daily_research_brief.build_research_answer_payload(
         query,
@@ -5897,12 +5897,16 @@ def _generate_historical_research_answer_with_optional_llm(
     )
     system_prompt = (
         "Answer a historical investment-research question using only the supplied compact search results. "
+        "You may not cite, mention, or rely on any file that is not present in the supplied results. "
         "Never invent financial conclusions or broker views. Metadata supports only file existence, date, "
         "ticker, broker/source, category, document type, priority, and relevance. If extracted_snippet is "
         "empty, label the result `metadata match only`. Do not state ratings, price targets, EPS, revenue, "
         "guidance, estimates, margins, liquidity, valuation, credit conclusions, upgrades, downgrades, "
-        "beats, or misses unless the exact claim is directly present in extracted_snippet. Every evidence "
-        "bullet and every source-file bullet must cite a supplied file_name. Clearly distinguish extracted-"
+        "beats, or misses unless the exact statement is copied as a direct quote from extracted_snippet. "
+        "Do not provide a buy or sell recommendation. Every substantive bullet and every source-file bullet "
+        "must cite one exact supplied file_name using `Source: <exact file_name>` or "
+        "`[Source: <exact file_name>]`. Copy file_name exactly, including spaces and extension. "
+        "Clearly distinguish extracted-"
         "snippet evidence from metadata-only matches. Use prose, not bullets, for summary and caveats. Use "
         "cautious wording and recommend source-PDF review when evidence is weak."
     )
@@ -5910,7 +5914,10 @@ def _generate_historical_research_answer_with_optional_llm(
         "Create concise Markdown with exactly these sections: Answer Summary, Top Matching Evidence, "
         "Source Files, and Caveats / Manual Verification. Do not include unsupported claims. "
         "Do not cite files outside the supplied results. State how many top results contain extracted snippets "
-        "versus metadata-only matches.\n\n"
+        "versus metadata-only matches. In Answer Summary and Top Matching Evidence, use bullets and end every "
+        "bullet with `[Source: <exact file_name>]`. In Source Files, list only exact file_name values and use "
+        "`Source: <exact file_name>`. Caveats may be uncited prose. For sensitive financial information, quote "
+        "the supplied extracted_snippet verbatim and cite that same source filename.\n\n"
         f"Search evidence JSON:\n{evidence}"
     )
     text, error = chat_completion_text(
@@ -5924,10 +5931,29 @@ def _generate_historical_research_answer_with_optional_llm(
         max_tokens=2400 if mode == "Deeper answer" else 1400,
     )
     if error:
-        return fallback, "deterministic_fallback", error
-    if text and daily_research_brief.validate_research_answer_grounding(text, results_df.head(max_results)):
-        return daily_research_brief.add_generation_method(text, "openai_refined"), "openai_refined", ""
-    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
+        return fallback, "deterministic_fallback", error, {}
+    valid, reason, detail = daily_research_brief.validate_research_answer_grounding_detailed(
+        text,
+        results_df.head(max_results),
+    )
+    if valid:
+        return (
+            daily_research_brief.add_generation_method(text, "openai_refined"),
+            "openai_refined",
+            "",
+            {},
+        )
+    debug = {
+        "reason": reason or "parsing/format issue",
+        "detail": detail or "Grounding validation failed without additional detail.",
+        "response_preview": str(text or "")[:1000],
+        "expected_format": (
+            "Every substantive/evidence bullet must cite an exact top-result filename using "
+            "`Source: <exact file_name>` or `[Source: <exact file_name>]`. Sensitive financial "
+            "claims must be direct quotes from the cited extracted_snippet."
+        ),
+    }
+    return fallback, "deterministic_fallback", f"grounding_failed: {debug['reason']}", debug
 
 
 def _show_openai_fallback_warning(warning: str) -> None:
@@ -5942,6 +5968,11 @@ def _show_openai_fallback_warning(warning: str) -> None:
         st.warning(
             "OpenAI refinement returned an answer that failed grounding checks; "
             "the conservative deterministic fallback is shown."
+        )
+    elif warning.startswith("grounding_failed:"):
+        st.warning(
+            "OpenAI refinement failed grounding validation; the conservative deterministic fallback is shown. "
+            f"Reason: {warning.split(':', 1)[1].strip()}."
         )
     elif warning == "insufficient_extracted_text":
         st.warning("OpenAI refinement was skipped because extracted text was insufficient.")
@@ -6839,6 +6870,7 @@ def draw_daily_research_brief_section() -> None:
             exact=[
                 "research_index_df", "indexed_sources", "last_search_query", "search_results_df",
                 "grounded_answer_markdown", "generation_method", "historical_answer_warning",
+                "historical_answer_grounding_debug",
             ],
             prefixes=["daily_research_search_"],
         )
@@ -6933,6 +6965,7 @@ def draw_daily_research_brief_section() -> None:
                 st.session_state.pop("grounded_answer_markdown", None)
                 st.session_state.pop("generation_method", None)
                 st.session_state.pop("historical_answer_warning", None)
+                st.session_state.pop("historical_answer_grounding_debug", None)
 
         search_results_df = st.session_state.get("search_results_df")
         search_results_ready = isinstance(search_results_df, pd.DataFrame) and not search_results_df.empty
@@ -6970,7 +7003,7 @@ def draw_daily_research_brief_section() -> None:
 
         if answer_clicked and search_results_ready:
             with st.spinner("Generating a grounded answer from compact search results..."):
-                grounded_answer, answer_method, answer_warning = (
+                grounded_answer, answer_method, answer_warning, grounding_debug = (
                     _generate_historical_research_answer_with_optional_llm(
                         st.session_state.get("last_search_query") or search_query,
                         search_results_df,
@@ -6980,6 +7013,7 @@ def draw_daily_research_brief_section() -> None:
             st.session_state["grounded_answer_markdown"] = grounded_answer
             st.session_state["generation_method"] = answer_method
             st.session_state["historical_answer_warning"] = answer_warning
+            st.session_state["historical_answer_grounding_debug"] = grounding_debug
             st.success("Grounded research answer generated.")
 
         grounded_answer = st.session_state.get("grounded_answer_markdown") or ""
@@ -6989,6 +7023,22 @@ def draw_daily_research_brief_section() -> None:
                 f"{st.session_state.get('generation_method') or 'deterministic_fallback'}"
             )
             _show_openai_fallback_warning(st.session_state.get("historical_answer_warning") or "")
+            grounding_debug = st.session_state.get("historical_answer_grounding_debug") or {}
+            if grounding_debug:
+                with st.expander("OpenAI grounding validation debug"):
+                    st.write(f"**Reason validation failed:** {grounding_debug.get('reason') or 'Unknown'}")
+                    st.write(f"**Validation detail:** {grounding_debug.get('detail') or 'No detail available.'}")
+                    st.write(
+                        "**Expected citation/source format:** "
+                        f"{grounding_debug.get('expected_format') or 'Source: <exact file_name>'}"
+                    )
+                    st.text_area(
+                        "First 1000 characters of OpenAI response",
+                        value=grounding_debug.get("response_preview") or "",
+                        height=260,
+                        disabled=True,
+                        key="daily_research_search_grounding_debug_preview",
+                    )
             st.markdown(grounded_answer)
             st.download_button(
                 "Download grounded answer Markdown",
