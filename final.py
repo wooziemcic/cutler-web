@@ -5703,17 +5703,16 @@ def _generate_broker_comparison_with_optional_llm(
         return fallback, "grounded_deterministic", "insufficient_extracted_text"
 
     system_prompt = (
-        "Rewrite only for clarity and readability. Do not add facts. Do not remove headings. Do not remove or "
-        "change filenames. Do not rewrite financial claims. Preserve every citation exactly. If you cannot "
-        "improve safely, return the original text unchanged. Preserve every Markdown table row, quoted excerpt, "
-        "required heading, filename, citation, and source reference exactly. Do not regenerate or reformat tables. "
-        "You may only make surrounding wording concise, reduce jargon, and improve readability. The deterministic "
-        "evidence tables and broker comparison are the source of truth. Do not create new consensus themes, broker "
-        "views, differences, or conclusions. If unsure, return the original text unchanged."
+        "You are polishing a source-grounded research answer based only on retrieved snippets and metadata. "
+        "You may rephrase and summarize for clarity, but do not add facts beyond the provided evidence. Keep the "
+        "answer concise and professional. You may summarize broker/source themes in readable English, but do not "
+        "invent broker views or financial conclusions. Do not claim you reviewed full PDFs. Do not provide "
+        "buy/sell/hold advice. Include a `## Source References` section listing exact retrieved filenames."
     )
     user_prompt = (
         "Polish the following grounded deterministic Broker Consensus Comparator Markdown. Return only the "
-        "complete Markdown report. Preserve all evidence and protected content exactly.\n\n"
+        "complete, readable Markdown report. Keep the source-grounded comparison concise and include exact "
+        "retrieved filenames under Source References.\n\n"
         f"{fallback}"
     )
     text, error = chat_completion_text(
@@ -5734,25 +5733,19 @@ def _generate_broker_comparison_with_optional_llm(
         for value in [item.get("relative_path"), item.get("file_name")]
         if value
     ]
-    preserved, preservation_reason = daily_research_brief.validate_openai_rewrite_preservation(
-        fallback,
+    sources.extend(files_df.get("file_name", []))
+    sources.extend(files_df.get("relative_path", []))
+    polished_safe, polish_reason = daily_research_brief.validate_openai_polish_grounding(
         text,
-        required_headings=[
-            "## Files Compared", "## Key Extracted Evidence", "## Broker-by-Broker Summary",
-            "## Consensus Themes", "## Divergences / Differences", "## Items to Verify",
-            "## Source References",
-        ],
         allowed_sources=sources,
+        allowed_tickers=files_df.get("ticker", []),
+        allowed_brokers=files_df.get("source_or_broker", []),
+        context_text=fallback,
     )
-    claims_safe, claims_reason = daily_research_brief.validate_openai_rewrite_new_claims(
-        fallback,
-        text,
-        snippets,
-    )
-    if preserved and claims_safe:
+    if polished_safe:
         return text, "openai_polished", ""
     return fallback, "grounded_deterministic", (
-        f"grounding_failed: {preservation_reason or claims_reason or 'rewrite failed grounding'}"
+        f"grounding_failed: {polish_reason or 'polish failed grounding'}"
     )
 
 
@@ -5778,17 +5771,17 @@ def _generate_ticker_memo_with_optional_llm(
         return fallback, "grounded_deterministic", "insufficient_extracted_text"
 
     system_prompt = (
-        "Rewrite only for clarity and readability. Do not add facts. Do not remove headings. Do not remove or "
-        "change filenames. Do not rewrite financial claims. Preserve every citation exactly. If you cannot "
-        "improve safely, return the original text unchanged. Preserve every Markdown table row, quoted excerpt, "
-        "required heading, filename, citation, and source reference exactly. Do not regenerate or reformat tables. "
-        "You may only make surrounding wording concise, less repetitive, and easier to read. The deterministic "
-        "evidence table is the source of truth. Do not create bullish or bearish conclusions. If unsure, return "
-        "the original text unchanged."
+        "You are polishing a source-grounded research answer based only on retrieved snippets and metadata. "
+        "You may rephrase and summarize for clarity, but do not add facts beyond the provided evidence. Create a "
+        "clean concise memo with an executive summary, key evidence themes, credit/earnings/valuation notes where "
+        "supported, risks/open questions, and source references. Do not invent bullish or bearish conclusions, "
+        "claim you reviewed full PDFs, or provide buy/sell/hold advice. Include a `## Source References` section "
+        "listing exact retrieved filenames."
     )
     user_prompt = (
         "Polish the following grounded deterministic Ticker-Level Memo Markdown. Return only the complete "
-        "Markdown report. Preserve all evidence and protected content exactly.\n\n"
+        "Markdown report. Make it concise and readable while retaining exact retrieved filenames under Source "
+        "References.\n\n"
         f"{fallback}"
     )
     text, error = chat_completion_text(
@@ -5809,27 +5802,19 @@ def _generate_ticker_memo_with_optional_llm(
         for value in [item.get("relative_path"), item.get("file_name")]
         if value
     ]
-    preserved, preservation_reason = daily_research_brief.validate_openai_rewrite_preservation(
-        fallback,
+    sources.extend(files_df.get("file_name", []))
+    sources.extend(files_df.get("relative_path", []))
+    polished_safe, polish_reason = daily_research_brief.validate_openai_polish_grounding(
         text,
-        required_headings=[
-            "## Files Reviewed", "## Executive Summary", "## Document Coverage Overview",
-            "## Key Extracted Evidence", "## Broker / Source Views", "## Credit / Balance Sheet Notes",
-            "## Earnings / Operating Notes", "## Potential Bullish Evidence",
-            "## Potential Bearish / Risk Evidence", "## Open Questions for Geoff/Mitko",
-            "## Recommended Next Steps", "## Source References",
-        ],
         allowed_sources=sources,
+        allowed_tickers=files_df.get("ticker", []),
+        allowed_brokers=files_df.get("source_or_broker", []),
+        context_text=fallback,
     )
-    claims_safe, claims_reason = daily_research_brief.validate_openai_rewrite_new_claims(
-        fallback,
-        text,
-        snippets,
-    )
-    if preserved and claims_safe:
+    if polished_safe:
         return text, "openai_polished", ""
     return fallback, "grounded_deterministic", (
-        f"grounding_failed: {preservation_reason or claims_reason or 'rewrite failed grounding'}"
+        f"grounding_failed: {polish_reason or 'polish failed grounding'}"
     )
 
 
@@ -5911,17 +5896,16 @@ def _generate_historical_research_answer_with_optional_llm(
         return fallback, "grounded_deterministic", "no_search_results", {}
 
     system_prompt = (
-        "Rewrite only for clarity and readability. Do not add facts. Do not remove headings. Do not remove or "
-        "change filenames. Do not rewrite financial claims. Preserve every citation exactly. If you cannot "
-        "improve safely, return the original text unchanged. Preserve every quoted excerpt, required heading, "
-        "filename citation, and source reference exactly. Keep Answer Summary "
-        "to 2-3 bullets and Top Matching Evidence to no more than 5 bullets. Do not create broad summary claims. "
-        "You may only make wording concise, reduce jargon, and improve readability. If unsure, return the original "
-        "text unchanged."
+        "You are polishing a source-grounded research answer based only on retrieved snippets and metadata. "
+        "You may rephrase for clarity, but do not add facts beyond the provided evidence. Keep the answer concise "
+        "and professional. Use 3-5 bullets for the answer summary, 3-5 key evidence bullets, a Source References "
+        "section listing exact retrieved filenames, and a brief caveat. Do not claim you reviewed full PDFs and "
+        "do not provide buy/sell/hold advice."
     )
     user_prompt = (
         "Polish the following grounded deterministic Historical Research Q&A Markdown. Return only the complete "
-        "Markdown answer. Preserve all evidence and protected content exactly.\n\n"
+        "Markdown answer. Make it short and readable, and include exact retrieved filenames under Source "
+        "References.\n\n"
         f"{fallback}"
     )
     text, error = chat_completion_text(
@@ -5940,17 +5924,21 @@ def _generate_historical_research_answer_with_optional_llm(
             "detail": error,
         }
     top_results = results_df.head(max_results)
-    preserved, preservation_reason = daily_research_brief.validate_openai_rewrite_preservation(
-        fallback,
+    allowed_tickers = {
+        value.strip()
+        for column in ["ticker", "all_detected_tickers"]
+        for cell in top_results.get(column, [])
+        for value in str(cell or "").split(",")
+        if value.strip()
+    }
+    polished_safe, polish_reason = daily_research_brief.validate_openai_polish_grounding(
         text,
-        required_headings=[
-            "## Answer Summary", "## Top Matching Evidence",
-            "## Source Files", "## Caveats / Manual Verification",
-        ],
         allowed_sources=top_results.get("file_name", []),
+        allowed_tickers=allowed_tickers,
+        allowed_brokers=top_results.get("source_or_broker", []),
+        context_text=fallback,
     )
-    valid, reason, detail = daily_research_brief.validate_research_answer_grounding_detailed(text, top_results)
-    if preserved and valid:
+    if polished_safe:
         return (
             daily_research_brief.add_generation_method(text, "openai_polished"),
             "openai_polished",
@@ -5958,12 +5946,12 @@ def _generate_historical_research_answer_with_optional_llm(
             {},
         )
     debug = {
-        "reason": reason or ("rewrite preservation failed" if not preserved else "parsing/format issue"),
-        "detail": preservation_reason or detail or "Grounding validation failed without additional detail.",
+        "reason": "practical grounding check failed",
+        "detail": polish_reason or "OpenAI polish failed grounding without additional detail.",
         "response_preview": str(text or "")[:1000],
         "expected_format": (
-            "OpenAI polish must preserve every deterministic heading, filename, citation, quoted excerpt, "
-            "source reference, and financial keyword exactly."
+            "OpenAI polish must include exact retrieved filenames under Source References and avoid fabricated "
+            "facts, entities, advice, or claims of reviewing full PDFs."
         ),
     }
     return fallback, "grounded_deterministic", f"grounding_failed: {debug['reason']}", debug

@@ -2532,6 +2532,179 @@ def validate_openai_rewrite_new_claims(
     return True, ""
 
 
+def validate_openai_polish_grounding(
+    refined: str,
+    *,
+    context_text: str,
+    allowed_sources: Iterable[str],
+    allowed_tickers: Iterable[str] = (),
+    allowed_brokers: Iterable[str] = (),
+) -> Tuple[bool, str]:
+    """Apply a practical safety gate to readability-focused OpenAI polish."""
+    text = str(refined or "").strip()
+    context = str(context_text or "")
+    if len(text) < 180 or len([line for line in text.splitlines() if line.strip()]) < 4:
+        return False, "OpenAI polish was empty or too short."
+
+    if not re.search(r"(?im)^#{1,4}\s+(?:Sources Used|Source References)\s*$", text):
+        return False, "OpenAI polish did not include a Sources Used or Source References section."
+
+    sources = {
+        Path(str(source or "").replace("\\", "/")).name.strip()
+        for source in allowed_sources
+        if str(source or "").strip()
+    }
+    mentioned_sources = {
+        source for source in sources if source and source.casefold() in text.casefold()
+    }
+    if not mentioned_sources:
+        return False, "OpenAI polish did not include a recognizable retrieved source filename."
+
+    source_names_casefold = {source.casefold() for source in sources}
+    unknown_file_lines = [
+        line.strip() for line in text.splitlines()
+        if re.search(r"\.(?:pdf|xlsx?|csv|txt|md)\b", line, flags=re.IGNORECASE)
+        and not any(source in line.casefold() for source in source_names_casefold)
+    ]
+    if unknown_file_lines:
+        return False, "OpenAI polish introduced source filename(s) outside the retrieved context."
+
+    advice_pattern = (
+        r"\b(?:we|investors?|geoff|mitko|you)\s+should\s+(?:buy|sell|hold)\b"
+        r"|\bwe recommend (?:buying|selling|holding)\b"
+        r"|\b(?:buy|sell|hold)\s+recommendation\b"
+    )
+    if re.search(advice_pattern, text, flags=re.IGNORECASE):
+        return False, "OpenAI polish introduced a buy/sell/hold recommendation."
+    if re.search(
+        r"\b(?:reviewed|read|analyzed|analysed|examined)\s+(?:the\s+)?(?:full|entire)\s+"
+        r"(?:pdfs?|documents?|reports?)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False, "OpenAI polish incorrectly claimed that full PDFs or documents were reviewed."
+
+    known_tickers = {str(value).strip().upper() for value in allowed_tickers if str(value).strip()}
+    ticker_stopwords = TICKER_STOPWORDS | {
+        "AI", "API", "CSV", "PDF", "PDFS", "Q&A", "REITS", "SEC", "PT",
+        "AWS", "FCF", "MD", "RAG", "LLM", "OPENAI", "DCF", "WACC", "ROIC",
+        "ROE", "EBIT", "CAGR", "NIM", "NII", "CRE", "YOY", "QOQ", "YTD",
+        "LTM", "NTM", "GAAP",
+    }
+    ticker_candidates = {
+        token.upper()
+        for token in re.findall(r"(?<![A-Za-z0-9])\$?([A-Z]{2,5})(?![A-Za-z0-9])", text)
+        if token.upper() not in ticker_stopwords
+    }
+    context_ticker_candidates = {
+        token.upper()
+        for token in re.findall(r"(?<![A-Za-z0-9])\$?([A-Z]{2,5})(?![A-Za-z0-9])", context)
+        if token.upper() not in ticker_stopwords
+    }
+    fabricated_tickers = sorted(ticker_candidates - known_tickers - context_ticker_candidates)
+    if fabricated_tickers:
+        return False, "OpenAI polish introduced ticker-like identifier(s) outside the retrieved context."
+
+    known_brokers = {str(value).strip().casefold() for value in allowed_brokers if str(value).strip()}
+    context_casefold = context.casefold()
+    fabricated_brokers = sorted(
+        label for label, pattern in BROKER_PATTERNS
+        if re.search(pattern, text, flags=re.IGNORECASE)
+        and label.casefold() not in known_brokers
+        and not re.search(pattern, context_casefold, flags=re.IGNORECASE)
+    )
+    if fabricated_brokers:
+        return False, "OpenAI polish introduced broker/source name(s) outside the retrieved context."
+
+    month_pattern = (
+        r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+    )
+
+    def date_signatures(value: str) -> set[str]:
+        signatures = set()
+        for month, day, year in re.findall(
+            rf"\b({month_pattern})\s+(\d{{1,2}}),?\s+(\d{{2,4}})\b",
+            value,
+            flags=re.IGNORECASE,
+        ):
+            normalized_year = int(year) + (2000 if len(year) == 2 else 0)
+            try:
+                parsed = datetime.strptime(f"{month} {day} {normalized_year}", "%B %d %Y")
+                signatures.add(parsed.strftime("%Y-%m-%d"))
+            except ValueError:
+                pass
+        for month, day, year in re.findall(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b", value):
+            normalized_year = int(year) + (2000 if len(year) == 2 else 0)
+            try:
+                signatures.add(datetime(normalized_year, int(month), int(day)).strftime("%Y-%m-%d"))
+            except ValueError:
+                pass
+        return signatures
+
+    fabricated_dates = sorted(date_signatures(text) - date_signatures(context))
+    if fabricated_dates:
+        return False, "OpenAI polish introduced date(s) outside the retrieved context."
+
+    finance_patterns = {
+        "rating": r"\bratings?\b", "price target": r"\bprice[-\s]+targets?\b",
+        "EPS": r"\beps\b", "revenue": r"\brevenue\b", "guidance": r"\bguidance\b",
+        "estimate": r"\bestimates?\b", "capex": r"\bcapex\b|\bcapital expenditures?\b",
+        "free cash flow": r"\bfree cash flow\b|\bfcf\b", "margin": r"\bmargins?\b",
+        "liquidity": r"\bliquidity\b", "leverage": r"\bleverage\b", "debt": r"\bdebt\b",
+        "valuation": r"\bvaluation\b", "credit": r"\bcredit\b", "upgrade": r"\bupgrades?\b",
+        "downgrade": r"\bdowngrades?\b", "beat": r"\bbeats?\b", "miss": r"\bmiss(?:es|ed|ing)?\b",
+    }
+    unsupported_topics = sorted(
+        name for name, pattern in finance_patterns.items()
+        if re.search(pattern, text, flags=re.IGNORECASE)
+        and not re.search(pattern, context, flags=re.IGNORECASE)
+    )
+    if unsupported_topics:
+        return False, "OpenAI polish introduced financial topic(s) absent from the retrieved context."
+
+    financial_number_pattern = r"(?:\$\s*\d[\d,.]*|\b\d+(?:\.\d+)?\s*(?:%|bps|basis points?)\b)"
+    new_financial_numbers = {
+        value.casefold() for value in re.findall(financial_number_pattern, text, flags=re.IGNORECASE)
+    } - {
+        value.casefold() for value in re.findall(financial_number_pattern, context, flags=re.IGNORECASE)
+    }
+    if new_financial_numbers:
+        return False, "OpenAI polish introduced financial figure(s) absent from the retrieved context."
+
+    direction_patterns = {
+        "increased": r"\b(?:increased?|grew|rose|expanded|raised)\b",
+        "decreased": r"\b(?:decreased?|declined|fell|contracted|lowered|cut)\b",
+        "improved": r"\b(?:improved?|strengthened|stronger|positive)\b",
+        "deteriorated": r"\b(?:deteriorated|weakened|weaker|negative)\b",
+        "beat": r"\bbeat(?:s|en)?\b",
+        "miss": r"\bmiss(?:es|ed)?\b",
+    }
+    directional_topics = {
+        name: pattern for name, pattern in finance_patterns.items()
+        if name not in {"upgrade", "downgrade", "beat", "miss"}
+    }
+    unsupported_directions = []
+    for topic_name, topic_pattern in directional_topics.items():
+        if not re.search(topic_pattern, text, flags=re.IGNORECASE):
+            continue
+        for direction_name, direction_pattern in direction_patterns.items():
+            claim_pattern = (
+                rf"(?:{topic_pattern}).{{0,80}}(?:{direction_pattern})"
+                rf"|(?:{direction_pattern}).{{0,80}}(?:{topic_pattern})"
+            )
+            if (
+                re.search(claim_pattern, text, flags=re.IGNORECASE)
+                and not (
+                    re.search(topic_pattern, context, flags=re.IGNORECASE)
+                    and re.search(direction_pattern, context, flags=re.IGNORECASE)
+                )
+            ):
+                unsupported_directions.append(f"{topic_name} {direction_name}")
+    if unsupported_directions:
+        return False, "OpenAI polish introduced directional financial claim(s) absent from the retrieved context."
+    return True, ""
+
+
 def build_research_answer_payload(query: str, results: pd.DataFrame, *, max_results: int) -> str:
     fields = [
         "source_date", "ticker", "all_detected_tickers", "source_or_broker", "category",
