@@ -6925,7 +6925,7 @@ def draw_daily_research_brief_section() -> None:
                 exact=[
                     "research_index_df", "indexed_sources", "last_search_query", "search_results_df",
                     "grounded_answer_markdown", "generation_method", "historical_answer_warning",
-                    "historical_answer_grounding_debug",
+                    "historical_answer_grounding_debug", "historical_query_intent_reason",
                 ],
                 prefixes=["daily_research_search_"],
             )
@@ -6954,6 +6954,10 @@ def draw_daily_research_brief_section() -> None:
                 "Ask a research question",
                 placeholder="What did brokers say about AMZN?",
                 key="daily_research_search_query",
+            )
+            st.caption(
+                "Try: What did brokers say about AMZN? / Find reports mentioning capex / "
+                "Show credit reports mentioning liquidity / Which tickers had new broker coverage?"
             )
             filter_one, filter_two, filter_three = st.columns(3)
             with filter_one:
@@ -6991,6 +6995,27 @@ def draw_daily_research_brief_section() -> None:
                     key="daily_research_search_answer_mode",
                 )
 
+            active_filters = {
+                "ticker": "" if search_ticker == "All" else search_ticker,
+                "source_or_broker": "" if search_broker == "All" else search_broker,
+                "category": "" if search_category == "All" else search_category,
+                "document_type": "" if search_document_type == "All" else search_document_type,
+                "source_date": "" if search_date == "All" else search_date,
+            }
+            has_active_filters = any(active_filters.values())
+            intent_message = (
+                "This question does not appear to be about the indexed research. Ask about tickers, brokers, "
+                "documents, credit, earnings, guidance, filings, or extracted evidence."
+            )
+
+            def _reject_historical_query(reason: str) -> None:
+                st.session_state["historical_query_intent_reason"] = reason
+                for key in [
+                    "last_search_query", "search_results_df", "grounded_answer_markdown",
+                    "generation_method", "historical_answer_warning", "historical_answer_grounding_debug",
+                ]:
+                    st.session_state.pop(key, None)
+
             search_col, answer_col = st.columns(2)
             with search_col:
                 search_clicked = st.button(
@@ -6999,16 +7024,16 @@ def draw_daily_research_brief_section() -> None:
                     use_container_width=True,
                 )
             if search_clicked:
-                active_filters = {
-                    "ticker": "" if search_ticker == "All" else search_ticker,
-                    "source_or_broker": "" if search_broker == "All" else search_broker,
-                    "category": "" if search_category == "All" else search_category,
-                    "document_type": "" if search_document_type == "All" else search_document_type,
-                    "source_date": "" if search_date == "All" else search_date,
-                }
-                if not search_query.strip() and not any(active_filters.values()):
-                    st.warning("Enter a research question or select at least one filter.")
+                intent_valid, intent_reason = daily_research_brief.validate_research_query_intent(
+                    search_query,
+                    research_index_df,
+                    has_active_filters=has_active_filters,
+                )
+                if not intent_valid:
+                    _reject_historical_query(intent_reason)
+                    st.warning(intent_message)
                 else:
+                    st.session_state.pop("historical_query_intent_reason", None)
                     search_results = daily_research_brief.search_research_index(
                         research_index_df,
                         search_query,
@@ -7031,6 +7056,10 @@ def draw_daily_research_brief_section() -> None:
                     disabled=not search_results_ready,
                     use_container_width=True,
                 )
+
+            intent_reason = st.session_state.get("historical_query_intent_reason") or ""
+            if intent_reason and not search_clicked:
+                st.warning(intent_message)
 
             if isinstance(search_results_df, pd.DataFrame):
                 st.markdown("**Search Results**")
@@ -7057,19 +7086,29 @@ def draw_daily_research_brief_section() -> None:
                     )
 
             if answer_clicked and search_results_ready:
-                with st.spinner("Generating a grounded answer from compact search results..."):
-                    grounded_answer, answer_method, answer_warning, grounding_debug = (
-                        _generate_historical_research_answer_with_optional_llm(
-                            st.session_state.get("last_search_query") or search_query,
-                            search_results_df,
-                            mode=answer_mode,
+                intent_valid, intent_reason = daily_research_brief.validate_research_query_intent(
+                    search_query,
+                    research_index_df,
+                    has_active_filters=has_active_filters,
+                )
+                if not intent_valid:
+                    _reject_historical_query(intent_reason)
+                    st.warning(intent_message)
+                else:
+                    st.session_state.pop("historical_query_intent_reason", None)
+                    with st.spinner("Generating a grounded answer from compact search results..."):
+                        grounded_answer, answer_method, answer_warning, grounding_debug = (
+                            _generate_historical_research_answer_with_optional_llm(
+                                st.session_state.get("last_search_query") or search_query,
+                                search_results_df,
+                                mode=answer_mode,
+                            )
                         )
-                    )
-                st.session_state["grounded_answer_markdown"] = grounded_answer
-                st.session_state["generation_method"] = answer_method
-                st.session_state["historical_answer_warning"] = answer_warning
-                st.session_state["historical_answer_grounding_debug"] = grounding_debug
-                st.success("Grounded research answer generated.")
+                    st.session_state["grounded_answer_markdown"] = grounded_answer
+                    st.session_state["generation_method"] = answer_method
+                    st.session_state["historical_answer_warning"] = answer_warning
+                    st.session_state["historical_answer_grounding_debug"] = grounding_debug
+                    st.success("Grounded research answer generated.")
 
             grounded_answer = st.session_state.get("grounded_answer_markdown") or ""
             if grounded_answer:

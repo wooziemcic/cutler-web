@@ -2327,6 +2327,80 @@ def search_research_index(
     )
 
 
+def validate_research_query_intent(
+    query: str,
+    index_df: pd.DataFrame,
+    *,
+    has_active_filters: bool = False,
+) -> Tuple[bool, str]:
+    """Allow only questions that plausibly relate to the indexed investment research."""
+    query_text = str(query or "").strip()
+    if not query_text:
+        return (True, "") if has_active_filters else (False, "empty_query")
+
+    normalized = query_text.casefold()
+    irrelevant_patterns = [
+        r"\bhow are you\b", r"\btell me (?:a|another) joke\b", r"\bweather\b",
+        r"\bsports?\b", r"\bpolitics?\b", r"\bpresident\b", r"\belection\b",
+        r"\btrivia\b", r"\bwho are you\b", r"\bwhat is your name\b",
+        r"\bcurrent events?\b", r"\bnews today\b",
+    ]
+    if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in irrelevant_patterns):
+        return False, "irrelevant_query"
+
+    research_patterns = [
+        r"\btickers?\b", r"\bentities?\b", r"\bbrokers?\b", r"\bsources?\b",
+        r"\bdocuments?\b", r"\bfiles?\b", r"\bresearch\b", r"\breports?\b",
+        r"\bcredit\b", r"\bearnings?\b", r"\brevenue\b", r"\beps\b",
+        r"\bguidance\b", r"\bestimates?\b", r"\bratings?\b", r"\bprice targets?\b",
+        r"\bupgrades?\b", r"\bdowngrades?\b", r"\bliquidity\b", r"\bleverage\b",
+        r"\bdebt\b", r"\bcapex\b", r"\bcapital expenditures?\b", r"\bcash flow\b",
+        r"\bmargins?\b", r"\bvaluation\b", r"\brisk\b", r"\boutlook\b",
+        r"\bfilings?\b", r"\b10[\s-]?q\b", r"\b8[\s-]?k\b", r"\btranscripts?\b",
+        r"\bgreen street\b", r"\bsectors?\b", r"\bhigh[\s-]?priority\b",
+        r"\bbroker coverage\b", r"\bextracted evidence\b", r"\bsnippets?\b",
+    ]
+    if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in research_patterns):
+        return True, ""
+    if has_active_filters:
+        return True, ""
+    if not isinstance(index_df, pd.DataFrame) or index_df.empty:
+        return False, "no_index_match"
+
+    index_terms: set[str] = set()
+    for column in [
+        "ticker", "all_detected_tickers", "source_or_broker", "category",
+        "document_type", "file_name", "relative_path", "evidence_type",
+        "extracted_snippet",
+    ]:
+        if column not in index_df:
+            continue
+        for value in index_df[column].astype(str):
+            cleaned = value.strip().casefold()
+            if not cleaned:
+                continue
+            index_terms.add(cleaned)
+            index_terms.update(
+                token for token in re.findall(r"[a-z0-9][a-z0-9&._-]*", cleaned)
+                if len(token) >= 2
+            )
+
+    query_tokens = {
+        token for token in re.findall(r"[a-z0-9][a-z0-9&._-]*", normalized)
+        if len(token) >= 2
+        and token not in {
+            "a", "an", "and", "are", "about", "did", "do", "does", "find", "for",
+            "how", "in", "is", "me", "mention", "mentions", "of", "on", "say",
+            "said", "show", "the", "to", "what", "which", "with", "you",
+        }
+    }
+    if query_tokens & index_terms:
+        return True, ""
+    if any(term in normalized for term in index_terms if len(term) >= 4):
+        return True, ""
+    return False, "no_index_match"
+
+
 def build_deterministic_research_answer(
     query: str,
     results: pd.DataFrame,
