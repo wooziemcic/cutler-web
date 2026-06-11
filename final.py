@@ -1,5 +1,5 @@
-"""
-Cutler Capital — Hedge Fund Letter Scraper
+﻿"""
+Cutler Capital â€” Hedge Fund Letter Scraper
 ------------------------------------------
 Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
 by fund family and quarter. Uses an external hedge-fund letter database as the
@@ -243,9 +243,9 @@ def ensure_playwright_chromium_installed(show_messages: bool = True) -> bool:
     if found:
         return True  # Chromium already present
 
-    # Not found — try installing now
+    # Not found â€” try installing now
     if show_messages:
-        st.warning("Chromium not found. Installing Playwright browser… (this may take ~20–40 seconds)")
+        st.warning("Chromium not found. Installing Playwright browserâ€¦ (this may take ~20â€“40 seconds)")
 
     try:
         # Run: python -m playwright install chromium
@@ -280,7 +280,7 @@ def ensure_playwright_chromium_installed(show_messages: bool = True) -> bool:
 def _is_probable_ticker(s: str) -> bool:
     """
     Conservative check for equity tickers.
-    Allows 1–6 uppercase letters (e.g., AAPL, MSFT, ABBV).
+    Allows 1â€“6 uppercase letters (e.g., AAPL, MSFT, ABBV).
     """
     if not s:
         return False
@@ -408,7 +408,7 @@ def _clean_name(s: str) -> str:
     s = s.strip()
     s = re.sub(r"\[.*?\]", "", s)        # drop bracketed notes
     s = re.sub(r"\s+", " ", s)           # collapse spaces
-    return s.strip("-•· ")
+    return s.strip("-â€¢Â· ")
 
 def _parse_big_list(raw: str) -> List[str]:
     seen = set(); out: List[str] = []
@@ -430,7 +430,7 @@ ALL_FUND_NAMES = _parse_big_list(BIG_LIST_RAW)
 BATCH_COUNT = 7
 _batches = _chunk_round_robin(ALL_FUND_NAMES, BATCH_COUNT)
 RUNNABLE_BATCHES: Dict[str, List[str]] = {f"Batch {i+1}": b for i, b in enumerate(_batches)}
-BATCH8_NAME = "Batch 8 — Latest"  # dynamic weekly/latest mode
+BATCH8_NAME = "Batch 8 â€” Latest"  # dynamic weekly/latest mode
 
 
 # External data source URL (kept internal; not shown in UI)
@@ -592,7 +592,7 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
 
     for b in batches:
         for sym in b:
-            status.info(f"Run All: Seeking Alpha — fetching {sym} ({processed+1}/{total}) …")
+            status.info(f"Run All: Seeking Alpha â€” fetching {sym} ({processed+1}/{total}) â€¦")
             try:
                 raw_list = sa_api.fetch_analysis_list(sym, size=max_articles) or []
                 # Enrich with author credibility signals (followers / rating / etc.)
@@ -676,7 +676,7 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
                     if title:
                         header_parts.append(title)
                     if author:
-                        header_parts.append(f"— {author}")
+                        header_parts.append(f"â€” {author}")
                     header = " ".join(header_parts).strip()
 
                     meta_lines = []
@@ -757,7 +757,7 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
         excerpts_path = td_path / "sa_excerpts.json"
         excerpts_path.write_text(_json.dumps(combined, indent=2), encoding="utf-8")
         out_pdf = td_path / "sa_compiled.pdf"
-        status.info("Run All: Seeking Alpha — rendering compiled PDF…")
+        status.info("Run All: Seeking Alpha â€” rendering compiled PDFâ€¦")
         make_pdf.build_pdf(
             excerpts_json_path=str(excerpts_path),
             output_pdf_path=str(out_pdf),
@@ -767,7 +767,7 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index — Hit Tickers",
+            index_label="Index â€” Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -969,7 +969,7 @@ def _build_podcast_all_pdf(
     window_line = f"Lookback: last {days_back} days" if days_back else "Lookback: recent window"
     if group_label:
         window_line += f"\nPodcasts: {group_label}"
-    sections.append(("Podcast Intelligence — Overview", window_line))
+    sections.append(("Podcast Intelligence â€” Overview", window_line))
 
     # Summary table-ish block
     if mention_counts:
@@ -1036,7 +1036,7 @@ def _build_podcast_all_pdf(
                     prefix_parts.append(pname)
                 if ep_title:
                     prefix_parts.append(ep_title)
-                prefix = " — ".join(prefix_parts).strip()
+                prefix = " â€” ".join(prefix_parts).strip()
                 if prefix:
                     ev_lines.append(f"- {prefix}: {snip}")
                 else:
@@ -1044,12 +1044,12 @@ def _build_podcast_all_pdf(
                 shown += 1
 
         body_text = "\n".join(body_parts + ev_lines).strip() or "No summary available."
-        sections.append((f"{sym} — Podcast stance", body_text))
+        sections.append((f"{sym} â€” Podcast stance", body_text))
 
-    subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p ET} • {window_line.replace(chr(10),' • ')}"
+    subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p ET} â€¢ {window_line.replace(chr(10),' â€¢ ')}"
     return _build_text_pdf(
         output_path=output_path,
-        title="Cutler Capital — Podcast Intelligence (ALL)",
+        title="Cutler Capital â€” Podcast Intelligence (ALL)",
         subtitle=subtitle,
         sections=sections,
     )
@@ -1260,7 +1260,7 @@ def run_excerpt_and_build(
         make_pdf.build_pdf(
             excerpts_json_path=str(dst_json),
             output_pdf_path=str(out_pdf),
-            report_title=f"Cutler Capital Excerpts – {pdf_path.stem}",
+            report_title=f"Cutler Capital Excerpts â€“ {pdf_path.stem}",
             source_pdf_name=source_pdf_name or pdf_path.name,
             format_style="legacy",
             letter_date=letter_date,
@@ -1288,7 +1288,7 @@ def _overlay_single_page(w: float, h: float, left: str, mid: str, right: str) ->
     if left:
         c.drawString(L, h - T + 0.35 * 72, left)
     if mid:
-        text = (mid[:95] + '…') if len(mid) > 96 else mid
+        text = (mid[:95] + 'â€¦') if len(mid) > 96 else mid
         c.drawCentredString(w / 2.0, h - T + 0.35 * 72, text)
     if right:
         c.drawRightString(w - R, h - T + 0.35 * 72, right)
@@ -1424,17 +1424,17 @@ def compile_merged(batch: str, quarter: str, collected: List[Path], *, increment
     try:
         tickers_in_doc = _batch_hit_tickers_in_order(collected)
         if tickers_in_doc:
-            idx_pdf = CP_DIR / f"_{_safe(batch.replace('—', '-').replace('  ', ' ').strip())}_{quarter}_Index.pdf"
+            idx_pdf = CP_DIR / f"_{_safe(batch.replace('â€”', '-').replace('  ', ' ').strip())}_{quarter}_Index.pdf"
             built = _build_batch_index_pdf(
                 tickers_in_doc=tickers_in_doc,
                 out_pdf=idx_pdf,
-                label="Index — Hit Tickers",
+                label="Index â€” Hit Tickers",
             )
             if built and built.exists():
                 stamped_idx = _stamp_pdf(
                     built,
                     left=batch,
-                    mid="Index — Hit Tickers",
+                    mid="Index â€” Hit Tickers",
                     right=f"Run {_now_et():%Y-%m-%d %H:%M} ET",
                 )
                 m.append(str(stamped_idx))
@@ -1478,7 +1478,7 @@ def _get_sa_rapidapi_key() -> str:
     key = os.getenv("SA_RAPIDAPI_KEY")
     if not key:
         raise RuntimeError(
-            "SA_RAPIDAPI_KEY env var is not set – add it to your .env for Seeking Alpha Analysis."
+            "SA_RAPIDAPI_KEY env var is not set â€“ add it to your .env for Seeking Alpha Analysis."
         )
     return key
 
@@ -1648,7 +1648,7 @@ def fetch_sa_analysis_list(symbol: str, size: int = 10) -> list[dict]:
         publish_on = attrs.get("publishOn")
         title = attrs.get("title", "").strip()
 
-        # primary tickers come through as tag ids – we just keep them for debugging;
+        # primary tickers come through as tag ids â€“ we just keep them for debugging;
         # you already know which symbol you asked for.
         pt_data = ((rel.get("primaryTickers") or {}).get("data")) or []
         primary_ids = [
@@ -1703,7 +1703,7 @@ def clean_sa_html(html: str, max_len: Optional[int] = None) -> str:
     """
     Convert Seeking Alpha article HTML into clean, readable plain text.
 
-    - Turns block tags (p/div/br/li/h1–h6) into paragraph breaks.
+    - Turns block tags (p/div/br/li/h1â€“h6) into paragraph breaks.
     - Strips all other tags.
     - Normalises whitespace but *keeps* paragraph breaks.
     - Inserts spaces between digits and letters to fix things like
@@ -1747,7 +1747,7 @@ def clean_sa_html(html: str, max_len: Optional[int] = None) -> str:
     # 5) Optional truncation for model input
     if max_len and len(text) > max_len:
         cut = text[:max_len]
-        cut = cut.rsplit(" ", 1)[0]  # don’t cut in the middle of a word
+        cut = cut.rsplit(" ", 1)[0]  # donâ€™t cut in the middle of a word
         text = cut + " ..."
 
     return text
@@ -1773,7 +1773,7 @@ def build_sa_analysis_digest(
             date_str = art.published.split("T", 1)[0] if art.published else ""
             title = art.title or ""
             url = art.url or ""
-            lines.append(f"- {date_str} — {title} ({url})")
+            lines.append(f"- {date_str} â€” {title} ({url})")
         except Exception:
             continue
 
@@ -1782,7 +1782,7 @@ def build_sa_analysis_digest(
     system_msg = (
         "You are helping a fundamental portfolio manager at a small buy-side shop.\n"
         "You will receive a list of recent Seeking Alpha ANALYSIS articles for one ticker.\n"
-        "Write a concise bullet-point digest (4–7 bullets max) capturing:\n"
+        "Write a concise bullet-point digest (4â€“7 bullets max) capturing:\n"
         "- Overall stance (bullish / bearish / mixed) across authors\n"
         "- Key fundamental drivers mentioned (earnings, pipeline, margins, cash flow, etc.)\n"
         "- Any repeated risks or points of disagreement\n"
@@ -1868,7 +1868,7 @@ def clean_sa_html_to_markdown(raw_html: str) -> str:
 
 def draw_seeking_alpha_news_section() -> None:
     """
-    Seeking Alpha – Analysis articles by ticker (RapidAPI).
+    Seeking Alpha â€“ Analysis articles by ticker (RapidAPI).
 
     - Supports Batch mode (10 tickers per batch) and Manual mode (pick up to 10 tickers)
     - Caches fetched results in-session to avoid repeated API calls
@@ -2077,7 +2077,7 @@ def draw_seeking_alpha_news_section() -> None:
             st.rerun()
 
     ticker_name = _pretty_company_name(CUTLER_TICKERS.get(ticker))
-    st.markdown(f"**Currently viewing:** `{ticker}`" + (f" — {ticker_name}" if ticker_name else ""))
+    st.markdown(f"**Currently viewing:** `{ticker}`" + (f" â€” {ticker_name}" if ticker_name else ""))
 
     # ---------------- Controls ----------------
     max_articles = st.slider(
@@ -2247,7 +2247,7 @@ def draw_seeking_alpha_news_section() -> None:
         # Normalize/choose author field defensively
         author = (a.get("author") or a.get("author_name") or a.get("authorName") or "").strip()
 
-        exp_label = f"{i}. {title}" + (f" — {author}" if author else "")
+        exp_label = f"{i}. {title}" + (f" â€” {author}" if author else "")
         with st.expander(exp_label, expanded=False):
             if url:
                 st.markdown(f"Source: {url}")
@@ -2299,9 +2299,9 @@ def draw_seeking_alpha_news_section() -> None:
         )
 
         story = []
-        story.append(Paragraph("Cutler Capital – Seeking Alpha Export", styles["Title"]))
+        story.append(Paragraph("Cutler Capital â€“ Seeking Alpha Export", styles["Title"]))
         ts = datetime.now(ZoneInfo("America/New_York")).strftime("%m.%d.%y %I:%M %p ET")
-        story.append(Paragraph(f"Generated {escape(ts)} • Ticker: {escape(sym)}", styles["Normal"]))
+        story.append(Paragraph(f"Generated {escape(ts)} â€¢ Ticker: {escape(sym)}", styles["Normal"]))
         story.append(Spacer(1, 0.2 * inch))
 
         if digest_text:
@@ -2316,7 +2316,7 @@ def draw_seeking_alpha_news_section() -> None:
             url = a.get("url") or a.get("link") or ""
             body = (a.get("body_clean") or a.get("body") or "").strip()
 
-            story.append(Paragraph(f"{idx}. {escape(title)}" + (f" — {escape(author)}" if author else ""), styles["Heading3"]))
+            story.append(Paragraph(f"{idx}. {escape(title)}" + (f" â€” {escape(author)}" if author else ""), styles["Heading3"]))
             if url:
                 story.append(Paragraph(f"Source: {escape(url)}", styles["Normal"]))
                 story.append(Spacer(1, 0.08 * inch))
@@ -2374,7 +2374,7 @@ def draw_seeking_alpha_news_section() -> None:
 
                 # Ensure we have cached results for each ticker, even if user didn't click through Next/Prev
                 for i_sym, sym in enumerate(tickers_for_pdf):
-                    status.info(f"Preparing {sym} ({i_sym+1}/{len(tickers_for_pdf)}) for PDF…")
+                    status.info(f"Preparing {sym} ({i_sym+1}/{len(tickers_for_pdf)}) for PDFâ€¦")
                     progress.progress((i_sym)/max(1,len(tickers_for_pdf)))
                     ck_sym = _cache_key(sym, max_articles, model, include_ai_digest)
                     if ck_sym not in cache:
@@ -2458,7 +2458,7 @@ def draw_seeking_alpha_news_section() -> None:
                         if title:
                             header_bits.append(title)
                         if author:
-                            header_bits.append(f"— {author}")
+                            header_bits.append(f"â€” {author}")
                         header = " ".join(header_bits).strip()
                         if url:
                             header = f"{header}\nSource: {url}" if header else f"Source: {url}"
@@ -2562,7 +2562,7 @@ def draw_seeking_alpha_news_section() -> None:
 
                     out_pdf = td_path / "sa_compiled.pdf"
                     progress.progress(0.92)
-                    status.info("Rendering compiled PDF (Fund Families style)…")
+                    status.info("Rendering compiled PDF (Fund Families style)â€¦")
                     make_pdf.build_pdf(
                         excerpts_json_path=str(excerpts_path),
                         output_pdf_path=str(out_pdf),
@@ -2572,7 +2572,7 @@ def draw_seeking_alpha_news_section() -> None:
                         ai_score=True,
                         ai_model="heuristic",
                         include_index=True,
-                        index_label="Index — Hit Tickers",
+                        index_label="Index â€” Hit Tickers",
                     )
                     st.session_state["sa_pdf_bytes"] = out_pdf.read_bytes()
                     st.session_state["sa_pdf_name"] = pdf_name
@@ -2620,7 +2620,7 @@ def draw_substack_section():
       - per-ticker caps to control cost
       - compiled PDF export (skimmable, investment-grade) via make_pdf.py
     """
-    st.markdown("### Substack — recent posts (RapidAPI)")
+    st.markdown("### Substack â€” recent posts (RapidAPI)")
     st.caption(
         "We query Substack for recent, ticker-relevant posts and export a skimmable compiled PDF. "
         "Cost controls: strict lookback + per-ticker caps + we only fetch full post bodies for candidates "
@@ -2664,7 +2664,7 @@ def draw_substack_section():
 
     cached = st.session_state[cache_key].get(selected_ticker)
 
-    # Fetch button — only call API here
+    # Fetch button â€” only call API here
     run_clicked = st.button(
         f"Fetch Substack posts for {selected_ticker}",
         use_container_width=True,
@@ -2672,7 +2672,7 @@ def draw_substack_section():
     )
 
     if run_clicked:
-        with st.spinner("Querying Substack…"):
+        with st.spinner("Querying Substackâ€¦"):
             try:
                 cached = substack_excerpts.fetch_posts_for_ticker(
                     selected_ticker,
@@ -2703,8 +2703,8 @@ def draw_substack_section():
                 meta.append(author)
             if published:
                 meta.append(published[:19])
-            meta_s = " · ".join(meta)
-            header = f"{title}" + (f" — {meta_s}" if meta_s else "")
+            meta_s = " Â· ".join(meta)
+            header = f"{title}" + (f" â€” {meta_s}" if meta_s else "")
 
             with st.expander(header, expanded=False):
                 if url:
@@ -2712,8 +2712,8 @@ def draw_substack_section():
                 if excerpt:
                     max_chars = 4500
                     if len(excerpt) > max_chars:
-                        st.write(excerpt[:max_chars] + " …")
-                        st.caption("Truncated — open on Substack to read the full post.")
+                        st.write(excerpt[:max_chars] + " â€¦")
+                        st.caption("Truncated â€” open on Substack to read the full post.")
                     else:
                         st.write(excerpt)
                 else:
@@ -2786,12 +2786,12 @@ def draw_substack_section():
     if state and state.get("running") and (not state.get("done")):
         prog = st.progress(min(1.0, float(state.get("idx", 0)) / max(1, float(state.get("total", 1)))))
         status = st.empty()
-        status.info(f"Substack ALL — {state.get('idx', 0)}/{state.get('total', 0)} tickers processed…")
+        status.info(f"Substack ALL â€” {state.get('idx', 0)}/{state.get('total', 0)} tickers processedâ€¦")
 
         if state.get("error"):
             st.warning(state.get("error"))
 
-        with st.spinner("Continuing Substack build…"):
+        with st.spinner("Continuing Substack buildâ€¦"):
             _substack_all_run_step(state=state, batch_size=int(st.session_state.get("substack_all_batch_size", 3)), time_budget_s=float(st.session_state.get("substack_all_time_budget_s", 12.0)))
 
         st.session_state[run_key] = state
@@ -2833,7 +2833,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
     global_seen_post_ids: set[str] = set()
 
     for sym in universe:
-        status.info(f"Substack — fetching {sym} ({processed+1}/{total}) …")
+        status.info(f"Substack â€” fetching {sym} ({processed+1}/{total}) â€¦")
         try:
             posts = substack_excerpts.fetch_posts_for_ticker(
                 sym,
@@ -2862,7 +2862,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
                 if title:
                     header_parts.append(title)
                 if author:
-                    header_parts.append(f"— {author}")
+                    header_parts.append(f"â€” {author}")
                 header = " ".join(header_parts).strip()
 
                 meta_lines = []
@@ -2932,7 +2932,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
                     ):
                         continue
 
-                    if ("this week" in _low and "events" in _low) or (_t.count("■") + _t.count("❤") >= 4):
+                    if ("this week" in _low and "events" in _low) or (_t.count("â– ") + _t.count("â¤") >= 4):
                         continue
                     if len(_re.findall(r"(?:mon|tue|wed|thu|fri|sat|sun)", _low)) >= 3 and "feb" in _low:
                         continue
@@ -2986,7 +2986,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
     prog.empty()
     status.empty()
     if not combined:
-        combined = {"—": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
+        combined = {"â€”": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
 
     now_et = datetime.now(ZoneInfo("America/New_York"))
     pdf_name = f"{now_et.strftime('%m.%d.%y')} Substack ALL.pdf"
@@ -3008,7 +3008,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index — Hit Tickers",
+            index_label="Index â€” Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -3105,7 +3105,7 @@ def _sa_build_items_for_symbol(sym: str, *, max_articles: int, model: str) -> li
         if title:
             header_parts.append(title)
         if author:
-            header_parts.append(f"— {author}")
+            header_parts.append(f"â€” {author}")
         header = " ".join(header_parts).strip()
 
         meta_lines = []
@@ -3199,7 +3199,7 @@ def _runall_sa_step_incremental(*, universe: list[str], max_articles: int, model
     idx = max(0, min(idx, len(universe)))
 
     st.progress(float(idx) / float(total))
-    st.caption(f"Run All: Seeking Alpha progress — {idx}/{total} tickers")
+    st.caption(f"Run All: Seeking Alpha progress â€” {idx}/{total} tickers")
 
     if idx < len(universe):
         sym = universe[idx]
@@ -3237,7 +3237,7 @@ def _runall_sa_step_incremental(*, universe: list[str], max_articles: int, model
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index — Hit Tickers",
+            index_label="Index â€” Hit Tickers",
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(out_pdf.read_bytes())
@@ -3276,7 +3276,7 @@ def _substack_build_items_for_symbol(sym: str, *, lookback_days: int, max_posts:
         if title:
             header_parts.append(title)
         if author:
-            header_parts.append(f"— {author}")
+            header_parts.append(f"â€” {author}")
         header = " ".join(header_parts).strip()
 
         meta_lines = []
@@ -3338,7 +3338,7 @@ def _substack_build_items_for_symbol(sym: str, *, lookback_days: int, max_posts:
             ):
                 continue
 
-            if ("this week" in _low and "events" in _low) or (_t.count("■") + _t.count("❤") >= 4):
+            if ("this week" in _low and "events" in _low) or (_t.count("â– ") + _t.count("â¤") >= 4):
                 continue
             if len(_re.findall(r"\b(?:mon|tue|wed|thu|fri|sat|sun)\b", _low)) >= 3 and "feb" in _low:
                 continue
@@ -3411,7 +3411,7 @@ def _runall_substack_step_incremental(*, universe: list[str], lookback_days: int
     idx = max(0, min(idx, len(universe)))
 
     st.progress(float(idx) / float(total))
-    st.caption(f"Run All: Substack progress — {idx}/{total} tickers")
+    st.caption(f"Run All: Substack progress â€” {idx}/{total} tickers")
 
     if idx < len(universe):
         sym = universe[idx]
@@ -3434,7 +3434,7 @@ def _runall_substack_step_incremental(*, universe: list[str], lookback_days: int
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not combined:
-        combined = {"—": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
+        combined = {"â€”": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
@@ -3450,7 +3450,7 @@ def _runall_substack_step_incremental(*, universe: list[str], lookback_days: int
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index — Hit Tickers",
+            index_label="Index â€” Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -3479,7 +3479,7 @@ def _render_substack_compiled_pdf_from_combined(*, combined: dict[str, list[dict
     # If filters are very strict, it's possible to have zero qualifying hits.
     # We still generate a small PDF so the UI shows a download button (and Run All can proceed).
     if not combined or not any((v or []) for v in combined.values()):
-        combined = {"—": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
+        combined = {"â€”": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
@@ -3496,7 +3496,7 @@ def _render_substack_compiled_pdf_from_combined(*, combined: dict[str, list[dict
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index — Hit Tickers",
+            index_label="Index â€” Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -3890,7 +3890,7 @@ def _podcast_run_all_group_ids(n_groups: int = 9) -> list[list[str]]:
 
 
 def draw_podcast_intelligence_section():
-    st.subheader("Podcast Intelligence – Company mentions across finance podcasts")
+    st.subheader("Podcast Intelligence â€“ Company mentions across finance podcasts")
 
     # -------------------------
     # 0) Session cache init
@@ -3947,7 +3947,7 @@ def draw_podcast_intelligence_section():
     days_back = max(1, (date_to - date_from).days + 1)
     st.caption(
         f"{days_back} day lookback window "
-        f"({date_from.isoformat()} – {date_to.isoformat()})."
+        f"({date_from.isoformat()} â€“ {date_to.isoformat()})."
     )
 
     # -------------------------
@@ -4171,7 +4171,7 @@ def draw_podcast_intelligence_section():
 
                 # Build sections: stance summary + up to 25 evidence snippets
                 sections: list[tuple[str, str]] = []
-                sections.append((f"{tkr} – AI Podcast Stance", f"{stance_label}\n\n{stance_summary}"))
+                sections.append((f"{tkr} â€“ AI Podcast Stance", f"{stance_label}\n\n{stance_summary}"))
 
                 # Snippet evidence
                 ev_lines: list[str] = []
@@ -4180,16 +4180,16 @@ def draw_podcast_intelligence_section():
                     ep_title = sn.get("episode_title") or sn.get("episode") or sn.get("title") or ""
                     ep_date = sn.get("published_date") or sn.get("date") or sn.get("published") or ""
                     txt = sn.get("text") or sn.get("snippet") or ""
-                    header = f"{pod_name} — {ep_title}".strip(" —")
+                    header = f"{pod_name} â€” {ep_title}".strip(" â€”")
                     line = f"{i}. {header} ({ep_date}){txt}"
                     ev_lines.append(line.strip())
                 sections.append(("Episode snippets (evidence)", "\n\n".join(ev_lines) if ev_lines else "No snippets available in this window."))
 
-                subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} • Podcasts: {selected_group_label} • Window: {date_from} → {date_to}"
+                subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} â€¢ Podcasts: {selected_group_label} â€¢ Window: {date_from} â†’ {date_to}"
                 try:
                     pdf_path = _build_text_pdf(
                         output_path=out_path,
-                        title="Cutler Capital – Podcast Intelligence",
+                        title="Cutler Capital â€“ Podcast Intelligence",
                         subtitle=subtitle,
                         sections=sections,
                     )
@@ -4225,7 +4225,7 @@ def draw_podcast_intelligence_section():
                 title = s.get("title", "Untitled episode")
                 pod_name = s.get("podcast_name", s.get("podcast_id", ""))
                 pub = s.get("published", "")
-                header = f"{pod_name} – {title} ({pub[:10]})"
+                header = f"{pod_name} â€“ {title} ({pub[:10]})"
 
                 with st.expander(header):
                     st.write(s.get("snippet", ""))
@@ -4276,7 +4276,7 @@ def draw_podcast_intelligence_section():
         pod_id = ep.get("podcast_id", "Unknown podcast")
         title = ep.get("title", "Untitled episode")
         pub = (ep.get("published") or "")[:10]
-        header = f"{pod_id} – {title} ({pub})"
+        header = f"{pod_id} â€“ {title} ({pub})"
 
         with st.expander(header):
             summary = ep.get("summary") or ep.get(
@@ -4431,7 +4431,7 @@ def build_delta_pdf(old_manifest: Dict[str, Any], new_manifest: Dict[str, Any]) 
                     continue  # already existed in the older run
 
                 pages = item.get("pages") or []
-                decorated = f"[{meta.get('fund_family', 'Unknown')} – {meta.get('source_pdf_name', '')}] {txt}"
+                decorated = f"[{meta.get('fund_family', 'Unknown')} â€“ {meta.get('source_pdf_name', '')}] {txt}"
                 aggregated.setdefault(str(ticker), []).append(
                     {"text": decorated, "pages": pages}
                 )
@@ -4553,10 +4553,10 @@ def _last_completed_us_quarter(today: Optional[datetime] = None) -> Tuple[int, i
     """
     Given today's date, return (year, quarter) for the **last completed US quarter**.
     US quarters:
-      Q1: Jan–Mar
-      Q2: Apr–Jun
-      Q3: Jul–Sep
-      Q4: Oct–Dec
+      Q1: Janâ€“Mar
+      Q2: Aprâ€“Jun
+      Q3: Julâ€“Sep
+      Q4: Octâ€“Dec
     """
     if today is None:
         today = datetime.now()
@@ -4678,7 +4678,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                                 item.get("fund_name") or "",
                                 item.get("letter_date") or "",
                             ]
-                            label_text = " – ".join([b for b in label_bits if b])
+                            label_text = " â€“ ".join([b for b in label_bits if b])
 
                             if pdf_path.exists():
                                 try:
@@ -4700,7 +4700,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 
     # Ensure Chromium exists in this container (auto-install if needed)
     if not ensure_playwright_chromium_installed():
-        st.error("Cannot proceed — Chromium is not available.")
+        st.error("Cannot proceed â€” Chromium is not available.")
         return
 
     brands = RUNNABLE_BATCHES.get(batch_name, [])
@@ -4740,7 +4740,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
             page.goto(BSD_URL)
 
             for q in quarters:
-                st.write(f"Searching quarter {q} across {len(tokens)} fund families…")
+                st.write(f"Searching quarter {q} across {len(tokens)} fund familiesâ€¦")
 
                 if not _set_quarter(page, q):
                     st.warning(
@@ -4774,7 +4774,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                         st.info(f"[{q}] Skipping {brand} (already completed in this container).")
                         continue
 
-                    st.write(f"[{q}] {i}/{len(tokens)} — {brand} (search: {token})")
+                    st.write(f"[{q}] {i}/{len(tokens)} â€” {brand} (search: {token})")
 
                     try:
                         _search_by_fund(page, token)
@@ -4782,7 +4782,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 
                         if not hits:
                             # Brand was searched, but there were no letters for this quarter.
-                            # We still want to mark it as completed so we don’t search again.
+                            # We still want to mark it as completed so we donâ€™t search again.
                             pass
                         else:
                             seen = set()
@@ -4840,7 +4840,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 
                     except Exception as e:
                         st.error(f"Error on fund family {brand}: {e}")
-                        # do NOT mark this brand as done – we want to retry on next run
+                        # do NOT mark this brand as done â€“ we want to retry on next run
                         continue
 
                     # If we reach here, the search for this brand+quarter finished without error,
@@ -4891,7 +4891,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                                     item.get("fund_name") or "",
                                     item.get("letter_date") or "",
                                 ]
-                                label_text = " – ".join([b for b in label_bits if b])
+                                label_text = " â€“ ".join([b for b in label_bits if b])
 
                                 if pdf_path.exists():
                                     try:
@@ -4940,7 +4940,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 
 def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_word: bool, *, ensure_compiled_index: bool = False):
     """
-    Batch 8 — Latest direct flow:
+    Batch 8 â€” Latest direct flow:
     Chromium -> BSD login -> latest-table date match -> View letter page
     -> DOWNLOAD LETTER -> excerption / AI scoring -> compiled PDF.
 
@@ -5094,7 +5094,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         return
 
     if not _ensure_chromium_ready():
-        st.error("Cannot proceed — Chromium is not available.")
+        st.error("Cannot proceed â€” Chromium is not available.")
         return
 
     exact_lookup, norm_lookup = _build_fund_to_batch_lookup()
@@ -5133,10 +5133,10 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         page.set_default_timeout(30000)
 
         try:
-            st.write("Opening BSD database…")
+            st.write("Opening BSD databaseâ€¦")
             page.goto(BSD_URL, wait_until="domcontentloaded", timeout=45000)
 
-            st.write("Checking BSD login/session…")
+            st.write("Checking BSD login/sessionâ€¦")
             _ensure_bsd_logged_in(ctx, page)
             st.success("BSD login/session ready.")
 
@@ -5154,7 +5154,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
             except Exception:
                 pass
 
-            st.write(f"Matching latest table dates for window {start_date.isoformat()} → {today.isoformat()} …")
+            st.write(f"Matching latest table dates for window {start_date.isoformat()} â†’ {today.isoformat()} â€¦")
 
             rows = page.locator(TABLE_ROW)
             row_count = rows.count()
@@ -5164,7 +5164,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
 
             for i in range(row_count):
                 try:
-                    scan_status.info(f"Matching date row {i + 1}/{row_count}…")
+                    scan_status.info(f"Matching date row {i + 1}/{row_count}â€¦")
                     scan_prog.progress((i + 1) / max(1, row_count))
 
                     row = rows.nth(i)
@@ -5191,7 +5191,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     if not fund_name:
                         continue
 
-                    st.caption(f"[MATCH] {q_row} — {fund_name} ({letter_date_str})")
+                    st.caption(f"[MATCH] {q_row} â€” {fund_name} ({letter_date_str})")
 
                     hits_by_quarter.setdefault(q_row, []).append(
                         Hit(
@@ -5237,7 +5237,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     process_status.info(f"Processing letter {processed_count}/{total_hits}: {brand}")
                     process_prog.progress(processed_count / max(1, total_hits))
 
-                    st.write(f"[{q}] Latest — {brand} ({h.letter_date})")
+                    st.write(f"[{q}] Latest â€” {brand} ({h.letter_date})")
 
                     if _already_completed(brand, q):
                         st.info(f"[{q}] Already completed; recovering existing excerpt PDFs from disk.")
@@ -5378,7 +5378,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     seen_paths.add(rp)
                     deduped_excerpt_pdfs.append(Path(p))
 
-                st.write(f"[{q}] Compiling {len(deduped_excerpt_pdfs)} excerpt PDF(s)…")
+                st.write(f"[{q}] Compiling {len(deduped_excerpt_pdfs)} excerpt PDF(s)â€¦")
                 compiled = compile_merged(BATCH8_NAME, q, deduped_excerpt_pdfs, incremental=False)
 
                 if compiled and Path(compiled).exists():
@@ -5435,7 +5435,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
       - If table_rows unchanged => nothing to do.
       - If some rows are new/changed => downloads and processes only those.
     """
-    st.markdown(f"### Incremental update – {batch_name} / {quarter}")
+    st.markdown(f"### Incremental update â€“ {batch_name} / {quarter}")
 
     manifests = _load_manifests(batch_name, quarter)
     if not manifests:
@@ -5484,7 +5484,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
         page.set_default_timeout(30000)
         page.goto(BSD_URL)
 
-        st.write(f"Scanning BSD table for {batch_name} / {quarter} (no downloads yet)…")
+        st.write(f"Scanning BSD table for {batch_name} / {quarter} (no downloads yet)â€¦")
 
         if not _set_quarter(page, quarter):
             st.warning(
@@ -5496,7 +5496,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 
         # scan table rows for all brands
         for i, (brand, token) in enumerate(tokens, 1):
-            st.write(f"[{quarter}] {i}/{len(tokens)} — {brand} (search: {token})")
+            st.write(f"[{quarter}] {i}/{len(tokens)} â€” {brand} (search: {token})")
             try:
                 _search_by_fund(page, token)
                 hits = _parse_rows(page, quarter)
@@ -5530,7 +5530,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
             browser.close()
             return
 
-        st.write(f"Found {len(new_keys)} new or changed table rows. Downloading only those…")
+        st.write(f"Found {len(new_keys)} new or changed table rows. Downloading only thoseâ€¦")
 
         outs: List[Path] = []
         manifest_items: List[Dict[str, Any]] = []
@@ -5552,7 +5552,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
             processed_hrefs.add(href)
 
             try:
-                st.write(f"Downloading new/updated letter for {brand} – {fund_name} ({letter_date})")
+                st.write(f"Downloading new/updated letter for {brand} â€“ {fund_name} ({letter_date})")
                 page.goto(href)
                 page.wait_for_load_state("domcontentloaded")
 
@@ -5907,16 +5907,21 @@ def _generate_historical_research_answer_with_optional_llm(
         "must cite one exact supplied file_name using `Source: <exact file_name>` or "
         "`[Source: <exact file_name>]`. Copy file_name exactly, including spaces and extension. "
         "Clearly distinguish extracted-"
-        "snippet evidence from metadata-only matches. Use prose, not bullets, for summary and caveats. Use "
-        "cautious wording and recommend source-PDF review when evidence is weak."
+        "snippet evidence from metadata-only matches. Keep the answer short, practical, and free of unnecessary "
+        "investment jargon. Use cautious wording and recommend source-PDF review when evidence is weak."
     )
     user_prompt = (
-        "Create concise Markdown with exactly these sections: Answer Summary, Top Matching Evidence, "
-        "Source Files, and Caveats / Manual Verification. Do not include unsupported claims. "
+        "Return concise Markdown using exactly these heading lines and no other headings:\n"
+        "## Answer Summary\n"
+        "## Top Matching Evidence\n"
+        "## Source Files\n"
+        "## Caveats / Manual Verification\n\n"
+        "Use 2-4 short bullets in Answer Summary and no more than 5 short bullets in Top Matching Evidence. "
+        "Do not write long essays or include unsupported claims. "
         "Do not cite files outside the supplied results. State how many top results contain extracted snippets "
         "versus metadata-only matches. In Answer Summary and Top Matching Evidence, use bullets and end every "
         "bullet with `[Source: <exact file_name>]`. In Source Files, list only exact file_name values and use "
-        "`Source: <exact file_name>`. Caveats may be uncited prose. For sensitive financial information, quote "
+        "`Source: <exact file_name>`. Keep Caveats to 1-2 brief uncited sentences. For sensitive financial information, quote "
         "the supplied extracted_snippet verbatim and cite that same source filename.\n\n"
         f"Search evidence JSON:\n{evidence}"
     )
@@ -5928,7 +5933,7 @@ def _generate_historical_research_answer_with_optional_llm(
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.0,
-        max_tokens=2400 if mode == "Deeper answer" else 1400,
+        max_tokens=1400 if mode == "Deeper answer" else 900,
     )
     if error:
         return fallback, "deterministic_fallback", error, {}
@@ -6231,875 +6236,897 @@ def draw_daily_research_brief_section() -> None:
         "and lightly scans only the highest-priority supported documents."
     )
 
-    st.markdown("#### 1. Upload Daily Research Zip")
-    uploaded = st.file_uploader(
-        "Daily investment research folder (.zip)",
-        type=["zip"],
-        key="daily_uploaded_zip",
-        help="Large archives are written to a temporary session folder and processed only when you click Process Daily Zip.",
+    daily_main_tab, daily_history_tab, daily_broker_tab, daily_ticker_tab, daily_cross_tab, daily_brief_tab = st.tabs(
+        ["Main", "Historical Search", "Broker Consensus Comparator", "Ticker-Level Memo", "Cross-Day Comparison", "Generate Daily Brief"]
     )
-    cached_daily_zip = Path(str(st.session_state.get("daily_session_dir") or "")) / "daily_research.zip"
-    cached_daily_zip_available = cached_daily_zip.is_file()
-    if uploaded is None and cached_daily_zip_available:
-        st.info(
-            f"Using persisted uploaded archive: "
-            f"{st.session_state.get('daily_source_name') or cached_daily_zip.name}"
+
+    with daily_main_tab:
+        st.markdown("#### 1. Upload Daily Research Zip")
+        uploaded = st.file_uploader(
+            "Daily investment research folder (.zip)",
+            type=["zip"],
+            key="daily_uploaded_zip",
+            help="Large archives are written to a temporary session folder and processed only when you click Process Daily Zip.",
+        )
+        cached_daily_zip = Path(str(st.session_state.get("daily_session_dir") or "")) / "daily_research.zip"
+        cached_daily_zip_available = cached_daily_zip.is_file()
+        if uploaded is None and cached_daily_zip_available:
+            st.info(
+                f"Using persisted uploaded archive: "
+                f"{st.session_state.get('daily_source_name') or cached_daily_zip.name}"
+            )
+
+        st.markdown("#### 2. Processing Options")
+        mode = st.radio(
+            "Processing mode",
+            options=["Fast / low-cost", "Deeper summary"],
+            index=0,
+            horizontal=True,
+            key="daily_processing_mode",
+        )
+        if mode == "Deeper summary":
+            limits = {"max_files": 30, "max_pdf_pages": 5, "max_chars": 10000}
+        else:
+            limits = {"max_files": 15, "max_pdf_pages": 2, "max_chars": 4000}
+        st.caption(
+            f"Will lightly scan at most {limits['max_files']} files, "
+            f"{limits['max_pdf_pages']} PDF pages per file, and {limits['max_chars']:,} characters per file."
         )
 
-    st.markdown("#### 2. Processing Options")
-    mode = st.radio(
-        "Processing mode",
-        options=["Fast / low-cost", "Deeper summary"],
-        index=0,
-        horizontal=True,
-        key="daily_processing_mode",
-    )
-    if mode == "Deeper summary":
-        limits = {"max_files": 30, "max_pdf_pages": 5, "max_chars": 10000}
-    else:
-        limits = {"max_files": 15, "max_pdf_pages": 2, "max_chars": 4000}
-    st.caption(
-        f"Will lightly scan at most {limits['max_files']} files, "
-        f"{limits['max_pdf_pages']} PDF pages per file, and {limits['max_chars']:,} characters per file."
-    )
-
-    daily_inventory_state = st.session_state.get("daily_inventory_df")
-    daily_relevance_state = st.session_state.get("daily_relevance_df")
-    daily_selected_state = st.session_state.get("daily_selected_df")
-    daily_processing = bool(st.session_state.get("daily_processing", False))
-    daily_ready = (
-        isinstance(daily_inventory_state, pd.DataFrame)
-        and isinstance(daily_relevance_state, pd.DataFrame)
-        and isinstance(daily_selected_state, pd.DataFrame)
-        and "daily_selected_text" in st.session_state
-    )
-
-    process_col, generate_col, reset_col = st.columns(3)
-    with process_col:
-        process_clicked = st.button(
-            "Process Daily Zip",
-            key="daily_process_btn",
-            use_container_width=True,
-            disabled=daily_processing,
+        daily_inventory_state = st.session_state.get("daily_inventory_df")
+        daily_relevance_state = st.session_state.get("daily_relevance_df")
+        daily_selected_state = st.session_state.get("daily_selected_df")
+        daily_processing = bool(st.session_state.get("daily_processing", False))
+        daily_ready = (
+            isinstance(daily_inventory_state, pd.DataFrame)
+            and isinstance(daily_relevance_state, pd.DataFrame)
+            and isinstance(daily_selected_state, pd.DataFrame)
+            and "daily_selected_text" in st.session_state
         )
-    with generate_col:
+
+        process_col, reset_col = st.columns(2)
+        with process_col:
+            process_clicked = st.button(
+                "Process Daily Zip",
+                key="daily_process_btn",
+                use_container_width=True,
+                disabled=daily_processing,
+            )
+        with reset_col:
+            reset_clicked = st.button("Reset Daily Research Brief", key="daily_reset_btn", use_container_width=True)
+
+        if reset_clicked:
+            daily_research_brief.remove_session_dir(st.session_state.get("daily_session_dir"))
+            daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_previous_dir"))
+            daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_current_dir"))
+            _clear_session_keys(
+                exact=[
+                    "daily_uploaded_zip", "daily_processing_mode", "daily_session_dir",
+                    "daily_source_name", "daily_inventory_df", "daily_relevance_df",
+                    "daily_selected_df", "daily_selected_text", "daily_processing_limits",
+                    "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
+                    "daily_brief_warning", "daily_processing",
+                ],
+                prefixes=["daily_broker_comparison_", "daily_ticker_memo_", "daily_cross_day_"],
+            )
+            st.rerun()
+
+        if daily_ready and not daily_processing:
+            st.success(
+                f"Processed {len(daily_inventory_state)} file(s); lightly scanned "
+                f"{len(st.session_state.get('daily_selected_text') or [])} selected file(s). "
+                "Ready to generate daily brief."
+            )
+
+        if process_clicked:
+            if uploaded is None and not cached_daily_zip_available:
+                st.warning("Upload a ZIP file before processing.")
+            else:
+                st.session_state["daily_processing"] = True
+                _clear_session_keys(
+                    exact=[
+                        "daily_inventory_df",
+                        "daily_relevance_df", "daily_selected_df", "daily_selected_text",
+                        "daily_processing_limits", "daily_extract_warnings", "daily_brief_text",
+                        "daily_brief_method", "daily_brief_warning",
+                    ],
+                    prefixes=["daily_broker_comparison_", "daily_ticker_memo_"],
+                )
+                if uploaded is not None:
+                    old_dir = st.session_state.get("daily_session_dir")
+                    daily_research_brief.remove_session_dir(old_dir)
+                    session_dir = daily_research_brief.create_session_dir()
+                else:
+                    session_dir = Path(str(st.session_state.get("daily_session_dir")))
+                zip_path = session_dir / "daily_research.zip"
+                extract_root = session_dir / "extracted"
+                try:
+                    if uploaded is not None:
+                        uploaded.seek(0)
+                        with zip_path.open("wb") as dst:
+                            shutil.copyfileobj(uploaded, dst, length=1024 * 1024)
+
+                    records, warnings = daily_research_brief.safe_extract_zip(zip_path, extract_root)
+                    known_tickers = set(tickers.keys()) if isinstance(tickers, dict) else set()
+                    inventory_df = daily_research_brief.build_inventory(records, known_tickers=known_tickers)
+                    relevance_df = daily_research_brief.score_inventory(inventory_df)
+                    selected_df = daily_research_brief.select_files_for_text(relevance_df, limits["max_files"])
+                    selected_text = daily_research_brief.extract_selected_text(
+                        selected_df,
+                        max_pdf_pages=limits["max_pdf_pages"],
+                        max_chars_per_file=limits["max_chars"],
+                    )
+
+                    st.session_state["daily_session_dir"] = str(session_dir)
+                    st.session_state["daily_source_name"] = (
+                        uploaded.name if uploaded is not None
+                        else st.session_state.get("daily_source_name") or zip_path.name
+                    )
+                    st.session_state["daily_inventory_df"] = inventory_df
+                    st.session_state["daily_relevance_df"] = relevance_df
+                    st.session_state["daily_selected_df"] = selected_df
+                    st.session_state["daily_selected_text"] = selected_text
+                    st.session_state["daily_processing_limits"] = limits
+                    st.session_state["daily_extract_warnings"] = warnings
+                    st.session_state["daily_processing"] = False
+                    st.session_state.pop("daily_brief_text", None)
+                    st.session_state.pop("daily_brief_method", None)
+                    st.rerun()
+                except zipfile.BadZipFile:
+                    st.session_state["daily_processing"] = False
+                    daily_research_brief.remove_session_dir(session_dir)
+                    st.error("The uploaded file is not a valid ZIP archive.")
+                except Exception as exc:
+                    st.session_state["daily_processing"] = False
+                    daily_research_brief.remove_session_dir(session_dir)
+                    st.error(f"Daily ZIP processing failed: {exc}")
+
+        relevance_df = st.session_state.get("daily_relevance_df")
+        inventory_df = st.session_state.get("daily_inventory_df")
+        selected_df = st.session_state.get("daily_selected_df")
+        selected_text = st.session_state.get("daily_selected_text") or []
+
+        st.markdown("#### 3. Folder/File Inventory")
+        if isinstance(inventory_df, pd.DataFrame):
+            inventory_display_columns = [
+                "category", "ticker", "all_detected_tickers", "company_or_identifier", "source_or_broker", "document_type",
+                "file_name", "file_extension", "file_size_mb", "relative_path", "modified_date",
+                "extraction_status",
+            ]
+            st.dataframe(inventory_df[inventory_display_columns], use_container_width=True, hide_index=True)
+            warnings = st.session_state.get("daily_extract_warnings") or []
+            if warnings:
+                with st.expander(f"Extraction warnings ({len(warnings)})"):
+                    for warning in warnings[:100]:
+                        st.text(warning)
+        else:
+            st.info("Process a daily research ZIP to build the inventory.")
+
+        st.markdown("#### 4. Relevance Scoring / Selected Files")
+        if isinstance(relevance_df, pd.DataFrame):
+            relevance_columns = [
+                "relevance_score", "priority_level", "ticker", "all_detected_tickers", "category",
+                "source_or_broker", "document_type", "investment_rationale", "score_breakdown", "file_name",
+            ]
+            st.dataframe(relevance_df[relevance_columns], use_container_width=True, hide_index=True)
+            if isinstance(selected_df, pd.DataFrame):
+                st.caption(f"Selected for limited text extraction: {len(selected_df)} file(s)")
+                selected_status = pd.DataFrame(selected_text)
+                if not selected_status.empty:
+                    st.dataframe(
+                        selected_status[["relevance_score", "ticker", "category", "file_name", "text_extraction_status"]],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+        st.markdown("#### 5. Ticker / Category Grouping")
+        if isinstance(relevance_df, pd.DataFrame):
+            left, right = st.columns(2)
+            with left:
+                st.markdown("**Ticker summary**")
+                st.dataframe(daily_research_brief.build_ticker_summary(relevance_df), use_container_width=True, hide_index=True)
+            with right:
+                st.markdown("**Category summary**")
+                st.dataframe(daily_research_brief.build_category_summary(relevance_df), use_container_width=True, hide_index=True)
+            st.markdown("**Broker coverage summary**")
+            broker_coverage_df = daily_research_brief.build_broker_coverage_summary(relevance_df)
+            st.dataframe(broker_coverage_df, use_container_width=True, hide_index=True)
+
+            st.markdown("#### Main Downloads")
+            main_download_one, main_download_two, main_download_three = st.columns(3)
+            with main_download_one:
+                st.download_button(
+                    "Download inventory CSV",
+                    data=(
+                        inventory_df.drop(columns=["extracted_path"], errors="ignore").to_csv(index=False).encode("utf-8")
+                        if isinstance(inventory_df, pd.DataFrame) else b""
+                    ),
+                    file_name="daily_research_inventory.csv",
+                    mime="text/csv",
+                    key="daily_download_inventory",
+                    disabled=not isinstance(inventory_df, pd.DataFrame),
+                    use_container_width=True,
+                )
+            with main_download_two:
+                st.download_button(
+                    "Download relevance CSV",
+                    data=relevance_df.drop(columns=["extracted_path"], errors="ignore").to_csv(index=False).encode("utf-8"),
+                    file_name="daily_research_relevance.csv",
+                    mime="text/csv",
+                    key="daily_download_relevance",
+                    use_container_width=True,
+                )
+            with main_download_three:
+                st.download_button(
+                    "Download broker coverage CSV",
+                    data=broker_coverage_df.to_csv(index=False).encode("utf-8"),
+                    file_name="daily_research_broker_coverage.csv",
+                    mime="text/csv",
+                    key="daily_download_broker_coverage",
+                    use_container_width=True,
+                )
+
+
+    with daily_broker_tab:
+        if isinstance(relevance_df, pd.DataFrame):
+            st.markdown("#### Broker Consensus Comparator")
+            st.caption("Compare broker/source reports side-by-side for a selected ticker.")
+            comparable_tickers = [
+                str(ticker)
+                for ticker in broker_coverage_df["ticker"].astype(str)
+                if len(daily_research_brief.select_broker_comparison_files(relevance_df, str(ticker), max_files=2)) >= 2
+            ]
+            if comparable_tickers:
+                selected_ticker = st.selectbox(
+                    "Select ticker for broker comparison",
+                    options=comparable_tickers,
+                    key="daily_broker_comparison_ticker",
+                )
+                comparison_mode = st.radio(
+                    "Broker comparison mode",
+                    options=["Fast comparison", "Deeper comparison"],
+                    horizontal=True,
+                    key="daily_broker_comparison_mode",
+                )
+                if comparison_mode == "Deeper comparison":
+                    comparison_limits = {"max_files": 12, "max_pdf_pages": 5, "max_chars": 10000}
+                else:
+                    comparison_limits = {"max_files": 8, "max_pdf_pages": 2, "max_chars": 4000}
+                st.caption(
+                    f"Compare up to {comparison_limits['max_files']} recognized broker/source reports, "
+                    f"{comparison_limits['max_pdf_pages']} pages and {comparison_limits['max_chars']:,} "
+                    "characters per report."
+                )
+                compare_clicked = st.button(
+                    "Generate Broker Comparison",
+                    key="daily_broker_comparison_generate_btn",
+                    disabled=daily_processing,
+                    use_container_width=True,
+                )
+                if compare_clicked:
+                    with st.spinner(f"Comparing same-day broker reports for {selected_ticker}..."):
+                        comparison_files = daily_research_brief.select_broker_comparison_files(
+                            relevance_df,
+                            selected_ticker,
+                            max_files=comparison_limits["max_files"],
+                        )
+                        comparison_snippets = daily_research_brief.prepare_broker_comparison_text(
+                            comparison_files,
+                            selected_text,
+                            max_pdf_pages=comparison_limits["max_pdf_pages"],
+                            max_chars_per_file=comparison_limits["max_chars"],
+                            reuse_existing=(comparison_mode == "Fast comparison"),
+                        )
+                        comparison_markdown, comparison_method, comparison_warning = _generate_broker_comparison_with_optional_llm(
+                            selected_ticker,
+                            comparison_files,
+                            comparison_snippets,
+                            report_date=daily_research_brief.daily_source_title_suffix(
+                                st.session_state.get("daily_source_name") or "daily_research.zip",
+                                relevance_df.get("relative_path", []),
+                            ),
+                            mode=comparison_mode,
+                        )
+                    st.session_state["daily_broker_comparison_files"] = comparison_files
+                    st.session_state["daily_broker_comparison_snippets"] = comparison_snippets
+                    st.session_state["daily_broker_comparison_markdown"] = comparison_markdown
+                    st.session_state["daily_broker_comparison_method"] = comparison_method
+                    st.session_state["daily_broker_comparison_warning"] = comparison_warning
+                    st.session_state["daily_broker_comparison_generated_ticker"] = selected_ticker
+                    st.session_state["daily_broker_comparison_generated_mode"] = comparison_mode
+                    st.success("Broker comparison generated.")
+
+                comparison_markdown = st.session_state.get("daily_broker_comparison_markdown") or ""
+                generated_ticker = st.session_state.get("daily_broker_comparison_generated_ticker") or ""
+                if comparison_markdown and generated_ticker == selected_ticker:
+                    st.caption(
+                        "Generation method: "
+                        f"{st.session_state.get('daily_broker_comparison_method') or 'deterministic_fallback'}"
+                    )
+                    _show_openai_fallback_warning(
+                        st.session_state.get("daily_broker_comparison_warning") or ""
+                    )
+                    st.markdown(comparison_markdown)
+                    st.download_button(
+                        "Download broker comparison Markdown",
+                        data=comparison_markdown.encode("utf-8"),
+                        file_name=f"broker_consensus_{selected_ticker}.md",
+                        mime="text/markdown",
+                        key="daily_broker_comparison_download",
+                        use_container_width=True,
+                    )
+                elif comparison_markdown:
+                    st.info("Generate a comparison for the currently selected ticker to refresh the report.")
+            else:
+                st.info("No tickers currently have two or more recognized broker/source reports.")
+
+        else:
+            st.info("Process a daily research ZIP to use the Broker Consensus Comparator.")
+
+    with daily_ticker_tab:
+        if isinstance(relevance_df, pd.DataFrame):
+            st.markdown("#### Ticker-Level Investment Memo")
+            st.caption(
+                "Generate a broader ticker memo using all same-day documents: earnings, filings, transcripts, "
+                "credit reports, broker reports, and extracted evidence."
+            )
+            ticker_summary_df = daily_research_brief.build_ticker_summary(relevance_df)
+            memo_tickers = ticker_summary_df["ticker"].astype(str).tolist() if not ticker_summary_df.empty else []
+            if memo_tickers:
+                memo_ticker = st.selectbox(
+                    "Select ticker/entity",
+                    options=memo_tickers,
+                    key="daily_ticker_memo_ticker",
+                )
+                memo_mode = st.radio(
+                    "Ticker memo mode",
+                    options=["Fast memo", "Deeper memo"],
+                    horizontal=True,
+                    key="daily_ticker_memo_mode",
+                )
+                if memo_mode == "Deeper memo":
+                    memo_limits = {"max_files": 18, "max_pdf_pages": 5, "max_chars": 10000}
+                else:
+                    memo_limits = {"max_files": 10, "max_pdf_pages": 2, "max_chars": 4000}
+                st.caption(
+                    f"Review up to {memo_limits['max_files']} same-day ticker files, "
+                    f"{memo_limits['max_pdf_pages']} pages and {memo_limits['max_chars']:,} characters per file."
+                )
+                memo_button_slot = st.empty()
+                memo_clicked = memo_button_slot.button(
+                    "Generate Ticker Memo",
+                    key="daily_ticker_memo_generate_btn",
+                    disabled=daily_processing,
+                    use_container_width=True,
+                )
+                if memo_clicked:
+                    memo_button_slot.empty()
+                    with st.spinner(f"Generating source-grounded ticker memo for {memo_ticker}..."):
+                        memo_files = daily_research_brief.select_ticker_memo_files(
+                            relevance_df,
+                            memo_ticker,
+                            max_files=memo_limits["max_files"],
+                        )
+                        memo_snippets = daily_research_brief.prepare_broker_comparison_text(
+                            memo_files,
+                            selected_text,
+                            max_pdf_pages=memo_limits["max_pdf_pages"],
+                            max_chars_per_file=memo_limits["max_chars"],
+                            reuse_existing=(memo_mode == "Fast memo"),
+                        )
+                        memo_markdown, memo_method, memo_warning = _generate_ticker_memo_with_optional_llm(
+                            memo_ticker,
+                            memo_files,
+                            memo_snippets,
+                            report_date=daily_research_brief.daily_source_title_suffix(
+                                st.session_state.get("daily_source_name") or "daily_research.zip",
+                                relevance_df.get("relative_path", []),
+                            ),
+                            mode=memo_mode,
+                        )
+                        memo_markdown = daily_research_brief.add_generation_method(memo_markdown, memo_method)
+                    st.session_state["daily_ticker_memo_files"] = memo_files
+                    st.session_state["daily_ticker_memo_snippets"] = memo_snippets
+                    st.session_state["daily_ticker_memo_markdown"] = memo_markdown
+                    st.session_state["daily_ticker_memo_method"] = memo_method
+                    st.session_state["daily_ticker_memo_generated_ticker"] = memo_ticker
+                    st.session_state["daily_ticker_memo_generated_mode"] = memo_mode
+                    st.session_state["daily_ticker_memo_warning"] = memo_warning
+                    st.success("Ticker memo generated.")
+
+                memo_markdown = st.session_state.get("daily_ticker_memo_markdown") or ""
+                generated_memo_ticker = st.session_state.get("daily_ticker_memo_generated_ticker") or ""
+                if memo_markdown and generated_memo_ticker == memo_ticker:
+                    st.caption(
+                        "Generation method: "
+                        f"{st.session_state.get('daily_ticker_memo_method') or 'deterministic_fallback'}"
+                    )
+                    _show_openai_fallback_warning(st.session_state.get("daily_ticker_memo_warning") or "")
+                    st.markdown(memo_markdown)
+                    st.download_button(
+                        "Download ticker memo Markdown",
+                        data=memo_markdown.encode("utf-8"),
+                        file_name=f"ticker_investment_memo_{memo_ticker}.md",
+                        mime="text/markdown",
+                        key="daily_ticker_memo_download",
+                        use_container_width=True,
+                    )
+                elif memo_markdown:
+                    st.info("Generate a memo for the currently selected ticker to refresh the report.")
+            else:
+                st.info("No ticker/entity was identified conservatively from the uploaded research set.")
+
+        else:
+            st.info("Process a daily research ZIP to generate a ticker-level memo.")
+
+    with daily_cross_tab:
+        st.markdown("#### Cross-Day Comparison / What Changed?")
+        st.caption(
+            "Compare two daily research ZIPs using filename, ticker, source, document-type, priority, "
+            "size, and modified-date metadata."
+        )
+        cross_left, cross_right = st.columns(2)
+        with cross_left:
+            previous_upload = st.file_uploader(
+                "Upload Previous Day ZIP",
+                type=["zip"],
+                key="daily_cross_day_previous_upload",
+            )
+        with cross_right:
+            current_upload = st.file_uploader(
+                "Upload Current Day ZIP",
+                type=["zip"],
+                key="daily_cross_day_current_upload",
+            )
+        cross_mode = st.radio(
+            "Cross-day comparison mode",
+            options=["Fast comparison", "Deeper comparison"],
+            horizontal=True,
+            key="daily_cross_day_mode",
+        )
+        cross_ready = (
+            isinstance(st.session_state.get("daily_cross_day_previous_relevance"), pd.DataFrame)
+            and isinstance(st.session_state.get("daily_cross_day_current_relevance"), pd.DataFrame)
+            and isinstance(st.session_state.get("daily_cross_day_change_inventory"), pd.DataFrame)
+            and isinstance(st.session_state.get("daily_cross_day_ticker_summary"), pd.DataFrame)
+        )
+        cross_process_col, cross_generate_col = st.columns(2)
+        with cross_process_col:
+            cross_process_clicked = st.button(
+                "Process Cross-Day Comparison",
+                key="daily_cross_day_process_btn",
+                use_container_width=True,
+            )
+        with cross_generate_col:
+            cross_generate_clicked = st.button(
+                "Generate Change Report",
+                key="daily_cross_day_generate_btn",
+                disabled=not cross_ready,
+                use_container_width=True,
+            )
+
+        if cross_process_clicked:
+            if previous_upload is None or current_upload is None:
+                st.warning("Upload both the previous-day and current-day ZIP files before processing.")
+            else:
+                previous_dir = None
+                current_dir = None
+                try:
+                    known_tickers = set(tickers.keys()) if isinstance(tickers, dict) else set()
+                    with st.spinner("Processing previous-day and current-day research ZIPs..."):
+                        previous_dir, previous_inventory, previous_relevance, previous_warnings = (
+                            _process_cross_day_uploaded_zip(previous_upload, known_tickers)
+                        )
+                        current_dir, current_inventory, current_relevance, current_warnings = (
+                            _process_cross_day_uploaded_zip(current_upload, known_tickers)
+                        )
+                        change_inventory = daily_research_brief.build_cross_day_change_inventory(
+                            previous_relevance,
+                            current_relevance,
+                        )
+                        ticker_change_summary = daily_research_brief.build_cross_day_ticker_summary(
+                            previous_relevance,
+                            current_relevance,
+                            change_inventory,
+                        )
+                    daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_previous_dir"))
+                    daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_current_dir"))
+                    st.session_state["daily_cross_day_previous_dir"] = str(previous_dir)
+                    st.session_state["daily_cross_day_current_dir"] = str(current_dir)
+                    st.session_state["daily_cross_day_previous_name"] = previous_upload.name
+                    st.session_state["daily_cross_day_current_name"] = current_upload.name
+                    st.session_state["daily_cross_day_previous_inventory"] = previous_inventory
+                    st.session_state["daily_cross_day_current_inventory"] = current_inventory
+                    st.session_state["daily_cross_day_previous_relevance"] = previous_relevance
+                    st.session_state["daily_cross_day_current_relevance"] = current_relevance
+                    st.session_state["daily_cross_day_change_inventory"] = change_inventory
+                    st.session_state["daily_cross_day_ticker_summary"] = ticker_change_summary
+                    st.session_state["daily_cross_day_warnings"] = previous_warnings + current_warnings
+                    st.session_state["daily_cross_day_processed_mode"] = cross_mode
+                    st.session_state.pop("daily_cross_day_report_markdown", None)
+                    st.session_state.pop("daily_cross_day_report_method", None)
+                    st.session_state.pop("daily_cross_day_report_warning", None)
+                    st.success("Cross-day comparison processed.")
+                    st.rerun()
+                except zipfile.BadZipFile:
+                    daily_research_brief.remove_session_dir(previous_dir)
+                    daily_research_brief.remove_session_dir(current_dir)
+                    st.error("One of the uploaded files is not a valid ZIP archive.")
+                except Exception as exc:
+                    daily_research_brief.remove_session_dir(previous_dir)
+                    daily_research_brief.remove_session_dir(current_dir)
+                    st.error(f"Cross-day processing failed: {exc}")
+
+        change_inventory = st.session_state.get("daily_cross_day_change_inventory")
+        ticker_change_summary = st.session_state.get("daily_cross_day_ticker_summary")
+        previous_relevance = st.session_state.get("daily_cross_day_previous_relevance")
+        current_relevance = st.session_state.get("daily_cross_day_current_relevance")
+        if cross_ready:
+            previous_date = daily_research_brief.daily_source_title_suffix(
+                st.session_state.get("daily_cross_day_previous_name") or "previous.zip",
+                previous_relevance.get("relative_path", []),
+            )
+            current_date = daily_research_brief.daily_source_title_suffix(
+                st.session_state.get("daily_cross_day_current_name") or "current.zip",
+                current_relevance.get("relative_path", []),
+            )
+            st.success(f"Ready to compare {previous_date} with {current_date}.")
+            st.markdown("**Change Inventory**")
+            st.dataframe(change_inventory, use_container_width=True, hide_index=True)
+            st.markdown("**Ticker Change Summary**")
+            st.dataframe(ticker_change_summary, use_container_width=True, hide_index=True)
+            warnings = st.session_state.get("daily_cross_day_warnings") or []
+            if warnings:
+                with st.expander(f"Cross-day extraction warnings ({len(warnings)})"):
+                    for warning in warnings[:100]:
+                        st.text(warning)
+            cross_csv_left, cross_csv_right = st.columns(2)
+            with cross_csv_left:
+                st.download_button(
+                    "Download Change Inventory CSV",
+                    data=change_inventory.to_csv(index=False).encode("utf-8"),
+                    file_name="cross_day_change_inventory.csv",
+                    mime="text/csv",
+                    key="daily_cross_day_download_inventory",
+                    use_container_width=True,
+                )
+            with cross_csv_right:
+                st.download_button(
+                    "Download Ticker Change Summary CSV",
+                    data=ticker_change_summary.to_csv(index=False).encode("utf-8"),
+                    file_name="cross_day_ticker_change_summary.csv",
+                    mime="text/csv",
+                    key="daily_cross_day_download_ticker_summary",
+                    use_container_width=True,
+                )
+
+            if cross_generate_clicked:
+                with st.spinner("Generating metadata-grounded cross-day change report..."):
+                    cross_report, cross_method, cross_warning = _generate_cross_day_report_with_optional_llm(
+                        change_inventory,
+                        ticker_change_summary,
+                        previous_date=previous_date,
+                        current_date=current_date,
+                        mode=st.session_state.get("daily_cross_day_processed_mode") or cross_mode,
+                    )
+                st.session_state["daily_cross_day_report_markdown"] = cross_report
+                st.session_state["daily_cross_day_report_method"] = cross_method
+                st.session_state["daily_cross_day_report_warning"] = cross_warning
+                st.success("Cross-day change report generated.")
+
+            cross_report = st.session_state.get("daily_cross_day_report_markdown") or ""
+            if cross_report:
+                cross_method = st.session_state.get("daily_cross_day_report_method") or "deterministic_fallback"
+                st.caption(f"Generation method: {cross_method}")
+                _show_openai_fallback_warning(st.session_state.get("daily_cross_day_report_warning") or "")
+                st.markdown(cross_report)
+                st.download_button(
+                    "Download Change Report Markdown",
+                    data=cross_report.encode("utf-8"),
+                    file_name="cross_day_research_change_report.md",
+                    mime="text/markdown",
+                    key="daily_cross_day_download_report",
+                    use_container_width=True,
+                )
+
+
+    with daily_history_tab:
+        st.markdown("#### Historical Search / Research Q&A")
+        st.caption(
+            "Build a lightweight session index from already processed research, then search filenames, metadata, "
+            "relevance scores, and previously extracted limited snippets. PDFs are not rescanned when indexing."
+        )
+        research_index_df = st.session_state.get("research_index_df")
+        if not isinstance(research_index_df, pd.DataFrame):
+            research_index_df = pd.DataFrame(columns=daily_research_brief.RESEARCH_INDEX_COLUMNS)
+
+        index_daily_col, index_cross_col, clear_index_col = st.columns(3)
+        with index_daily_col:
+            add_daily_to_index = st.button(
+                "Add current daily ZIP to research index",
+                key="daily_research_search_add_daily_btn",
+                disabled=not isinstance(relevance_df, pd.DataFrame) or relevance_df.empty,
+                use_container_width=True,
+            )
+        with index_cross_col:
+            add_cross_to_index = st.button(
+                "Add processed cross-day ZIPs to research index",
+                key="daily_research_search_add_cross_btn",
+                disabled=not cross_ready,
+                use_container_width=True,
+            )
+        with clear_index_col:
+            clear_research_index = st.button(
+                "Clear research index",
+                key="daily_research_search_clear_btn",
+                disabled=research_index_df.empty,
+                use_container_width=True,
+            )
+
+        if add_daily_to_index:
+            reusable_snippets = list(selected_text)
+            reusable_snippets.extend(st.session_state.get("daily_ticker_memo_snippets") or [])
+            reusable_snippets.extend(st.session_state.get("daily_broker_comparison_snippets") or [])
+            incoming_index = daily_research_brief.build_research_index_rows(
+                relevance_df,
+                reusable_snippets,
+                source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
+            )
+            research_index_df = daily_research_brief.merge_research_index(research_index_df, incoming_index)
+            st.session_state["research_index_df"] = research_index_df
+            st.session_state["indexed_sources"] = daily_research_brief.build_indexed_sources_summary(
+                research_index_df
+            ).to_dict(orient="records")
+            st.success(f"Added current daily research to the session index ({len(incoming_index)} file row(s)).")
+            st.rerun()
+
+        if add_cross_to_index:
+            previous_index = daily_research_brief.build_research_index_rows(
+                previous_relevance,
+                [],
+                source_name=st.session_state.get("daily_cross_day_previous_name") or "previous.zip",
+            )
+            current_index = daily_research_brief.build_research_index_rows(
+                current_relevance,
+                [],
+                source_name=st.session_state.get("daily_cross_day_current_name") or "current.zip",
+            )
+            changes_index = daily_research_brief.build_cross_day_research_index_rows(
+                change_inventory,
+                source_name=st.session_state.get("daily_cross_day_current_name") or "current.zip",
+            )
+            for incoming_index in (previous_index, current_index, changes_index):
+                research_index_df = daily_research_brief.merge_research_index(research_index_df, incoming_index)
+            st.session_state["research_index_df"] = research_index_df
+            st.session_state["indexed_sources"] = daily_research_brief.build_indexed_sources_summary(
+                research_index_df
+            ).to_dict(orient="records")
+            st.success("Added processed previous-day, current-day, and cross-day change metadata to the session index.")
+            st.rerun()
+
+        if clear_research_index:
+            _clear_session_keys(
+                exact=[
+                    "research_index_df", "indexed_sources", "last_search_query", "search_results_df",
+                    "grounded_answer_markdown", "generation_method", "historical_answer_warning",
+                    "historical_answer_grounding_debug",
+                ],
+                prefixes=["daily_research_search_"],
+            )
+            st.rerun()
+
+        indexed_sources_df = daily_research_brief.build_indexed_sources_summary(research_index_df)
+        st.session_state["indexed_sources"] = indexed_sources_df.to_dict(orient="records")
+        if indexed_sources_df.empty:
+            st.info("Add a processed daily ZIP or processed cross-day ZIPs to begin searching.")
+        else:
+            st.markdown("**Indexed Dates / Folders**")
+            st.dataframe(indexed_sources_df, use_container_width=True, hide_index=True)
+
+            def _research_filter_options(column: str) -> List[str]:
+                values = {
+                    str(value).strip()
+                    for value in research_index_df[column]
+                    if str(value).strip()
+                }
+                return ["All"] + sorted(values)
+
+            detected_ticker_options = set()
+            for value in research_index_df["all_detected_tickers"].astype(str):
+                detected_ticker_options.update(part.strip() for part in value.split(",") if part.strip())
+            search_query = st.text_input(
+                "Ask a research question",
+                placeholder="What did brokers say about AMZN?",
+                key="daily_research_search_query",
+            )
+            filter_one, filter_two, filter_three = st.columns(3)
+            with filter_one:
+                search_ticker = st.selectbox(
+                    "Ticker",
+                    options=["All"] + sorted(detected_ticker_options),
+                    key="daily_research_search_ticker_filter",
+                )
+                search_category = st.selectbox(
+                    "Category",
+                    options=_research_filter_options("category"),
+                    key="daily_research_search_category_filter",
+                )
+            with filter_two:
+                search_broker = st.selectbox(
+                    "Broker/source",
+                    options=_research_filter_options("source_or_broker"),
+                    key="daily_research_search_broker_filter",
+                )
+                search_document_type = st.selectbox(
+                    "Document type",
+                    options=_research_filter_options("document_type"),
+                    key="daily_research_search_document_filter",
+                )
+            with filter_three:
+                search_date = st.selectbox(
+                    "Date/folder",
+                    options=_research_filter_options("source_date"),
+                    key="daily_research_search_date_filter",
+                )
+                answer_mode = st.radio(
+                    "Answer mode",
+                    options=["Fast answer", "Deeper answer"],
+                    horizontal=True,
+                    key="daily_research_search_answer_mode",
+                )
+
+            search_col, answer_col = st.columns(2)
+            with search_col:
+                search_clicked = st.button(
+                    "Search Research Index",
+                    key="daily_research_search_submit_btn",
+                    use_container_width=True,
+                )
+            if search_clicked:
+                active_filters = {
+                    "ticker": "" if search_ticker == "All" else search_ticker,
+                    "source_or_broker": "" if search_broker == "All" else search_broker,
+                    "category": "" if search_category == "All" else search_category,
+                    "document_type": "" if search_document_type == "All" else search_document_type,
+                    "source_date": "" if search_date == "All" else search_date,
+                }
+                if not search_query.strip() and not any(active_filters.values()):
+                    st.warning("Enter a research question or select at least one filter.")
+                else:
+                    search_results = daily_research_brief.search_research_index(
+                        research_index_df,
+                        search_query,
+                        **active_filters,
+                        max_results=200,
+                    )
+                    st.session_state["last_search_query"] = search_query.strip() or "Filtered research search"
+                    st.session_state["search_results_df"] = search_results
+                    st.session_state.pop("grounded_answer_markdown", None)
+                    st.session_state.pop("generation_method", None)
+                    st.session_state.pop("historical_answer_warning", None)
+                    st.session_state.pop("historical_answer_grounding_debug", None)
+
+            search_results_df = st.session_state.get("search_results_df")
+            search_results_ready = isinstance(search_results_df, pd.DataFrame) and not search_results_df.empty
+            with answer_col:
+                answer_clicked = st.button(
+                    "Generate Grounded Answer",
+                    key="daily_research_search_generate_answer_btn",
+                    disabled=not search_results_ready,
+                    use_container_width=True,
+                )
+
+            if isinstance(search_results_df, pd.DataFrame):
+                st.markdown("**Search Results**")
+                if search_results_df.empty:
+                    st.info("No indexed research rows matched the question and selected filters.")
+                else:
+                    result_display_columns = [
+                        "search_score", "match_reason", "source_date", "ticker", "source_or_broker",
+                        "category", "document_type", "file_name", "relevance_score", "priority_level",
+                        "evidence_type", "extraction_status", "extracted_snippet",
+                    ]
+                    st.dataframe(
+                        search_results_df[result_display_columns],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.download_button(
+                        "Download search results CSV",
+                        data=search_results_df.to_csv(index=False).encode("utf-8"),
+                        file_name="historical_research_search_results.csv",
+                        mime="text/csv",
+                        key="daily_research_search_download_results",
+                        use_container_width=True,
+                    )
+
+            if answer_clicked and search_results_ready:
+                with st.spinner("Generating a grounded answer from compact search results..."):
+                    grounded_answer, answer_method, answer_warning, grounding_debug = (
+                        _generate_historical_research_answer_with_optional_llm(
+                            st.session_state.get("last_search_query") or search_query,
+                            search_results_df,
+                            mode=answer_mode,
+                        )
+                    )
+                st.session_state["grounded_answer_markdown"] = grounded_answer
+                st.session_state["generation_method"] = answer_method
+                st.session_state["historical_answer_warning"] = answer_warning
+                st.session_state["historical_answer_grounding_debug"] = grounding_debug
+                st.success("Grounded research answer generated.")
+
+            grounded_answer = st.session_state.get("grounded_answer_markdown") or ""
+            if grounded_answer:
+                st.caption(
+                    "Generation method: "
+                    f"{st.session_state.get('generation_method') or 'deterministic_fallback'}"
+                )
+                _show_openai_fallback_warning(st.session_state.get("historical_answer_warning") or "")
+                grounding_debug = st.session_state.get("historical_answer_grounding_debug") or {}
+                if grounding_debug:
+                    with st.expander("OpenAI grounding validation debug"):
+                        st.write(f"**Reason validation failed:** {grounding_debug.get('reason') or 'Unknown'}")
+                        st.write(f"**Validation detail:** {grounding_debug.get('detail') or 'No detail available.'}")
+                        st.write(
+                            "**Expected citation/source format:** "
+                            f"{grounding_debug.get('expected_format') or 'Source: <exact file_name>'}"
+                        )
+                        st.text_area(
+                            "First 1000 characters of OpenAI response",
+                            value=grounding_debug.get("response_preview") or "",
+                            height=260,
+                            disabled=True,
+                            key="daily_research_search_grounding_debug_preview",
+                        )
+                st.markdown(grounded_answer)
+                st.download_button(
+                    "Download grounded answer Markdown",
+                    data=grounded_answer.encode("utf-8"),
+                    file_name="historical_research_grounded_answer.md",
+                    mime="text/markdown",
+                    key="daily_research_search_download_answer",
+                    use_container_width=True,
+                )
+
+
+    with daily_brief_tab:
+        st.markdown("#### 6. Generate Daily Brief")
         generate_clicked = st.button(
             "Generate Daily Brief",
             key="daily_generate_btn",
             use_container_width=True,
             disabled=(not daily_ready) or daily_processing,
         )
-    with reset_col:
-        reset_clicked = st.button("Reset Daily Research Brief", key="daily_reset_btn", use_container_width=True)
+        if generate_clicked and isinstance(relevance_df, pd.DataFrame):
+            with st.spinner("Generating source-grounded daily brief..."):
+                brief, method, brief_warning = _generate_daily_research_brief_with_optional_llm(
+                    relevance_df,
+                    selected_text,
+                    source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
+                )
+            st.session_state["daily_brief_text"] = brief
+            st.session_state["daily_brief_method"] = method
+            st.session_state["daily_brief_warning"] = brief_warning
+            st.success("Daily brief generated.")
 
-    if reset_clicked:
-        daily_research_brief.remove_session_dir(st.session_state.get("daily_session_dir"))
-        daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_previous_dir"))
-        daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_current_dir"))
-        _clear_session_keys(
-            exact=[
-                "daily_uploaded_zip", "daily_processing_mode", "daily_session_dir",
-                "daily_source_name", "daily_inventory_df", "daily_relevance_df",
-                "daily_selected_df", "daily_selected_text", "daily_processing_limits",
-                "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
-                "daily_brief_warning", "daily_processing",
-            ],
-            prefixes=["daily_broker_comparison_", "daily_ticker_memo_", "daily_cross_day_"],
-        )
-        st.rerun()
-
-    if daily_ready and not daily_processing:
-        st.success(
-            f"Processed {len(daily_inventory_state)} file(s); lightly scanned "
-            f"{len(st.session_state.get('daily_selected_text') or [])} selected file(s). "
-            "Ready to generate daily brief."
-        )
-
-    if process_clicked:
-        if uploaded is None and not cached_daily_zip_available:
-            st.warning("Upload a ZIP file before processing.")
+        brief_text = st.session_state.get("daily_brief_text") or ""
+        if brief_text:
+            method = st.session_state.get("daily_brief_method") or "deterministic_fallback"
+            st.caption(f"Generation method: {method}")
+            _show_openai_fallback_warning(st.session_state.get("daily_brief_warning") or "")
+            st.markdown(brief_text)
         else:
-            st.session_state["daily_processing"] = True
-            _clear_session_keys(
-                exact=[
-                    "daily_inventory_df",
-                    "daily_relevance_df", "daily_selected_df", "daily_selected_text",
-                    "daily_processing_limits", "daily_extract_warnings", "daily_brief_text",
-                    "daily_brief_method", "daily_brief_warning",
-                ],
-                prefixes=["daily_broker_comparison_", "daily_ticker_memo_"],
-            )
-            if uploaded is not None:
-                old_dir = st.session_state.get("daily_session_dir")
-                daily_research_brief.remove_session_dir(old_dir)
-                session_dir = daily_research_brief.create_session_dir()
-            else:
-                session_dir = Path(str(st.session_state.get("daily_session_dir")))
-            zip_path = session_dir / "daily_research.zip"
-            extract_root = session_dir / "extracted"
-            try:
-                if uploaded is not None:
-                    uploaded.seek(0)
-                    with zip_path.open("wb") as dst:
-                        shutil.copyfileobj(uploaded, dst, length=1024 * 1024)
+            st.info("After processing, click Generate Daily Brief to create the memo.")
 
-                records, warnings = daily_research_brief.safe_extract_zip(zip_path, extract_root)
-                known_tickers = set(tickers.keys()) if isinstance(tickers, dict) else set()
-                inventory_df = daily_research_brief.build_inventory(records, known_tickers=known_tickers)
-                relevance_df = daily_research_brief.score_inventory(inventory_df)
-                selected_df = daily_research_brief.select_files_for_text(relevance_df, limits["max_files"])
-                selected_text = daily_research_brief.extract_selected_text(
-                    selected_df,
-                    max_pdf_pages=limits["max_pdf_pages"],
-                    max_chars_per_file=limits["max_chars"],
-                )
-
-                st.session_state["daily_session_dir"] = str(session_dir)
-                st.session_state["daily_source_name"] = (
-                    uploaded.name if uploaded is not None
-                    else st.session_state.get("daily_source_name") or zip_path.name
-                )
-                st.session_state["daily_inventory_df"] = inventory_df
-                st.session_state["daily_relevance_df"] = relevance_df
-                st.session_state["daily_selected_df"] = selected_df
-                st.session_state["daily_selected_text"] = selected_text
-                st.session_state["daily_processing_limits"] = limits
-                st.session_state["daily_extract_warnings"] = warnings
-                st.session_state["daily_processing"] = False
-                st.session_state.pop("daily_brief_text", None)
-                st.session_state.pop("daily_brief_method", None)
-                st.rerun()
-            except zipfile.BadZipFile:
-                st.session_state["daily_processing"] = False
-                daily_research_brief.remove_session_dir(session_dir)
-                st.error("The uploaded file is not a valid ZIP archive.")
-            except Exception as exc:
-                st.session_state["daily_processing"] = False
-                daily_research_brief.remove_session_dir(session_dir)
-                st.error(f"Daily ZIP processing failed: {exc}")
-
-    relevance_df = st.session_state.get("daily_relevance_df")
-    inventory_df = st.session_state.get("daily_inventory_df")
-    selected_df = st.session_state.get("daily_selected_df")
-    selected_text = st.session_state.get("daily_selected_text") or []
-
-    if generate_clicked and isinstance(relevance_df, pd.DataFrame):
-        with st.spinner("Generating source-grounded daily brief..."):
-            brief, method, brief_warning = _generate_daily_research_brief_with_optional_llm(
-                relevance_df,
-                selected_text,
-                source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
-            )
-        st.session_state["daily_brief_text"] = brief
-        st.session_state["daily_brief_method"] = method
-        st.session_state["daily_brief_warning"] = brief_warning
-        st.success("Daily brief generated.")
-
-    st.markdown("#### 3. Folder/File Inventory")
-    if isinstance(inventory_df, pd.DataFrame):
-        inventory_display_columns = [
-            "category", "ticker", "all_detected_tickers", "company_or_identifier", "source_or_broker", "document_type",
-            "file_name", "file_extension", "file_size_mb", "relative_path", "modified_date",
-            "extraction_status",
-        ]
-        st.dataframe(inventory_df[inventory_display_columns], use_container_width=True, hide_index=True)
-        warnings = st.session_state.get("daily_extract_warnings") or []
-        if warnings:
-            with st.expander(f"Extraction warnings ({len(warnings)})"):
-                for warning in warnings[:100]:
-                    st.text(warning)
-    else:
-        st.info("Process a daily research ZIP to build the inventory.")
-
-    st.markdown("#### 4. Relevance Scoring / Selected Files")
-    if isinstance(relevance_df, pd.DataFrame):
-        relevance_columns = [
-            "relevance_score", "priority_level", "ticker", "all_detected_tickers", "category",
-            "source_or_broker", "document_type", "investment_rationale", "score_breakdown", "file_name",
-        ]
-        st.dataframe(relevance_df[relevance_columns], use_container_width=True, hide_index=True)
-        if isinstance(selected_df, pd.DataFrame):
-            st.caption(f"Selected for limited text extraction: {len(selected_df)} file(s)")
-            selected_status = pd.DataFrame(selected_text)
-            if not selected_status.empty:
-                st.dataframe(
-                    selected_status[["relevance_score", "ticker", "category", "file_name", "text_extraction_status"]],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-    st.markdown("#### 5. Ticker / Category Grouping")
-    if isinstance(relevance_df, pd.DataFrame):
-        left, right = st.columns(2)
-        with left:
-            st.markdown("**Ticker summary**")
-            st.dataframe(daily_research_brief.build_ticker_summary(relevance_df), use_container_width=True, hide_index=True)
-        with right:
-            st.markdown("**Category summary**")
-            st.dataframe(daily_research_brief.build_category_summary(relevance_df), use_container_width=True, hide_index=True)
-        st.markdown("**Broker coverage summary**")
-        broker_coverage_df = daily_research_brief.build_broker_coverage_summary(relevance_df)
-        st.dataframe(broker_coverage_df, use_container_width=True, hide_index=True)
-
-        st.markdown("#### Broker Consensus Comparator")
-        st.caption("Compare broker/source reports side-by-side for a selected ticker.")
-        comparable_tickers = [
-            str(ticker)
-            for ticker in broker_coverage_df["ticker"].astype(str)
-            if len(daily_research_brief.select_broker_comparison_files(relevance_df, str(ticker), max_files=2)) >= 2
-        ]
-        if comparable_tickers:
-            selected_ticker = st.selectbox(
-                "Select ticker for broker comparison",
-                options=comparable_tickers,
-                key="daily_broker_comparison_ticker",
-            )
-            comparison_mode = st.radio(
-                "Broker comparison mode",
-                options=["Fast comparison", "Deeper comparison"],
-                horizontal=True,
-                key="daily_broker_comparison_mode",
-            )
-            if comparison_mode == "Deeper comparison":
-                comparison_limits = {"max_files": 12, "max_pdf_pages": 5, "max_chars": 10000}
-            else:
-                comparison_limits = {"max_files": 8, "max_pdf_pages": 2, "max_chars": 4000}
-            st.caption(
-                f"Compare up to {comparison_limits['max_files']} recognized broker/source reports, "
-                f"{comparison_limits['max_pdf_pages']} pages and {comparison_limits['max_chars']:,} "
-                "characters per report."
-            )
-            compare_clicked = st.button(
-                "Generate Broker Comparison",
-                key="daily_broker_comparison_generate_btn",
-                disabled=daily_processing,
-                use_container_width=True,
-            )
-            if compare_clicked:
-                with st.spinner(f"Comparing same-day broker reports for {selected_ticker}..."):
-                    comparison_files = daily_research_brief.select_broker_comparison_files(
-                        relevance_df,
-                        selected_ticker,
-                        max_files=comparison_limits["max_files"],
-                    )
-                    comparison_snippets = daily_research_brief.prepare_broker_comparison_text(
-                        comparison_files,
-                        selected_text,
-                        max_pdf_pages=comparison_limits["max_pdf_pages"],
-                        max_chars_per_file=comparison_limits["max_chars"],
-                        reuse_existing=(comparison_mode == "Fast comparison"),
-                    )
-                    comparison_markdown, comparison_method, comparison_warning = _generate_broker_comparison_with_optional_llm(
-                        selected_ticker,
-                        comparison_files,
-                        comparison_snippets,
-                        report_date=daily_research_brief.daily_source_title_suffix(
-                            st.session_state.get("daily_source_name") or "daily_research.zip",
-                            relevance_df.get("relative_path", []),
-                        ),
-                        mode=comparison_mode,
-                    )
-                st.session_state["daily_broker_comparison_files"] = comparison_files
-                st.session_state["daily_broker_comparison_snippets"] = comparison_snippets
-                st.session_state["daily_broker_comparison_markdown"] = comparison_markdown
-                st.session_state["daily_broker_comparison_method"] = comparison_method
-                st.session_state["daily_broker_comparison_warning"] = comparison_warning
-                st.session_state["daily_broker_comparison_generated_ticker"] = selected_ticker
-                st.session_state["daily_broker_comparison_generated_mode"] = comparison_mode
-                st.success("Broker comparison generated.")
-
-            comparison_markdown = st.session_state.get("daily_broker_comparison_markdown") or ""
-            generated_ticker = st.session_state.get("daily_broker_comparison_generated_ticker") or ""
-            if comparison_markdown and generated_ticker == selected_ticker:
-                st.caption(
-                    "Generation method: "
-                    f"{st.session_state.get('daily_broker_comparison_method') or 'deterministic_fallback'}"
-                )
-                _show_openai_fallback_warning(
-                    st.session_state.get("daily_broker_comparison_warning") or ""
-                )
-                st.markdown(comparison_markdown)
-                st.download_button(
-                    "Download broker comparison Markdown",
-                    data=comparison_markdown.encode("utf-8"),
-                    file_name=f"broker_consensus_{selected_ticker}.md",
-                    mime="text/markdown",
-                    key="daily_broker_comparison_download",
-                    use_container_width=True,
-                )
-            elif comparison_markdown:
-                st.info("Generate a comparison for the currently selected ticker to refresh the report.")
-        else:
-            st.info("No tickers currently have two or more recognized broker/source reports.")
-
-        st.markdown("#### Ticker-Level Investment Memo")
-        st.caption(
-            "Generate a broader ticker memo using all same-day documents: earnings, filings, transcripts, "
-            "credit reports, broker reports, and extracted evidence."
-        )
-        ticker_summary_df = daily_research_brief.build_ticker_summary(relevance_df)
-        memo_tickers = ticker_summary_df["ticker"].astype(str).tolist() if not ticker_summary_df.empty else []
-        if memo_tickers:
-            memo_ticker = st.selectbox(
-                "Select ticker/entity",
-                options=memo_tickers,
-                key="daily_ticker_memo_ticker",
-            )
-            memo_mode = st.radio(
-                "Ticker memo mode",
-                options=["Fast memo", "Deeper memo"],
-                horizontal=True,
-                key="daily_ticker_memo_mode",
-            )
-            if memo_mode == "Deeper memo":
-                memo_limits = {"max_files": 18, "max_pdf_pages": 5, "max_chars": 10000}
-            else:
-                memo_limits = {"max_files": 10, "max_pdf_pages": 2, "max_chars": 4000}
-            st.caption(
-                f"Review up to {memo_limits['max_files']} same-day ticker files, "
-                f"{memo_limits['max_pdf_pages']} pages and {memo_limits['max_chars']:,} characters per file."
-            )
-            memo_button_slot = st.empty()
-            memo_clicked = memo_button_slot.button(
-                "Generate Ticker Memo",
-                key="daily_ticker_memo_generate_btn",
-                disabled=daily_processing,
-                use_container_width=True,
-            )
-            if memo_clicked:
-                memo_button_slot.empty()
-                with st.spinner(f"Generating source-grounded ticker memo for {memo_ticker}..."):
-                    memo_files = daily_research_brief.select_ticker_memo_files(
-                        relevance_df,
-                        memo_ticker,
-                        max_files=memo_limits["max_files"],
-                    )
-                    memo_snippets = daily_research_brief.prepare_broker_comparison_text(
-                        memo_files,
-                        selected_text,
-                        max_pdf_pages=memo_limits["max_pdf_pages"],
-                        max_chars_per_file=memo_limits["max_chars"],
-                        reuse_existing=(memo_mode == "Fast memo"),
-                    )
-                    memo_markdown, memo_method, memo_warning = _generate_ticker_memo_with_optional_llm(
-                        memo_ticker,
-                        memo_files,
-                        memo_snippets,
-                        report_date=daily_research_brief.daily_source_title_suffix(
-                            st.session_state.get("daily_source_name") or "daily_research.zip",
-                            relevance_df.get("relative_path", []),
-                        ),
-                        mode=memo_mode,
-                    )
-                    memo_markdown = daily_research_brief.add_generation_method(memo_markdown, memo_method)
-                st.session_state["daily_ticker_memo_files"] = memo_files
-                st.session_state["daily_ticker_memo_snippets"] = memo_snippets
-                st.session_state["daily_ticker_memo_markdown"] = memo_markdown
-                st.session_state["daily_ticker_memo_method"] = memo_method
-                st.session_state["daily_ticker_memo_generated_ticker"] = memo_ticker
-                st.session_state["daily_ticker_memo_generated_mode"] = memo_mode
-                st.session_state["daily_ticker_memo_warning"] = memo_warning
-                st.success("Ticker memo generated.")
-
-            memo_markdown = st.session_state.get("daily_ticker_memo_markdown") or ""
-            generated_memo_ticker = st.session_state.get("daily_ticker_memo_generated_ticker") or ""
-            if memo_markdown and generated_memo_ticker == memo_ticker:
-                st.caption(
-                    "Generation method: "
-                    f"{st.session_state.get('daily_ticker_memo_method') or 'deterministic_fallback'}"
-                )
-                _show_openai_fallback_warning(st.session_state.get("daily_ticker_memo_warning") or "")
-                st.markdown(memo_markdown)
-                st.download_button(
-                    "Download ticker memo Markdown",
-                    data=memo_markdown.encode("utf-8"),
-                    file_name=f"ticker_investment_memo_{memo_ticker}.md",
-                    mime="text/markdown",
-                    key="daily_ticker_memo_download",
-                    use_container_width=True,
-                )
-            elif memo_markdown:
-                st.info("Generate a memo for the currently selected ticker to refresh the report.")
-        else:
-            st.info("No ticker/entity was identified conservatively from the uploaded research set.")
-
-    st.markdown("#### Cross-Day Comparison / What Changed?")
-    st.caption(
-        "Compare two daily research ZIPs using filename, ticker, source, document-type, priority, "
-        "size, and modified-date metadata."
-    )
-    cross_left, cross_right = st.columns(2)
-    with cross_left:
-        previous_upload = st.file_uploader(
-            "Upload Previous Day ZIP",
-            type=["zip"],
-            key="daily_cross_day_previous_upload",
-        )
-    with cross_right:
-        current_upload = st.file_uploader(
-            "Upload Current Day ZIP",
-            type=["zip"],
-            key="daily_cross_day_current_upload",
-        )
-    cross_mode = st.radio(
-        "Cross-day comparison mode",
-        options=["Fast comparison", "Deeper comparison"],
-        horizontal=True,
-        key="daily_cross_day_mode",
-    )
-    cross_ready = (
-        isinstance(st.session_state.get("daily_cross_day_previous_relevance"), pd.DataFrame)
-        and isinstance(st.session_state.get("daily_cross_day_current_relevance"), pd.DataFrame)
-        and isinstance(st.session_state.get("daily_cross_day_change_inventory"), pd.DataFrame)
-        and isinstance(st.session_state.get("daily_cross_day_ticker_summary"), pd.DataFrame)
-    )
-    cross_process_col, cross_generate_col = st.columns(2)
-    with cross_process_col:
-        cross_process_clicked = st.button(
-            "Process Cross-Day Comparison",
-            key="daily_cross_day_process_btn",
+        st.download_button(
+            "Download daily brief Markdown",
+            data=brief_text.encode("utf-8") if brief_text else b"",
+            file_name="daily_research_brief.md",
+            mime="text/markdown",
+            key="daily_download_brief",
+            disabled=not bool(brief_text),
             use_container_width=True,
         )
-    with cross_generate_col:
-        cross_generate_clicked = st.button(
-            "Generate Change Report",
-            key="daily_cross_day_generate_btn",
-            disabled=not cross_ready,
-            use_container_width=True,
-        )
-
-    if cross_process_clicked:
-        if previous_upload is None or current_upload is None:
-            st.warning("Upload both the previous-day and current-day ZIP files before processing.")
-        else:
-            previous_dir = None
-            current_dir = None
-            try:
-                known_tickers = set(tickers.keys()) if isinstance(tickers, dict) else set()
-                with st.spinner("Processing previous-day and current-day research ZIPs..."):
-                    previous_dir, previous_inventory, previous_relevance, previous_warnings = (
-                        _process_cross_day_uploaded_zip(previous_upload, known_tickers)
-                    )
-                    current_dir, current_inventory, current_relevance, current_warnings = (
-                        _process_cross_day_uploaded_zip(current_upload, known_tickers)
-                    )
-                    change_inventory = daily_research_brief.build_cross_day_change_inventory(
-                        previous_relevance,
-                        current_relevance,
-                    )
-                    ticker_change_summary = daily_research_brief.build_cross_day_ticker_summary(
-                        previous_relevance,
-                        current_relevance,
-                        change_inventory,
-                    )
-                daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_previous_dir"))
-                daily_research_brief.remove_session_dir(st.session_state.get("daily_cross_day_current_dir"))
-                st.session_state["daily_cross_day_previous_dir"] = str(previous_dir)
-                st.session_state["daily_cross_day_current_dir"] = str(current_dir)
-                st.session_state["daily_cross_day_previous_name"] = previous_upload.name
-                st.session_state["daily_cross_day_current_name"] = current_upload.name
-                st.session_state["daily_cross_day_previous_inventory"] = previous_inventory
-                st.session_state["daily_cross_day_current_inventory"] = current_inventory
-                st.session_state["daily_cross_day_previous_relevance"] = previous_relevance
-                st.session_state["daily_cross_day_current_relevance"] = current_relevance
-                st.session_state["daily_cross_day_change_inventory"] = change_inventory
-                st.session_state["daily_cross_day_ticker_summary"] = ticker_change_summary
-                st.session_state["daily_cross_day_warnings"] = previous_warnings + current_warnings
-                st.session_state["daily_cross_day_processed_mode"] = cross_mode
-                st.session_state.pop("daily_cross_day_report_markdown", None)
-                st.session_state.pop("daily_cross_day_report_method", None)
-                st.session_state.pop("daily_cross_day_report_warning", None)
-                st.success("Cross-day comparison processed.")
-                st.rerun()
-            except zipfile.BadZipFile:
-                daily_research_brief.remove_session_dir(previous_dir)
-                daily_research_brief.remove_session_dir(current_dir)
-                st.error("One of the uploaded files is not a valid ZIP archive.")
-            except Exception as exc:
-                daily_research_brief.remove_session_dir(previous_dir)
-                daily_research_brief.remove_session_dir(current_dir)
-                st.error(f"Cross-day processing failed: {exc}")
-
-    change_inventory = st.session_state.get("daily_cross_day_change_inventory")
-    ticker_change_summary = st.session_state.get("daily_cross_day_ticker_summary")
-    previous_relevance = st.session_state.get("daily_cross_day_previous_relevance")
-    current_relevance = st.session_state.get("daily_cross_day_current_relevance")
-    if cross_ready:
-        previous_date = daily_research_brief.daily_source_title_suffix(
-            st.session_state.get("daily_cross_day_previous_name") or "previous.zip",
-            previous_relevance.get("relative_path", []),
-        )
-        current_date = daily_research_brief.daily_source_title_suffix(
-            st.session_state.get("daily_cross_day_current_name") or "current.zip",
-            current_relevance.get("relative_path", []),
-        )
-        st.success(f"Ready to compare {previous_date} with {current_date}.")
-        st.markdown("**Change Inventory**")
-        st.dataframe(change_inventory, use_container_width=True, hide_index=True)
-        st.markdown("**Ticker Change Summary**")
-        st.dataframe(ticker_change_summary, use_container_width=True, hide_index=True)
-        warnings = st.session_state.get("daily_cross_day_warnings") or []
-        if warnings:
-            with st.expander(f"Cross-day extraction warnings ({len(warnings)})"):
-                for warning in warnings[:100]:
-                    st.text(warning)
-        cross_csv_left, cross_csv_right = st.columns(2)
-        with cross_csv_left:
-            st.download_button(
-                "Download Change Inventory CSV",
-                data=change_inventory.to_csv(index=False).encode("utf-8"),
-                file_name="cross_day_change_inventory.csv",
-                mime="text/csv",
-                key="daily_cross_day_download_inventory",
-                use_container_width=True,
-            )
-        with cross_csv_right:
-            st.download_button(
-                "Download Ticker Change Summary CSV",
-                data=ticker_change_summary.to_csv(index=False).encode("utf-8"),
-                file_name="cross_day_ticker_change_summary.csv",
-                mime="text/csv",
-                key="daily_cross_day_download_ticker_summary",
-                use_container_width=True,
-            )
-
-        if cross_generate_clicked:
-            with st.spinner("Generating metadata-grounded cross-day change report..."):
-                cross_report, cross_method, cross_warning = _generate_cross_day_report_with_optional_llm(
-                    change_inventory,
-                    ticker_change_summary,
-                    previous_date=previous_date,
-                    current_date=current_date,
-                    mode=st.session_state.get("daily_cross_day_processed_mode") or cross_mode,
-                )
-            st.session_state["daily_cross_day_report_markdown"] = cross_report
-            st.session_state["daily_cross_day_report_method"] = cross_method
-            st.session_state["daily_cross_day_report_warning"] = cross_warning
-            st.success("Cross-day change report generated.")
-
-        cross_report = st.session_state.get("daily_cross_day_report_markdown") or ""
-        if cross_report:
-            cross_method = st.session_state.get("daily_cross_day_report_method") or "deterministic_fallback"
-            st.caption(f"Generation method: {cross_method}")
-            _show_openai_fallback_warning(st.session_state.get("daily_cross_day_report_warning") or "")
-            st.markdown(cross_report)
-            st.download_button(
-                "Download Change Report Markdown",
-                data=cross_report.encode("utf-8"),
-                file_name="cross_day_research_change_report.md",
-                mime="text/markdown",
-                key="daily_cross_day_download_report",
-                use_container_width=True,
-            )
-
-    st.markdown("#### Historical Search / Research Q&A")
-    st.caption(
-        "Build a lightweight session index from already processed research, then search filenames, metadata, "
-        "relevance scores, and previously extracted limited snippets. PDFs are not rescanned when indexing."
-    )
-    research_index_df = st.session_state.get("research_index_df")
-    if not isinstance(research_index_df, pd.DataFrame):
-        research_index_df = pd.DataFrame(columns=daily_research_brief.RESEARCH_INDEX_COLUMNS)
-
-    index_daily_col, index_cross_col, clear_index_col = st.columns(3)
-    with index_daily_col:
-        add_daily_to_index = st.button(
-            "Add current daily ZIP to research index",
-            key="daily_research_search_add_daily_btn",
-            disabled=not isinstance(relevance_df, pd.DataFrame) or relevance_df.empty,
-            use_container_width=True,
-        )
-    with index_cross_col:
-        add_cross_to_index = st.button(
-            "Add processed cross-day ZIPs to research index",
-            key="daily_research_search_add_cross_btn",
-            disabled=not cross_ready,
-            use_container_width=True,
-        )
-    with clear_index_col:
-        clear_research_index = st.button(
-            "Clear research index",
-            key="daily_research_search_clear_btn",
-            disabled=research_index_df.empty,
-            use_container_width=True,
-        )
-
-    if add_daily_to_index:
-        reusable_snippets = list(selected_text)
-        reusable_snippets.extend(st.session_state.get("daily_ticker_memo_snippets") or [])
-        reusable_snippets.extend(st.session_state.get("daily_broker_comparison_snippets") or [])
-        incoming_index = daily_research_brief.build_research_index_rows(
-            relevance_df,
-            reusable_snippets,
-            source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
-        )
-        research_index_df = daily_research_brief.merge_research_index(research_index_df, incoming_index)
-        st.session_state["research_index_df"] = research_index_df
-        st.session_state["indexed_sources"] = daily_research_brief.build_indexed_sources_summary(
-            research_index_df
-        ).to_dict(orient="records")
-        st.success(f"Added current daily research to the session index ({len(incoming_index)} file row(s)).")
-        st.rerun()
-
-    if add_cross_to_index:
-        previous_index = daily_research_brief.build_research_index_rows(
-            previous_relevance,
-            [],
-            source_name=st.session_state.get("daily_cross_day_previous_name") or "previous.zip",
-        )
-        current_index = daily_research_brief.build_research_index_rows(
-            current_relevance,
-            [],
-            source_name=st.session_state.get("daily_cross_day_current_name") or "current.zip",
-        )
-        changes_index = daily_research_brief.build_cross_day_research_index_rows(
-            change_inventory,
-            source_name=st.session_state.get("daily_cross_day_current_name") or "current.zip",
-        )
-        for incoming_index in (previous_index, current_index, changes_index):
-            research_index_df = daily_research_brief.merge_research_index(research_index_df, incoming_index)
-        st.session_state["research_index_df"] = research_index_df
-        st.session_state["indexed_sources"] = daily_research_brief.build_indexed_sources_summary(
-            research_index_df
-        ).to_dict(orient="records")
-        st.success("Added processed previous-day, current-day, and cross-day change metadata to the session index.")
-        st.rerun()
-
-    if clear_research_index:
-        _clear_session_keys(
-            exact=[
-                "research_index_df", "indexed_sources", "last_search_query", "search_results_df",
-                "grounded_answer_markdown", "generation_method", "historical_answer_warning",
-                "historical_answer_grounding_debug",
-            ],
-            prefixes=["daily_research_search_"],
-        )
-        st.rerun()
-
-    indexed_sources_df = daily_research_brief.build_indexed_sources_summary(research_index_df)
-    st.session_state["indexed_sources"] = indexed_sources_df.to_dict(orient="records")
-    if indexed_sources_df.empty:
-        st.info("Add a processed daily ZIP or processed cross-day ZIPs to begin searching.")
-    else:
-        st.markdown("**Indexed Dates / Folders**")
-        st.dataframe(indexed_sources_df, use_container_width=True, hide_index=True)
-
-        def _research_filter_options(column: str) -> List[str]:
-            values = {
-                str(value).strip()
-                for value in research_index_df[column]
-                if str(value).strip()
-            }
-            return ["All"] + sorted(values)
-
-        detected_ticker_options = set()
-        for value in research_index_df["all_detected_tickers"].astype(str):
-            detected_ticker_options.update(part.strip() for part in value.split(",") if part.strip())
-        search_query = st.text_input(
-            "Ask a research question",
-            placeholder="What did brokers say about AMZN?",
-            key="daily_research_search_query",
-        )
-        filter_one, filter_two, filter_three = st.columns(3)
-        with filter_one:
-            search_ticker = st.selectbox(
-                "Ticker",
-                options=["All"] + sorted(detected_ticker_options),
-                key="daily_research_search_ticker_filter",
-            )
-            search_category = st.selectbox(
-                "Category",
-                options=_research_filter_options("category"),
-                key="daily_research_search_category_filter",
-            )
-        with filter_two:
-            search_broker = st.selectbox(
-                "Broker/source",
-                options=_research_filter_options("source_or_broker"),
-                key="daily_research_search_broker_filter",
-            )
-            search_document_type = st.selectbox(
-                "Document type",
-                options=_research_filter_options("document_type"),
-                key="daily_research_search_document_filter",
-            )
-        with filter_three:
-            search_date = st.selectbox(
-                "Date/folder",
-                options=_research_filter_options("source_date"),
-                key="daily_research_search_date_filter",
-            )
-            answer_mode = st.radio(
-                "Answer mode",
-                options=["Fast answer", "Deeper answer"],
-                horizontal=True,
-                key="daily_research_search_answer_mode",
-            )
-
-        search_col, answer_col = st.columns(2)
-        with search_col:
-            search_clicked = st.button(
-                "Search Research Index",
-                key="daily_research_search_submit_btn",
-                use_container_width=True,
-            )
-        if search_clicked:
-            active_filters = {
-                "ticker": "" if search_ticker == "All" else search_ticker,
-                "source_or_broker": "" if search_broker == "All" else search_broker,
-                "category": "" if search_category == "All" else search_category,
-                "document_type": "" if search_document_type == "All" else search_document_type,
-                "source_date": "" if search_date == "All" else search_date,
-            }
-            if not search_query.strip() and not any(active_filters.values()):
-                st.warning("Enter a research question or select at least one filter.")
-            else:
-                search_results = daily_research_brief.search_research_index(
-                    research_index_df,
-                    search_query,
-                    **active_filters,
-                    max_results=200,
-                )
-                st.session_state["last_search_query"] = search_query.strip() or "Filtered research search"
-                st.session_state["search_results_df"] = search_results
-                st.session_state.pop("grounded_answer_markdown", None)
-                st.session_state.pop("generation_method", None)
-                st.session_state.pop("historical_answer_warning", None)
-                st.session_state.pop("historical_answer_grounding_debug", None)
-
-        search_results_df = st.session_state.get("search_results_df")
-        search_results_ready = isinstance(search_results_df, pd.DataFrame) and not search_results_df.empty
-        with answer_col:
-            answer_clicked = st.button(
-                "Generate Grounded Answer",
-                key="daily_research_search_generate_answer_btn",
-                disabled=not search_results_ready,
-                use_container_width=True,
-            )
-
-        if isinstance(search_results_df, pd.DataFrame):
-            st.markdown("**Search Results**")
-            if search_results_df.empty:
-                st.info("No indexed research rows matched the question and selected filters.")
-            else:
-                result_display_columns = [
-                    "search_score", "match_reason", "source_date", "ticker", "source_or_broker",
-                    "category", "document_type", "file_name", "relevance_score", "priority_level",
-                    "evidence_type", "extraction_status", "extracted_snippet",
-                ]
-                st.dataframe(
-                    search_results_df[result_display_columns],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                st.download_button(
-                    "Download search results CSV",
-                    data=search_results_df.to_csv(index=False).encode("utf-8"),
-                    file_name="historical_research_search_results.csv",
-                    mime="text/csv",
-                    key="daily_research_search_download_results",
-                    use_container_width=True,
-                )
-
-        if answer_clicked and search_results_ready:
-            with st.spinner("Generating a grounded answer from compact search results..."):
-                grounded_answer, answer_method, answer_warning, grounding_debug = (
-                    _generate_historical_research_answer_with_optional_llm(
-                        st.session_state.get("last_search_query") or search_query,
-                        search_results_df,
-                        mode=answer_mode,
-                    )
-                )
-            st.session_state["grounded_answer_markdown"] = grounded_answer
-            st.session_state["generation_method"] = answer_method
-            st.session_state["historical_answer_warning"] = answer_warning
-            st.session_state["historical_answer_grounding_debug"] = grounding_debug
-            st.success("Grounded research answer generated.")
-
-        grounded_answer = st.session_state.get("grounded_answer_markdown") or ""
-        if grounded_answer:
-            st.caption(
-                "Generation method: "
-                f"{st.session_state.get('generation_method') or 'deterministic_fallback'}"
-            )
-            _show_openai_fallback_warning(st.session_state.get("historical_answer_warning") or "")
-            grounding_debug = st.session_state.get("historical_answer_grounding_debug") or {}
-            if grounding_debug:
-                with st.expander("OpenAI grounding validation debug"):
-                    st.write(f"**Reason validation failed:** {grounding_debug.get('reason') or 'Unknown'}")
-                    st.write(f"**Validation detail:** {grounding_debug.get('detail') or 'No detail available.'}")
-                    st.write(
-                        "**Expected citation/source format:** "
-                        f"{grounding_debug.get('expected_format') or 'Source: <exact file_name>'}"
-                    )
-                    st.text_area(
-                        "First 1000 characters of OpenAI response",
-                        value=grounding_debug.get("response_preview") or "",
-                        height=260,
-                        disabled=True,
-                        key="daily_research_search_grounding_debug_preview",
-                    )
-            st.markdown(grounded_answer)
-            st.download_button(
-                "Download grounded answer Markdown",
-                data=grounded_answer.encode("utf-8"),
-                file_name="historical_research_grounded_answer.md",
-                mime="text/markdown",
-                key="daily_research_search_download_answer",
-                use_container_width=True,
-            )
-
-    st.markdown("#### 6. Generate Daily Brief")
-    brief_text = st.session_state.get("daily_brief_text") or ""
-    if brief_text:
-        method = st.session_state.get("daily_brief_method") or "deterministic_fallback"
-        st.caption(f"Generation method: {method}")
-        _show_openai_fallback_warning(st.session_state.get("daily_brief_warning") or "")
-        st.markdown(brief_text)
-    else:
-        st.info("After processing, click Generate Daily Brief to create the memo.")
-
-    st.markdown("#### 7. Download Outputs")
-    if isinstance(inventory_df, pd.DataFrame) and isinstance(relevance_df, pd.DataFrame):
-        broker_coverage_df = daily_research_brief.build_broker_coverage_summary(relevance_df)
-        d1, d2, d3, d4 = st.columns(4)
-        with d1:
-            st.download_button(
-                "Download inventory CSV",
-                data=inventory_df.drop(columns=["extracted_path"], errors="ignore").to_csv(index=False).encode("utf-8"),
-                file_name="daily_research_inventory.csv",
-                mime="text/csv",
-                key="daily_download_inventory",
-                use_container_width=True,
-            )
-        with d2:
-            st.download_button(
-                "Download relevance CSV",
-                data=relevance_df.drop(columns=["extracted_path"], errors="ignore").to_csv(index=False).encode("utf-8"),
-                file_name="daily_research_relevance.csv",
-                mime="text/csv",
-                key="daily_download_relevance",
-                use_container_width=True,
-            )
-        with d3:
-            st.download_button(
-                "Download broker coverage CSV",
-                data=broker_coverage_df.to_csv(index=False).encode("utf-8"),
-                file_name="daily_research_broker_coverage.csv",
-                mime="text/csv",
-                key="daily_download_broker_coverage",
-                use_container_width=True,
-            )
-        with d4:
-            st.download_button(
-                "Download daily brief Markdown",
-                data=brief_text.encode("utf-8") if brief_text else b"",
-                file_name="daily_research_brief.md",
-                mime="text/markdown",
-                key="daily_download_brief",
-                disabled=not bool(brief_text),
-                use_container_width=True,
-            )
 
 # ---------- UI ----------
 
@@ -7390,9 +7417,9 @@ def main():
         value=True,
     )
 
-    # Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
+    # Optional: AI relevance scoring inside excerpt PDFs (adds 1â€“5 rating + highlight per paragraph)
     ai_score_enabled = st.sidebar.checkbox(
-        "AI relevance scoring (1–5 highlights)",
+        "AI relevance scoring (1â€“5 highlights)",
         value=False,
         help="Uses OpenAI to rate how directly a paragraph discusses the company. "
              "Adds a rating tag and background highlight for faster skimming.",
@@ -7653,7 +7680,7 @@ def main():
             if step == "fund_families":
                 days = int(cfg.get("mf_lookback_days", 7))
                 # NOTE: Do not wrap Fund Families in st.status(expanded=True) because Fund Families uses expanders internally.
-                st.info(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
+                st.info(f"Run All: Fund Families â€” Batch 8 Latest (last {days} days)")
                 quarter_options = get_available_quarters()
                 run_batch8_latest(quarter_options, days, use_first_word, ensure_compiled_index=True)
                 cache_all = st.session_state.get("batch_cache", {}) or {}
@@ -7684,7 +7711,7 @@ def main():
             if step == "seeking_alpha":
                 max_articles = int(cfg.get("sa_max_articles", 5))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
-                with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
+                with st.status("Run All: Seeking Alpha â€” building compiled PDF for ALL tickers", expanded=True):
                     universe = []
                     try:
                         from tickers import tickers as _T  # type: ignore
@@ -7706,7 +7733,7 @@ def main():
             if step == "substack":
                 days_back = int(cfg.get("substack_lookback_days", 2))
                 max_posts = int(cfg.get("substack_max_posts", 3))
-                with st.status(f"Run All: Substack — building compiled PDF (last {days_back} days)", expanded=True):
+                with st.status(f"Run All: Substack â€” building compiled PDF (last {days_back} days)", expanded=True):
                     try:
                         from tickers import tickers as _T  # type: ignore
                         universe = []
@@ -7790,7 +7817,7 @@ def main():
                 _prog_den = max(1, int(total_groups))
                 _prog_num = min(_prog_den, int(_completed_groups_n))
                 st.progress(float(_prog_num) / float(_prog_den))
-                st.caption(f"Run All: Podcasts progress — {_prog_num}/{_prog_den} groups complete")
+                st.caption(f"Run All: Podcasts progress â€” {_prog_num}/{_prog_den} groups complete")
 
 
 
@@ -7801,7 +7828,7 @@ def main():
                     # Process one group per rerun for stability
                     if group_index < total_groups:
                         with st.status(
-                            f"Run All: Podcasts — processing group {group_index + 1}/{total_groups} (last {days_back} days)",
+                            f"Run All: Podcasts â€” processing group {group_index + 1}/{total_groups} (last {days_back} days)",
                             expanded=True,
                         ):
                             podcast_ids = groups[group_index] or []
@@ -7847,7 +7874,7 @@ def main():
 
                     # All groups done -> merge and build final PDF once
                     with st.status(
-                        f"Run All: Podcasts — merging groups and building compiled PDF (last {days_back} days)",
+                        f"Run All: Podcasts â€” merging groups and building compiled PDF (last {days_back} days)",
                         expanded=True,
                     ):
                         merged_excerpts: dict = {}
@@ -7924,7 +7951,7 @@ def main():
             )
             st.rerun()
 
-        # Main controls in a card – full run
+        # Main controls in a card â€“ full run
         with st.container():
             st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
             st.markdown("#### Run scope", unsafe_allow_html=True)
@@ -7932,7 +7959,7 @@ def main():
 
             run_mode = st.radio(
                 "Run mode",
-                ["Run all 7 batches", "Run a specific batch", "Run Batch 8 — Latest"],
+                ["Run all 7 batches", "Run a specific batch", "Run Batch 8 â€” Latest"],
                 index=1,
             )
 
@@ -7946,7 +7973,7 @@ def main():
                         run_batch(bn, quarters, use_first_word, subset=None)
                     st.markdown("</div>", unsafe_allow_html=True)
                     st.stop()
-            elif run_mode == "Run Batch 8 — Latest":
+            elif run_mode == "Run Batch 8 â€” Latest":
                 lookback_days = st.selectbox(
                     "Lookback window (days)",
                     options=[7, 14, 30],
@@ -7954,9 +7981,9 @@ def main():
                 )
                 st.info(
                     "Batch 8 scans the BSD database for anything published within the lookback window. "
-                    "If a fund matches one of Batch 1–7 names, it is labeled with that batch for traceability."
+                    "If a fund matches one of Batch 1â€“7 names, it is labeled with that batch for traceability."
                 )
-                if st.button("Run Batch 8 — Latest", use_container_width=True):
+                if st.button("Run Batch 8 â€” Latest", use_container_width=True):
                     run_batch8_latest(quarter_options, int(lookback_days), use_first_word)
                     st.markdown("</div>", unsafe_allow_html=True)
             else:
@@ -8061,7 +8088,7 @@ def main():
             )
         else:
             labels = [
-                f"{i+1}. {m.get('created_at', '')} – {Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
+                f"{i+1}. {m.get('created_at', '')} â€“ {Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
                 for i, m in enumerate(manifests)
             ]
             idx_new = 0
@@ -8113,7 +8140,7 @@ def main():
 
             # ---------- AI Insights: Buy / Hold / Sell ----------
         st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-        st.markdown("#### AI Insights – Buy / Hold / Sell by company", unsafe_allow_html=True)
+        st.markdown("#### AI Insights â€“ Buy / Hold / Sell by company", unsafe_allow_html=True)
         st.write(
             "Use OpenAI to classify each ticker in a compiled run as **buy**, **hold**, "
             "**sell**, or **unclear**, with reasoning grounded in the excerpted letters."
@@ -8140,7 +8167,7 @@ def main():
             )
         else:
             labels = [
-                f"{i+1}. {m.get('created_at', '')} – "
+                f"{i+1}. {m.get('created_at', '')} â€“ "
                 f"{Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
                 for i, m in enumerate(ai_manifests)
             ]
@@ -8167,7 +8194,7 @@ def main():
             results: List[Dict[str, Any]] = []
             if st.button("Run AI analysis for this run", key="ai_run_btn"):
                 manifest = ai_manifests[ai_manifest_idx]
-                with st.spinner("Calling OpenAI for ticker-level stances…"):
+                with st.spinner("Calling OpenAI for ticker-level stancesâ€¦"):
                     try:
                         results = ai_insights.generate_ticker_stances(
                             manifest=manifest,
@@ -8205,7 +8232,7 @@ def main():
                 ticker_options = [row["Ticker"] for row in summary_rows]
                 if ticker_options:
                     focus_ticker = st.selectbox(
-                        "Detailed view – choose a ticker",
+                        "Detailed view â€“ choose a ticker",
                         options=ticker_options,
                         key="ai_focus_ticker",
                     )
@@ -8215,7 +8242,7 @@ def main():
                         stance = (detail.get("stance") or "").lower()
                         conf = float(detail.get("confidence") or 0.0)
 
-                        # Map stance + confidence to a 0–1 position for the gauge
+                        # Map stance + confidence to a 0â€“1 position for the gauge
                         if stance == "buy":
                             pos = 0.5 + 0.5 * conf
                         elif stance == "sell":
@@ -8285,13 +8312,13 @@ def main():
         if selected_tickers and len(selected_tickers) > 1:
             col_prev, col_spacer, col_next = st.columns([1, 3, 1])
             with col_next:
-                if st.button("Next ticker ▶", key="sa_next_ticker"):
+                if st.button("Next ticker â–¶", key="sa_next_ticker"):
                     current_idx = st.session_state.get("sa_current_index", 0)
                     next_idx = (current_idx + 1) % len(selected_tickers)
                     st.session_state["sa_current_index"] = next_idx
                     st.rerun()
             with col_prev:
-                if st.button("◀ Previous", key="sa_prev_ticker"):
+                if st.button("â—€ Previous", key="sa_prev_ticker"):
                     current_idx = st.session_state.get("sa_current_index", 0)
                     prev_idx = (current_idx - 1) % len(selected_tickers)
                     st.session_state["sa_current_index"] = prev_idx

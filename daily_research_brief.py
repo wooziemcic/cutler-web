@@ -2421,12 +2421,21 @@ def validate_research_answer_grounding_detailed(
     ]
     if not str(text or "").strip():
         return False, "empty response", "OpenAI returned no answer text."
-    missing_sections = [section for section in required if section not in text]
+    heading_lines = [line.strip() for line in text.splitlines() if line.strip().startswith("#")]
+    missing_sections = [section for section in required if section not in heading_lines]
     if missing_sections:
         return (
             False,
             "parsing/format issue",
             "Missing required section(s): " + ", ".join(missing_sections),
+        )
+    unexpected_headings = [heading for heading in heading_lines if heading not in required]
+    if unexpected_headings:
+        return (
+            False,
+            "parsing/format issue",
+            "Unexpected heading(s) found. Use only the required `##` headings: "
+            + ", ".join(unexpected_headings[:10]),
         )
     if not isinstance(results, pd.DataFrame) or results.empty:
         return False, "parsing/format issue", "No top search results were available for validation."
@@ -2540,10 +2549,19 @@ def validate_research_answer_grounding_detailed(
                 )
 
     evidence_section = text.split("## Top Matching Evidence", 1)[1].split("## Source Files", 1)[0]
+    summary_section = text.split("## Answer Summary", 1)[1].split("## Top Matching Evidence", 1)[0]
+    summary_bullets = [
+        line.strip() for line in summary_section.splitlines()
+        if line.strip().startswith(("-", "*"))
+    ]
+    if not 2 <= len(summary_bullets) <= 4:
+        return False, "parsing/format issue", "Answer Summary must contain 2-4 concise bullets."
     evidence_bullets = [
         line.strip() for line in evidence_section.splitlines()
         if line.strip().startswith(("-", "*"))
     ]
+    if len(evidence_bullets) > 5:
+        return False, "parsing/format issue", "Top Matching Evidence must contain no more than 5 bullets."
     if evidence_bullets and not all(any(name in bullet for name in source_names) for bullet in evidence_bullets):
         return False, "missing source filenames", "One or more evidence bullets omitted an exact source filename."
     return True, "", ""
