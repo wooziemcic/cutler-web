@@ -158,7 +158,10 @@ RESEARCH_INDEX_COLUMNS = [
     "relevance_score", "priority_level", "extracted_snippet", "evidence_type",
     "extraction_status",
 ]
-RESEARCH_SEARCH_RESULT_COLUMNS = RESEARCH_INDEX_COLUMNS + ["search_score", "match_reason"]
+RESEARCH_SEARCH_RESULT_COLUMNS = RESEARCH_INDEX_COLUMNS + [
+    "search_score", "match_type", "evidence_strength", "why_matched",
+    "needs_manual_review", "matched_keywords", "display_snippet", "match_reason",
+]
 DASHBOARD_SIGNAL_COLUMNS = [
     "ticker", "signal_type", "signal_direction", "confidence", "evidence",
     "source_file", "broker_or_source", "source_date", "needs_manual_review", "reason",
@@ -2168,6 +2171,7 @@ def search_research_index(
     category: str = "",
     document_type: str = "",
     source_date: str = "",
+    evidence_strength: str = "",
     max_results: int = 100,
 ) -> pd.DataFrame:
     """Rank lightweight index rows using deterministic metadata and keyword matching."""
@@ -2179,11 +2183,16 @@ def search_research_index(
         "source_or_broker": source_or_broker,
         "category": category,
         "document_type": document_type,
-        "source_date": source_date,
     }
     for column, value in filters.items():
         if value:
             result = result[result[column].astype(str).str.casefold() == str(value).casefold()]
+    if source_date:
+        source_date_casefold = str(source_date).casefold()
+        result = result[
+            (result["source_date"].astype(str).str.casefold() == source_date_casefold)
+            | (result["indexed_source"].astype(str).str.casefold() == source_date_casefold)
+        ]
     if ticker:
         ticker_upper = ticker.upper()
         result = result[
@@ -2246,6 +2255,19 @@ def search_research_index(
     if result.empty:
         return pd.DataFrame(columns=RESEARCH_SEARCH_RESULT_COLUMNS)
 
+    indexed_sources = {
+        str(value).strip()
+        for value in result["source_or_broker"]
+        if str(value).strip()
+    }
+    query_brokers = {
+        source for source in indexed_sources
+        if re.search(rf"\b{re.escape(source)}\b", str(query or ""), flags=re.IGNORECASE)
+    }
+    normalized_query_source = detect_source(str(query or ""))
+    if normalized_query_source in indexed_sources:
+        query_brokers.add(normalized_query_source)
+
     parsed_dates = {}
     for value in result["source_date"].astype(str).drop_duplicates():
         try:
@@ -2267,21 +2289,39 @@ def search_research_index(
             "evidence": str(row.get("evidence_type") or "").casefold(),
         }
         full_text = " ".join(searchable_fields.values())
-        score = min(float(row.get("relevance_score") or 0) / 10.0, 10.0)
-        reasons = [f"relevance {int(row.get('relevance_score') or 0)}"]
+        relevance_score = int(row.get("relevance_score") or 0)
+        score = min(relevance_score / 5.0, 20.0)
+        reasons = [f"relevance score {relevance_score}"]
         matched_terms = []
-        if query_text and query_text in full_text:
-            score += 24
-            reasons.append("phrase match")
+        snippet_terms = []
+        metadata_terms = []
+        meaningful_phrase = " ".join(terms)
+        quoted_phrases = [
+            phrase.casefold().strip()
+            for phrase in re.findall(r'"([^"]+)"', str(query or ""))
+            if phrase.strip()
+        ]
+        phrase_match = bool(
+            (meaningful_phrase and len(terms) >= 2 and meaningful_phrase in full_text)
+            or any(phrase in full_text for phrase in quoted_phrases)
+        )
+        if phrase_match:
+            score += 35
+            reasons.append("exact phrase match")
         for term in terms:
             matching_fields = [name for name, value in searchable_fields.items() if term in value]
             if matching_fields:
                 matched_terms.append(term)
-                score += 5 + min(len(matching_fields), 3)
                 if "snippet" in matching_fields:
-                    score += 4
+                    snippet_terms.append(term)
+                    score += 12
+                else:
+                    metadata_terms.append(term)
+                    score += 5
                 if "filename" in matching_fields:
-                    score += 3
+                    score += 6
+                if "broker" in matching_fields:
+                    score += 6
         detected = {
             value.strip().upper()
             for value in str(row.get("all_detected_tickers") or row.get("ticker") or "").split(",")
@@ -2289,33 +2329,73 @@ def search_research_index(
         }
         exact_tickers = detected & query_tickers
         if exact_tickers:
-            score += 55
+            score += 90
             reasons.append(f"exact ticker: {', '.join(sorted(exact_tickers))}")
+        row_source = str(row.get("source_or_broker") or "").strip()
+        exact_broker = bool(row_source and row_source in query_brokers)
+        if exact_broker:
+            score += 55
+            reasons.append(f"exact broker/source: {row_source}")
         if str(row.get("priority_level") or "") == "High":
-            score += 8
+            score += 15
             reasons.append("high priority")
-        if str(row.get("extracted_snippet") or "").strip():
-            score += 20
+        cleaned_snippet = re.sub(
+            r"\s+",
+            " ",
+            str(row.get("extracted_snippet") or "").replace("\x00", " "),
+        ).strip()
+        has_snippet = bool(cleaned_snippet)
+        if has_snippet:
+            score += 28
             reasons.append("snippet available")
         else:
-            score -= 5
-            reasons.append("metadata only")
+            score -= 18
+            reasons.append("metadata-only match")
         if str(row.get("evidence_type") or "") not in {"", "Other"}:
-            score += 4
+            score += 5
             reasons.append(str(row.get("evidence_type")))
         row_ordinal = parsed_dates.get(str(row.get("source_date") or ""), 0)
         if row_ordinal and newest_ordinal:
             date_span = max(newest_ordinal - oldest_ordinal, 1)
-            recency_boost = 2 + (3 * (row_ordinal - oldest_ordinal) / date_span)
+            recency_boost = 1 + (3 * (row_ordinal - oldest_ordinal) / date_span)
             score += recency_boost
             reasons.append("source-date recency")
         if matched_terms:
-            reasons.append(f"matched: {', '.join(sorted(set(matched_terms)))}")
+            reasons.append(f"keywords: {', '.join(sorted(set(matched_terms)))}")
         if terms and not matched_terms and not exact_tickers and query_text not in full_text:
             continue
+
+        if exact_tickers:
+            match_type = "ticker_match"
+        elif exact_broker:
+            match_type = "broker_match"
+        elif phrase_match:
+            match_type = "phrase_match"
+        elif snippet_terms:
+            match_type = "snippet_match"
+        else:
+            match_type = "metadata_match"
+        if has_snippet and (exact_tickers or exact_broker):
+            strength = "High"
+        elif has_snippet:
+            strength = "Medium"
+        else:
+            strength = "Low"
+        if evidence_strength and strength.casefold() != evidence_strength.casefold():
+            continue
+
         output = row.to_dict()
         output["search_score"] = round(score, 1)
-        output["match_reason"] = "; ".join(reasons)
+        output["match_type"] = match_type
+        output["evidence_strength"] = strength
+        output["why_matched"] = "; ".join(reasons)
+        output["needs_manual_review"] = strength != "High"
+        output["matched_keywords"] = ", ".join(sorted(set(matched_terms)))
+        output["display_snippet"] = (
+            cleaned_snippet[:520] + ("..." if len(cleaned_snippet) > 520 else "")
+            if cleaned_snippet else "Metadata-only match; no extracted snippet is available."
+        )
+        output["match_reason"] = output["why_matched"]
         scored.append(output)
     if not scored:
         return pd.DataFrame(columns=RESEARCH_SEARCH_RESULT_COLUMNS)
@@ -2416,17 +2496,24 @@ def build_deterministic_research_answer(
         snippet_count = int(top["extracted_snippet"].astype(str).str.strip().ne("").sum())
         metadata_only_count = len(top) - snippet_count
         first_file = str(top.iloc[0].get("file_name") or "")
+        strength_counts = top.get("evidence_strength", pd.Series(dtype=str)).value_counts()
         lines.append(
             f"- Metadata shows {len(results)} matching indexed row(s); {snippet_count} top result(s) include "
-            f"extracted snippets and {metadata_only_count} are metadata-only. [Source: {first_file}]"
+            f"extracted snippets and {metadata_only_count} top result(s) are metadata-only. [Source: {first_file}]"
         )
-        for _, row in top.head(2).iterrows():
+        lines.append(
+            f"- Evidence confidence among the top results: {int(strength_counts.get('High', 0))} High, "
+            f"{int(strength_counts.get('Medium', 0))} Medium, and {int(strength_counts.get('Low', 0))} Low. "
+            f"[Source: {first_file}]"
+        )
+        for _, row in top.head(3).iterrows():
             source = str(row.get("file_name") or "")
-            snippet = str(row.get("extracted_snippet") or "").strip()
+            snippet = str(row.get("display_snippet") or row.get("extracted_snippet") or "").strip()
             if snippet:
-                excerpt = snippet[:240]
+                excerpt = snippet[:260]
                 lines.append(
-                    f"- The extracted snippet from {source} mentions: \"{excerpt}\" [Source: {source}]"
+                    f"- **{row.get('evidence_strength') or 'Low'} confidence**: The extracted snippet from "
+                    f"{source} mentions: {excerpt} [Source: {source}]"
                 )
             else:
                 lines.append(
@@ -2434,26 +2521,28 @@ def build_deterministic_research_answer(
                     f"{row.get('source_or_broker') or 'an unidentified source'}. [Source: {source}]"
                 )
 
-    lines.extend(["", "## Top Matching Evidence"])
+    lines.extend(["", "## Top Evidence"])
     if top.empty:
         lines.append("No matching evidence.")
     else:
         for _, row in top.head(5).iterrows():
-            snippet = str(row.get("extracted_snippet") or "").strip()
-            if snippet:
-                excerpt = snippet[:700]
+            snippet = str(row.get("display_snippet") or row.get("extracted_snippet") or "").strip()
+            if str(row.get("extracted_snippet") or "").strip():
                 lines.append(
-                    f"- The extracted snippet from {row['file_name']} mentions: \"{excerpt}\" "
+                    f"- **{row.get('evidence_strength') or 'Medium'} confidence / "
+                    f"{row.get('match_type') or 'snippet_match'}**: The extracted snippet from "
+                    f"{row['file_name']} mentions: {snippet} "
+                    f"Matched keywords: {row.get('matched_keywords') or 'broad research match'}. "
                     f"[Source: {row['file_name']}]"
                 )
             else:
                 lines.append(
-                    f"- Metadata shows {row['file_name']} is a metadata-only match; "
+                    f"- **Low confidence / metadata match**: {row['file_name']} is a metadata-only match; "
                     f"{row['document_type']} in {row['category']}, "
                     f"source/broker {row['source_or_broker'] or 'unknown'}. [Source: {row['file_name']}]"
                 )
 
-    lines.extend(["", "## Source Files"])
+    lines.extend(["", "## Source References"])
     if top.empty:
         lines.append("No matching source files.")
     else:
@@ -2752,7 +2841,8 @@ def build_research_answer_payload(query: str, results: pd.DataFrame, *, max_resu
     fields = [
         "source_date", "ticker", "all_detected_tickers", "source_or_broker", "category",
         "document_type", "file_name", "relative_path", "relevance_score", "priority_level",
-        "extracted_snippet", "evidence_type", "extraction_status", "match_reason",
+        "extracted_snippet", "evidence_type", "extraction_status", "match_type",
+        "evidence_strength", "why_matched", "matched_keywords", "display_snippet",
     ]
     compact = results.reindex(columns=fields).head(int(max_results)).copy()
     compact["extracted_snippet"] = compact["extracted_snippet"].astype(str).str.slice(0, 900)
@@ -2768,8 +2858,8 @@ def validate_research_answer_grounding_detailed(
 ) -> Tuple[bool, str, str]:
     """Validate Historical Q&A answers and return a user-readable failure reason."""
     required = [
-        "## Answer Summary", "## Top Matching Evidence",
-        "## Source Files", "## Caveats / Manual Verification",
+        "## Answer Summary", "## Top Evidence",
+        "## Source References", "## Caveats / Manual Verification",
     ]
     if not str(text or "").strip():
         return False, "empty response", "OpenAI returned no answer text."
@@ -2856,7 +2946,7 @@ def validate_research_answer_grounding_detailed(
         r"\bleverage\b", r"\bdebt\b", r"\bcash flow\b", r"\bcredit concern\b",
     ]
     section = ""
-    substantive_sections = {"## Answer Summary", "## Top Matching Evidence"}
+    substantive_sections = {"## Answer Summary", "## Top Evidence"}
     for line_number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if stripped in required:
@@ -2956,20 +3046,20 @@ def validate_research_answer_grounding_detailed(
             "a cautious snippet-language observation supported by the cited snippets.",
         )
 
-    evidence_section = text.split("## Top Matching Evidence", 1)[1].split("## Source Files", 1)[0]
-    summary_section = text.split("## Answer Summary", 1)[1].split("## Top Matching Evidence", 1)[0]
+    evidence_section = text.split("## Top Evidence", 1)[1].split("## Source References", 1)[0]
+    summary_section = text.split("## Answer Summary", 1)[1].split("## Top Evidence", 1)[0]
     summary_bullets = [
         line.strip() for line in summary_section.splitlines()
         if line.strip().startswith(("-", "*"))
     ]
-    if not 1 <= len(summary_bullets) <= 3:
-        return False, "parsing/format issue", "Answer Summary must contain 1-3 concise bullets."
+    if not 3 <= len(summary_bullets) <= 5:
+        return False, "parsing/format issue", "Answer Summary must contain 3-5 concise bullets."
     evidence_bullets = [
         line.strip() for line in evidence_section.splitlines()
         if line.strip().startswith(("-", "*"))
     ]
     if len(evidence_bullets) > 5:
-        return False, "parsing/format issue", "Top Matching Evidence must contain no more than 5 bullets."
+        return False, "parsing/format issue", "Top Evidence must contain no more than 5 bullets."
     if evidence_bullets and not all(any(name in bullet for name in source_names) for bullet in evidence_bullets):
         return False, "missing source filenames", "One or more evidence bullets omitted an exact source filename."
     return True, "", ""

@@ -5886,19 +5886,21 @@ def _generate_historical_research_answer_with_optional_llm(
         results_df,
         max_results=max_results,
     )
+    grounded_fallback = daily_research_brief.add_generation_method(fallback, "grounded_deterministic")
     api_key = os.getenv("OPENAI_API_KEY") or ""
     if not api_key:
-        return fallback, "grounded_deterministic", "missing_api_key", {
+        return grounded_fallback, "grounded_deterministic", "missing_api_key", {
             "reason": "OpenAI polish skipped",
             "detail": "OPENAI_API_KEY is missing.",
         }
     if results_df.empty:
-        return fallback, "grounded_deterministic", "no_search_results", {}
+        return grounded_fallback, "grounded_deterministic", "no_search_results", {}
 
     system_prompt = (
         "You are polishing a retrieved-evidence research answer. You may summarize and rephrase retrieved snippets "
         "into clear, concise business language. Do not add facts beyond the retrieved evidence. Keep the answer concise "
-        "and professional. Use 3-5 bullets for the answer summary, 3-5 key evidence bullets, a Source References "
+        "and professional. Use `## Answer Summary` with 3-5 bullets, `## Top Evidence` with 3-5 bullets, "
+        "a Source References "
         "section listing exact retrieved filenames, and a brief caveat. Do not give buy/sell/hold advice. You may "
         "summarize company, business, financial, and sector topics found in the retrieved evidence. Do not claim "
         "you reviewed full PDFs."
@@ -5920,7 +5922,7 @@ def _generate_historical_research_answer_with_optional_llm(
         max_tokens=1400 if mode == "Deeper answer" else 900,
     )
     if error:
-        return fallback, "grounded_deterministic", error, {
+        return grounded_fallback, "grounded_deterministic", error, {
             "reason": "OpenAI polish failed",
             "detail": error,
         }
@@ -5955,7 +5957,7 @@ def _generate_historical_research_answer_with_optional_llm(
             "facts, entities, advice, or claims of reviewing full PDFs."
         ),
     }
-    return fallback, "grounded_deterministic", f"grounding_failed: {debug['reason']}", debug
+    return grounded_fallback, "grounded_deterministic", f"grounding_failed: {debug['reason']}", debug
 
 
 def _show_openai_fallback_warning(warning: str, *, compact: bool = False) -> None:
@@ -6950,6 +6952,17 @@ def draw_daily_research_brief_section() -> None:
             detected_ticker_options = set()
             for value in research_index_df["all_detected_tickers"].astype(str):
                 detected_ticker_options.update(part.strip() for part in value.split(",") if part.strip())
+            detected_ticker_options.update(
+                str(value).strip()
+                for value in research_index_df["ticker"]
+                if str(value).strip()
+            )
+            date_source_options = sorted({
+                str(value).strip()
+                for column in ["source_date", "indexed_source"]
+                for value in research_index_df[column]
+                if str(value).strip()
+            })
             search_query = st.text_input(
                 "Ask a research question",
                 placeholder="What did brokers say about AMZN?",
@@ -6957,7 +6970,8 @@ def draw_daily_research_brief_section() -> None:
             )
             st.caption(
                 "Try: What did brokers say about AMZN? / Find reports mentioning capex / "
-                "Show credit reports mentioning liquidity / Which tickers had new broker coverage?"
+                "Show credit reports mentioning liquidity / Which tickers had new broker coverage? / "
+                "Show Green Street recommendation-change reports / What evidence mentions margin expansion?"
             )
             filter_one, filter_two, filter_three = st.columns(3)
             with filter_one:
@@ -6985,7 +6999,7 @@ def draw_daily_research_brief_section() -> None:
             with filter_three:
                 search_date = st.selectbox(
                     "Date/folder",
-                    options=_research_filter_options("source_date"),
+                    options=["All"] + date_source_options,
                     key="daily_research_search_date_filter",
                 )
                 answer_mode = st.radio(
@@ -6994,6 +7008,11 @@ def draw_daily_research_brief_section() -> None:
                     horizontal=True,
                     key="daily_research_search_answer_mode",
                 )
+                search_evidence_strength = st.selectbox(
+                    "Evidence strength",
+                    options=["All", "High", "Medium", "Low"],
+                    key="daily_research_search_evidence_strength_filter",
+                )
 
             active_filters = {
                 "ticker": "" if search_ticker == "All" else search_ticker,
@@ -7001,6 +7020,7 @@ def draw_daily_research_brief_section() -> None:
                 "category": "" if search_category == "All" else search_category,
                 "document_type": "" if search_document_type == "All" else search_document_type,
                 "source_date": "" if search_date == "All" else search_date,
+                "evidence_strength": "" if search_evidence_strength == "All" else search_evidence_strength,
             }
             has_active_filters = any(active_filters.values())
             intent_message = (
@@ -7067,12 +7087,13 @@ def draw_daily_research_brief_section() -> None:
                     st.info("No indexed research rows matched the question and selected filters.")
                 else:
                     result_display_columns = [
-                        "search_score", "match_reason", "source_date", "ticker", "source_or_broker",
+                        "search_score", "match_type", "evidence_strength", "why_matched",
+                        "matched_keywords", "needs_manual_review", "source_date", "ticker", "source_or_broker",
                         "category", "document_type", "file_name", "relevance_score", "priority_level",
-                        "evidence_type", "extraction_status", "extracted_snippet",
+                        "evidence_type", "extraction_status", "display_snippet",
                     ]
                     st.dataframe(
-                        search_results_df[result_display_columns],
+                        search_results_df.reindex(columns=result_display_columns),
                         use_container_width=True,
                         hide_index=True,
                     )
