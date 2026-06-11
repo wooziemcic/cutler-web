@@ -6066,6 +6066,30 @@ def draw_dashboard_section() -> None:
     extracted_snippets = int(
         dashboard_index.get("extracted_snippet", pd.Series(dtype=str)).astype(str).str.strip().ne("").sum()
     )
+    high_confidence_actionable = int(
+        (
+            (signals_df.get("confidence", pd.Series(dtype=str)).astype(str) == "High")
+            & (signals_df.get("signal_direction", pd.Series(dtype=str)).astype(str) != "Unknown")
+        ).sum()
+    )
+    manual_review_main = manual_review[
+        manual_review.get("priority", pd.Series(dtype=str)).astype(str).isin(["Critical", "High", "Medium"])
+    ] if not manual_review.empty else manual_review
+    manual_review_low = manual_review[
+        manual_review.get("priority", pd.Series(dtype=str)).astype(str) == "Low"
+    ] if not manual_review.empty else manual_review
+    review_priority_counts = (
+        manual_review.get("priority", pd.Series(dtype=str))
+        .astype(str)
+        .value_counts()
+        .reindex(["Critical", "High", "Medium", "Low"], fill_value=0)
+    )
+    metadata_only_low_count = int(
+        signals_df.get("evidence", pd.Series(dtype=str))
+        .astype(str)
+        .str.contains("metadata match only", case=False, na=False)
+        .sum()
+    )
     total_files = len(inventory_df) if not inventory_df.empty else len(relevance_df)
     high_priority_files = int((relevance_df.get("priority_level", pd.Series(dtype=str)) == "High").sum())
     credit_reports = int((document_types == "credit report").sum())
@@ -6116,7 +6140,15 @@ def draw_dashboard_section() -> None:
                             f"({int(most_covered['broker_report_count'])} broker/source report(s))"
                             if most_covered is not None else "- **Most covered ticker:** No broker/source coverage available"
                         ),
-                        f"- **Items needing manual review:** {len(manual_review)}",
+                        f"- **High-confidence actionable signals:** {high_confidence_actionable}",
+                        (
+                            "- **Critical / High manual review:** "
+                            f"{int(review_priority_counts.get('Critical', 0)) + int(review_priority_counts.get('High', 0))}"
+                        ),
+                        (
+                            "- **Metadata-only low-priority signals excluded from main review:** "
+                            f"{metadata_only_low_count}"
+                        ),
                         f"- **Cross-day changes:** {cross_day_status}",
                     ]
                 )
@@ -6149,23 +6181,61 @@ def draw_dashboard_section() -> None:
         st.markdown("#### Research Activity")
         _show_dashboard_kpis()
         _show_executive_snapshot()
+
+        st.markdown("#### Activity Visuals")
+        overview_visual_one, overview_visual_two = st.columns(2)
+        with overview_visual_one:
+            st.markdown("##### Top 10 Priority Tickers")
+            if display_priority.empty:
+                st.info("No priority ticker data is available.")
+            else:
+                priority_chart = display_priority.head(10)[["ticker", "attention_score"]].sort_values(
+                    "attention_score", ascending=True
+                )
+                st.bar_chart(
+                    priority_chart, x="ticker", y="attention_score", horizontal=True,
+                    color="#2F5597", height=340,
+                )
+        with overview_visual_two:
+            st.markdown("##### Signal Type Distribution")
+            if signals_df.empty:
+                st.info("No signal distribution is available.")
+            else:
+                signal_chart = (
+                    signals_df["signal_type"].astype(str).value_counts().head(10)
+                    .rename_axis("signal_type").reset_index(name="signal_count")
+                )
+                st.bar_chart(
+                    signal_chart, x="signal_type", y="signal_count",
+                    color="#5B9BD5", height=340,
+                )
+        st.markdown("##### Manual Review by Priority")
+        if manual_review.empty:
+            st.info("No prioritized manual-review items are available.")
+        else:
+            review_chart = review_priority_counts.rename_axis("priority").reset_index(name="item_count")
+            st.bar_chart(
+                review_chart, x="priority", y="item_count",
+                color="#A5A5A5", height=250,
+            )
+
         st.markdown("#### Top Priority Tickers")
         if display_priority.empty:
             st.info("No ticker/entity summary is available from the processed research.")
         else:
-            st.dataframe(display_priority.head(10), use_container_width=True, hide_index=True)
-            with st.expander(f"View all priority tickers ({len(display_priority)})"):
+            with st.expander(f"View priority ticker details ({len(display_priority)})"):
                 st.dataframe(display_priority, use_container_width=True, hide_index=True)
 
         st.markdown("#### What to Review First")
-        if manual_review.empty:
-            st.info("No current signals are marked for manual review.")
+        if manual_review_main.empty:
+            st.info("No current signals are marked for Critical, High, or Medium review.")
         else:
             review_first_columns = [
-                "ticker", "signal_type", "confidence", "why_review", "source_file", "broker_or_source",
+                "ticker", "priority", "signal_type", "signal_direction", "confidence",
+                "why_review", "source_file", "broker_or_source",
             ]
             st.dataframe(
-                manual_review.reindex(columns=review_first_columns).head(10),
+                manual_review_main.reindex(columns=review_first_columns).head(10),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -6179,6 +6249,14 @@ def draw_dashboard_section() -> None:
         if signals_df.empty:
             st.info("No signal rows are available from current metadata or extracted snippets.")
         else:
+            signal_chart = (
+                signals_df["signal_type"].astype(str).value_counts().head(12)
+                .rename_axis("signal_type").reset_index(name="signal_count")
+            )
+            st.bar_chart(
+                signal_chart, x="signal_type", y="signal_count",
+                color="#5B9BD5", height=300,
+            )
             filter_row_one = st.columns(4)
             filter_row_two = st.columns(3)
 
@@ -6242,7 +6320,13 @@ def draw_dashboard_section() -> None:
         if broker_coverage.empty:
             st.info("No recognized broker/source coverage is available.")
         else:
-            st.dataframe(broker_coverage.reindex(columns=broker_columns).head(10), use_container_width=True, hide_index=True)
+            broker_chart = broker_coverage.head(10)[["ticker", "broker_report_count"]].sort_values(
+                "broker_report_count", ascending=True
+            )
+            st.bar_chart(
+                broker_chart, x="ticker", y="broker_report_count", horizontal=True,
+                color="#4472C4", height=340,
+            )
             three_plus = broker_coverage[
                 pd.to_numeric(broker_coverage["broker_report_count"], errors="coerce").fillna(0) >= 3
             ]
@@ -6250,7 +6334,8 @@ def draw_dashboard_section() -> None:
             if three_plus.empty:
                 st.info("No ticker currently has three or more recognized broker/source reports.")
             else:
-                st.dataframe(three_plus.reindex(columns=broker_columns), use_container_width=True, hide_index=True)
+                with st.expander(f"View tickers with 3+ reports ({len(three_plus)})", expanded=True):
+                    st.dataframe(three_plus.reindex(columns=broker_columns), use_container_width=True, hide_index=True)
             with st.expander(f"View all broker coverage rows ({len(broker_coverage)})"):
                 st.dataframe(broker_coverage.reindex(columns=broker_columns), use_container_width=True, hide_index=True)
 
@@ -6271,7 +6356,14 @@ def draw_dashboard_section() -> None:
         if credit_watch.empty:
             st.info("No credit, liquidity, leverage, debt, capex, rating, or risk items were detected.")
         else:
-            st.dataframe(credit_watch.reindex(columns=signal_columns).head(15), use_container_width=True, hide_index=True)
+            credit_chart = (
+                credit_watch["ticker"].astype(str).value_counts().head(12)
+                .rename_axis("ticker").reset_index(name="signal_count")
+            )
+            st.bar_chart(
+                credit_chart, x="ticker", y="signal_count",
+                color="#C55A11", height=280,
+            )
             with st.expander(f"View all credit / risk items ({len(credit_watch)})"):
                 st.dataframe(credit_watch.reindex(columns=signal_columns), use_container_width=True, hide_index=True)
 
@@ -6292,22 +6384,44 @@ def draw_dashboard_section() -> None:
         if earnings_watch.empty:
             st.info("No earnings, guidance, estimate, margin, filing, or transcript items were detected.")
         else:
-            st.dataframe(earnings_watch.reindex(columns=signal_columns).head(15), use_container_width=True, hide_index=True)
+            earnings_chart = (
+                earnings_watch["ticker"].astype(str).value_counts().head(12)
+                .rename_axis("ticker").reset_index(name="signal_count")
+            )
+            st.bar_chart(
+                earnings_chart, x="ticker", y="signal_count",
+                color="#70AD47", height=280,
+            )
             with st.expander(f"View all earnings / guidance items ({len(earnings_watch)})"):
                 st.dataframe(earnings_watch.reindex(columns=signal_columns), use_container_width=True, hide_index=True)
 
     with manual_tab:
         st.markdown("#### Items Needing Manual Review")
-        if manual_review.empty:
+        if manual_review_main.empty:
             st.info("No current signals are marked for manual review.")
         else:
             st.caption(
-                "This queue includes metadata-only or low-confidence signals and sensitive financial topics "
-                "that should be checked in the cited source file."
+                "The main queue focuses on Critical, High, and Medium items. Low-priority items remain "
+                "available below and in the download CSV."
             )
-            st.dataframe(manual_review.head(20), use_container_width=True, hide_index=True)
-            with st.expander(f"View full manual review queue ({len(manual_review)})"):
-                st.dataframe(manual_review, use_container_width=True, hide_index=True)
+            main_review_columns = [
+                "ticker", "priority", "signal_type", "signal_direction", "confidence", "evidence",
+                "source_file", "broker_or_source", "why_review",
+            ]
+            st.dataframe(
+                manual_review_main.reindex(columns=main_review_columns).head(20),
+                use_container_width=True,
+                hide_index=True,
+            )
+            with st.expander(f"View all Critical / High / Medium items ({len(manual_review_main)})"):
+                st.dataframe(
+                    manual_review_main.reindex(columns=main_review_columns),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        if not manual_review_low.empty:
+            with st.expander(f"View low-priority review items ({len(manual_review_low)})"):
+                st.dataframe(manual_review_low, use_container_width=True, hide_index=True)
 
     summary_markdown = daily_research_brief.build_dashboard_summary_markdown(
         relevance_df,
