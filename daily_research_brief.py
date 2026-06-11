@@ -171,6 +171,7 @@ DASHBOARD_PRIORITY_COLUMNS = [
     "credit_report_count", "earnings_transcript_filing_count", "categories_present",
     "attention_reason",
 ]
+DASHBOARD_MANUAL_REVIEW_COLUMNS = DASHBOARD_SIGNAL_COLUMNS + ["why_review"]
 
 DASHBOARD_SIGNAL_PATTERNS = [
     ("Rating / Price Target", (r"\brating\b", r"\bprice target\b", r"\bpt\b", r"\boverweight\b", r"\bunderweight\b", r"\bdowngrade\b", r"\bupgrade\b")),
@@ -2107,6 +2108,57 @@ def build_dashboard_signal_table(index_df: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
+def build_dashboard_manual_review_queue(signals: pd.DataFrame) -> pd.DataFrame:
+    """Explain why sensitive, weak, or metadata-only dashboard signals need review."""
+    if not isinstance(signals, pd.DataFrame) or signals.empty:
+        return pd.DataFrame(columns=DASHBOARD_MANUAL_REVIEW_COLUMNS)
+
+    sensitive_reasons = {
+        "Rating / Price Target": "Verify rating or price-target language in the source file.",
+        "Earnings / Results": "Verify any EPS, revenue, or results language in the source file.",
+        "Guidance / Estimates": "Verify guidance or estimate language in the source file.",
+        "Credit / Liquidity": "Verify credit, liquidity, leverage, or debt language in the source file.",
+        "Valuation / Thesis": "Verify valuation or thesis assumptions in the source file.",
+        "Margin / Operating Performance": "Verify margin or operating-performance language in the source file.",
+    }
+    rows = []
+    for _, row in signals.iterrows():
+        signal_type = str(row.get("signal_type") or "")
+        confidence = str(row.get("confidence") or "")
+        evidence = str(row.get("evidence") or "")
+        reason = str(row.get("reason") or "")
+        metadata_only = "metadata match only" in evidence.casefold() or "metadata-only" in reason.casefold()
+        needs_review = bool(row.get("needs_manual_review")) or confidence == "Low" or signal_type in sensitive_reasons
+        if not needs_review:
+            continue
+
+        why = []
+        if metadata_only:
+            why.append("Metadata-only signal; extracted text is unavailable or weak.")
+        if confidence == "Low":
+            why.append("Low-confidence classification requires source-file review.")
+        elif confidence == "Medium":
+            why.append("Extracted text mentions the topic but does not verify a direction.")
+        if signal_type in sensitive_reasons:
+            why.append(sensitive_reasons[signal_type])
+        if not why:
+            why.append("Manual verification is required before drawing an investment conclusion.")
+
+        item = {column: row.get(column, "") for column in DASHBOARD_SIGNAL_COLUMNS}
+        item["why_review"] = " ".join(dict.fromkeys(why))
+        rows.append(item)
+
+    if not rows:
+        return pd.DataFrame(columns=DASHBOARD_MANUAL_REVIEW_COLUMNS)
+    result = pd.DataFrame(rows, columns=DASHBOARD_MANUAL_REVIEW_COLUMNS)
+    confidence_rank = result["confidence"].astype(str).map({"Low": 0, "Medium": 1, "High": 2}).fillna(3)
+    result = result.assign(_confidence_rank=confidence_rank)
+    return result.sort_values(
+        ["_confidence_rank", "ticker", "signal_type", "source_file"],
+        ascending=[True, True, True, True],
+    ).drop(columns=["_confidence_rank"]).reset_index(drop=True)
+
+
 def build_dashboard_summary_markdown(
     relevance: pd.DataFrame,
     priority_tickers: pd.DataFrame,
@@ -2114,19 +2166,53 @@ def build_dashboard_summary_markdown(
     broker_coverage: pd.DataFrame,
     *,
     new_file_count: int = 0,
+    cross_day_available: bool = False,
 ) -> str:
     total_files = len(relevance) if isinstance(relevance, pd.DataFrame) else 0
     high_files = int((relevance.get("priority_level", pd.Series(dtype=str)) == "High").sum()) if total_files else 0
+    manual_review = build_dashboard_manual_review_queue(signals)
+    top_signal_types = (
+        signals["signal_type"].astype(str).value_counts().head(3)
+        if isinstance(signals, pd.DataFrame) and not signals.empty else pd.Series(dtype=int)
+    )
+    most_covered = broker_coverage.iloc[0] if isinstance(broker_coverage, pd.DataFrame) and not broker_coverage.empty else None
     lines = [
-        "# Daily Research Executive Dashboard",
+        "# Investment Research Dashboard",
+        "",
+        "Daily research priorities, broker coverage, investment signals, and manual review queue.",
         "",
         "## Overview",
         f"- Total files processed: {total_files}",
         f"- High-priority files: {high_files}",
         f"- Tickers/entities covered: {len(priority_tickers)}",
         f"- Signals identified: {len(signals)}",
-        f"- Signals needing manual review: {int(signals['needs_manual_review'].sum()) if not signals.empty else 0}",
+        f"- Items needing manual review: {len(manual_review)}",
         f"- New cross-day files: {int(new_file_count)}",
+        "",
+        "## Executive Snapshot",
+        (
+            "- Top priority tickers: "
+            + (
+                ", ".join(priority_tickers["ticker"].astype(str).head(3))
+                if not priority_tickers.empty else "No ticker ranking available"
+            )
+        ),
+        (
+            "- Top signal types: "
+            + (
+                ", ".join(f"{name} ({int(count)})" for name, count in top_signal_types.items())
+                if not top_signal_types.empty else "No signals detected"
+            )
+        ),
+        (
+            f"- Most covered ticker: {most_covered['ticker']} "
+            f"({int(most_covered['broker_report_count'])} broker/source report(s))"
+            if most_covered is not None else "- Most covered ticker: No broker/source coverage available"
+        ),
+        (
+            f"- Cross-day comparison: available ({int(new_file_count)} new file(s))"
+            if cross_day_available else "- Cross-day comparison: not available"
+        ),
         "",
         "## Top Priority Tickers",
     ]

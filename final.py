@@ -6011,11 +6011,8 @@ def _process_cross_day_uploaded_zip(uploaded, known_tickers: set[str]):
 def draw_dashboard_section() -> None:
     import pandas as pd
 
-    st.markdown("### Executive Research Dashboard")
-    st.caption(
-        "A read-only executive view built from the current Daily Research Brief session state. "
-        "Process or index research in Daily Research Brief to populate this dashboard."
-    )
+    st.markdown("## Investment Research Dashboard")
+    st.caption("Daily research priorities, broker coverage, investment signals, and manual review queue.")
 
     relevance_df = st.session_state.get("daily_relevance_df")
     inventory_df = st.session_state.get("daily_inventory_df")
@@ -6038,16 +6035,14 @@ def draw_dashboard_section() -> None:
     dashboard_index = daily_research_brief.merge_research_index(existing_index, current_index)
     priority_tickers = daily_research_brief.build_dashboard_priority_tickers(relevance_df)
     signals_df = daily_research_brief.build_dashboard_signal_table(dashboard_index)
+    manual_review = daily_research_brief.build_dashboard_manual_review_queue(signals_df)
     broker_coverage = daily_research_brief.build_broker_coverage_summary(relevance_df)
     change_inventory = st.session_state.get("daily_cross_day_change_inventory")
     if not isinstance(change_inventory, pd.DataFrame):
         change_inventory = pd.DataFrame()
 
     if relevance_df.empty and dashboard_index.empty:
-        st.info(
-            "No Daily Research Brief data is available yet. Process a daily ZIP in Daily Research Brief, "
-            "then return to Dashboard."
-        )
+        st.info("Process a Daily Research ZIP first to populate the Dashboard.")
         return
 
     document_types = relevance_df.get("document_type", pd.Series(dtype=str)).astype(str)
@@ -6071,32 +6066,109 @@ def draw_dashboard_section() -> None:
     extracted_snippets = int(
         dashboard_index.get("extracted_snippet", pd.Series(dtype=str)).astype(str).str.strip().ne("").sum()
     )
+    total_files = len(inventory_df) if not inventory_df.empty else len(relevance_df)
+    high_priority_files = int((relevance_df.get("priority_level", pd.Series(dtype=str)) == "High").sum())
+    credit_reports = int((document_types == "credit report").sum())
 
-    st.markdown("#### Overview KPIs")
-    metric_row_one = st.columns(4)
-    metric_row_one[0].metric("Total files processed", len(inventory_df) if not inventory_df.empty else len(relevance_df))
-    metric_row_one[1].metric(
-        "High-priority files",
-        int((relevance_df.get("priority_level", pd.Series(dtype=str)) == "High").sum()),
+    def _show_dashboard_kpis() -> None:
+        metric_row_one = st.columns(4)
+        metric_row_one[0].metric("Files Processed", total_files)
+        metric_row_one[1].metric("High-Priority Files", high_priority_files)
+        metric_row_one[2].metric("Tickers Covered", len(ticker_values))
+        metric_row_one[3].metric("Broker Reports", broker_reports)
+        metric_row_two = st.columns(4)
+        metric_row_two[0].metric("Credit Reports", credit_reports)
+        metric_row_two[1].metric("Earnings / Filings / Transcripts", earnings_filing_count)
+        metric_row_two[2].metric("Extracted Snippets", extracted_snippets)
+        metric_row_two[3].metric(
+            "New Files from Cross-Day",
+            new_file_count if not change_inventory.empty else "N/A",
+        )
+
+    top_ticker_names = [
+        str(value) for value in priority_tickers.get("ticker", pd.Series(dtype=str)).head(3) if str(value)
+    ]
+    signal_type_counts = (
+        signals_df.get("signal_type", pd.Series(dtype=str)).astype(str).value_counts().head(3)
+        if not signals_df.empty else pd.Series(dtype=int)
     )
-    metric_row_one[2].metric("Tickers/entities covered", len(ticker_values))
-    metric_row_one[3].metric("Broker/source reports", broker_reports)
-    metric_row_two = st.columns(4)
-    metric_row_two[0].metric("Credit reports", int((document_types == "credit report").sum()))
-    metric_row_two[1].metric("Earnings/transcript/filings", earnings_filing_count)
-    metric_row_two[2].metric("Extracted snippets indexed", extracted_snippets)
-    metric_row_two[3].metric("New cross-day files", new_file_count if not change_inventory.empty else "N/A")
+    most_covered = broker_coverage.iloc[0] if not broker_coverage.empty else None
+    cross_day_status = (
+        f"Available ({new_file_count} new file(s))" if not change_inventory.empty else "Not available"
+    )
 
-    overview_tab, signals_tab, broker_tab, credit_tab, earnings_tab, manual_tab = st.tabs(
-        ["Overview", "Signals", "Broker Coverage", "Credit/Risk", "Earnings", "Manual Review"]
+    def _show_executive_snapshot() -> None:
+        st.markdown("#### Executive Snapshot")
+        with st.container(border=True):
+            st.markdown(
+                "\n".join(
+                    [
+                        f"- **Top priority tickers:** {', '.join(top_ticker_names) if top_ticker_names else 'No ticker ranking available'}",
+                        (
+                            "- **Top signal types:** "
+                            + (
+                                ", ".join(f"{name} ({int(count)})" for name, count in signal_type_counts.items())
+                                if not signal_type_counts.empty else "No signals detected"
+                            )
+                        ),
+                        (
+                            f"- **Most covered ticker:** {most_covered['ticker']} "
+                            f"({int(most_covered['broker_report_count'])} broker/source report(s))"
+                            if most_covered is not None else "- **Most covered ticker:** No broker/source coverage available"
+                        ),
+                        f"- **Items needing manual review:** {len(manual_review)}",
+                        f"- **Cross-day changes:** {cross_day_status}",
+                    ]
+                )
+            )
+            st.caption(
+                "Snapshot is deterministic and based on processed metadata and limited extracted snippets. "
+                "Review source files before drawing investment conclusions."
+            )
+
+    display_priority = priority_tickers.rename(
+        columns={"earnings_transcript_filing_count": "earnings_filing_transcript_count"}
+    )
+    signal_columns = [
+        "ticker", "signal_type", "signal_direction", "confidence", "evidence", "source_file",
+        "broker_or_source", "source_date", "needs_manual_review", "reason",
+    ]
+    broker_columns = [
+        "ticker", "broker_report_count", "brokers_or_sources", "analyst_report_files",
+        "credit_report_files", "categories_present", "attention_reason",
+    ]
+
+    overview_tab, signals_tab, broker_tab, credit_tab, earnings_tab, manual_tab, downloads_tab = st.tabs(
+        [
+            "Overview", "Signals", "Broker Coverage", "Credit / Risk",
+            "Earnings / Guidance", "Manual Review", "Downloads",
+        ]
     )
 
     with overview_tab:
+        st.markdown("#### Research Activity")
+        _show_dashboard_kpis()
+        _show_executive_snapshot()
         st.markdown("#### Top Priority Tickers")
-        if priority_tickers.empty:
+        if display_priority.empty:
             st.info("No ticker/entity summary is available from the processed research.")
         else:
-            st.dataframe(priority_tickers, use_container_width=True, hide_index=True)
+            st.dataframe(display_priority.head(10), use_container_width=True, hide_index=True)
+            with st.expander(f"View all priority tickers ({len(display_priority)})"):
+                st.dataframe(display_priority, use_container_width=True, hide_index=True)
+
+        st.markdown("#### What to Review First")
+        if manual_review.empty:
+            st.info("No current signals are marked for manual review.")
+        else:
+            review_first_columns = [
+                "ticker", "signal_type", "confidence", "why_review", "source_file", "broker_or_source",
+            ]
+            st.dataframe(
+                manual_review.reindex(columns=review_first_columns).head(10),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with signals_tab:
         st.markdown("#### Investment Signal Extractor")
@@ -6107,7 +6179,7 @@ def draw_dashboard_section() -> None:
         if signals_df.empty:
             st.info("No signal rows are available from current metadata or extracted snippets.")
         else:
-            filter_row_one = st.columns(3)
+            filter_row_one = st.columns(4)
             filter_row_two = st.columns(3)
 
             def _dashboard_options(column: str) -> List[str]:
@@ -6124,9 +6196,15 @@ def draw_dashboard_section() -> None:
             with filter_row_one[1]:
                 signal_type = st.selectbox("Signal type", _dashboard_options("signal_type"), key="dashboard_signal_type")
             with filter_row_one[2]:
-                signal_broker = st.selectbox("Broker/source", _dashboard_options("broker_or_source"), key="dashboard_signal_broker")
+                signal_direction = st.selectbox(
+                    "Direction", _dashboard_options("signal_direction"), key="dashboard_signal_direction"
+                )
+            with filter_row_one[3]:
+                signal_confidence = st.selectbox(
+                    "Confidence", _dashboard_options("confidence"), key="dashboard_signal_confidence"
+                )
             with filter_row_two[0]:
-                signal_confidence = st.selectbox("Confidence", _dashboard_options("confidence"), key="dashboard_signal_confidence")
+                signal_broker = st.selectbox("Broker/source", _dashboard_options("broker_or_source"), key="dashboard_signal_broker")
             with filter_row_two[1]:
                 manual_filter = st.selectbox(
                     "Needs manual review",
@@ -6140,6 +6218,7 @@ def draw_dashboard_section() -> None:
             for column, value in {
                 "ticker": signal_ticker,
                 "signal_type": signal_type,
+                "signal_direction": signal_direction,
                 "broker_or_source": signal_broker,
                 "confidence": signal_confidence,
                 "source_date": signal_date,
@@ -6150,49 +6229,85 @@ def draw_dashboard_section() -> None:
                 filtered_signals = filtered_signals[
                     filtered_signals["needs_manual_review"] == (manual_filter == "Yes")
                 ]
-            st.dataframe(filtered_signals, use_container_width=True, hide_index=True)
+            st.caption(f"{len(filtered_signals)} signal row(s) match the selected filters.")
+            with st.expander("View filtered signal table", expanded=True):
+                st.dataframe(
+                    filtered_signals.reindex(columns=signal_columns),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
     with broker_tab:
         st.markdown("#### Broker Coverage Leaders")
         if broker_coverage.empty:
             st.info("No recognized broker/source coverage is available.")
         else:
-            st.dataframe(broker_coverage, use_container_width=True, hide_index=True)
+            st.dataframe(broker_coverage.reindex(columns=broker_columns).head(10), use_container_width=True, hide_index=True)
+            three_plus = broker_coverage[
+                pd.to_numeric(broker_coverage["broker_report_count"], errors="coerce").fillna(0) >= 3
+            ]
+            st.markdown("#### Tickers With 3+ Broker/Source Reports")
+            if three_plus.empty:
+                st.info("No ticker currently has three or more recognized broker/source reports.")
+            else:
+                st.dataframe(three_plus.reindex(columns=broker_columns), use_container_width=True, hide_index=True)
+            with st.expander(f"View all broker coverage rows ({len(broker_coverage)})"):
+                st.dataframe(broker_coverage.reindex(columns=broker_columns), use_container_width=True, hide_index=True)
 
     with credit_tab:
         st.markdown("#### Credit / Risk Watch")
-        credit_types = {"Credit / Liquidity", "Capex / Investment Spend", "Risk / Outlook", "Rating / Price Target"}
-        credit_watch = signals_df[signals_df["signal_type"].isin(credit_types)] if not signals_df.empty else signals_df
+        credit_terms = (
+            r"credit|liquidity|leverage|debt|capex|issuance|rating|downgrade|"
+            r"covenant|cash flow|free cash flow"
+        )
+        credit_text = (
+            signals_df.reindex(columns=["signal_type", "evidence", "reason", "source_file"])
+            .fillna("")
+            .astype(str)
+            .agg(" ".join, axis=1)
+            if not signals_df.empty else pd.Series(dtype=str)
+        )
+        credit_watch = signals_df[credit_text.str.contains(credit_terms, case=False, regex=True)] if not signals_df.empty else signals_df
         if credit_watch.empty:
             st.info("No credit, liquidity, leverage, debt, capex, rating, or risk items were detected.")
         else:
-            st.dataframe(credit_watch, use_container_width=True, hide_index=True)
+            st.dataframe(credit_watch.reindex(columns=signal_columns).head(15), use_container_width=True, hide_index=True)
+            with st.expander(f"View all credit / risk items ({len(credit_watch)})"):
+                st.dataframe(credit_watch.reindex(columns=signal_columns), use_container_width=True, hide_index=True)
 
     with earnings_tab:
         st.markdown("#### Earnings / Guidance Watch")
-        earnings_types = {
-            "Earnings / Results", "Guidance / Estimates", "Margin / Operating Performance",
-            "Filing / Transcript",
-        }
-        earnings_watch = signals_df[signals_df["signal_type"].isin(earnings_types)] if not signals_df.empty else signals_df
+        earnings_terms = (
+            r"earnings|revenue|eps|guidance|estimates?|margin|operating income|"
+            r"transcript|10-q|10q|8-k|8k"
+        )
+        earnings_text = (
+            signals_df.reindex(columns=["signal_type", "evidence", "reason", "source_file"])
+            .fillna("")
+            .astype(str)
+            .agg(" ".join, axis=1)
+            if not signals_df.empty else pd.Series(dtype=str)
+        )
+        earnings_watch = signals_df[earnings_text.str.contains(earnings_terms, case=False, regex=True)] if not signals_df.empty else signals_df
         if earnings_watch.empty:
             st.info("No earnings, guidance, estimate, margin, filing, or transcript items were detected.")
         else:
-            st.dataframe(earnings_watch, use_container_width=True, hide_index=True)
+            st.dataframe(earnings_watch.reindex(columns=signal_columns).head(15), use_container_width=True, hide_index=True)
+            with st.expander(f"View all earnings / guidance items ({len(earnings_watch)})"):
+                st.dataframe(earnings_watch.reindex(columns=signal_columns), use_container_width=True, hide_index=True)
 
     with manual_tab:
         st.markdown("#### Items Needing Manual Review")
-        sensitive_review_types = {
-            "Rating / Price Target", "Earnings / Results", "Guidance / Estimates",
-            "Credit / Liquidity", "Valuation / Thesis", "Margin / Operating Performance",
-        }
-        manual_review = signals_df[
-            signals_df["needs_manual_review"] | signals_df["signal_type"].isin(sensitive_review_types)
-        ] if not signals_df.empty else signals_df
         if manual_review.empty:
             st.info("No current signals are marked for manual review.")
         else:
-            st.dataframe(manual_review, use_container_width=True, hide_index=True)
+            st.caption(
+                "This queue includes metadata-only or low-confidence signals and sensitive financial topics "
+                "that should be checked in the cited source file."
+            )
+            st.dataframe(manual_review.head(20), use_container_width=True, hide_index=True)
+            with st.expander(f"View full manual review queue ({len(manual_review)})"):
+                st.dataframe(manual_review, use_container_width=True, hide_index=True)
 
     summary_markdown = daily_research_brief.build_dashboard_summary_markdown(
         relevance_df,
@@ -6200,36 +6315,59 @@ def draw_dashboard_section() -> None:
         signals_df,
         broker_coverage,
         new_file_count=new_file_count,
+        cross_day_available=not change_inventory.empty,
     )
-    st.markdown("#### Downloads")
-    download_one, download_two, download_three = st.columns(3)
-    with download_one:
-        st.download_button(
-            "Download dashboard signal table CSV",
-            data=signals_df.to_csv(index=False).encode("utf-8"),
-            file_name="dashboard_investment_signals.csv",
-            mime="text/csv",
-            key="dashboard_download_signals",
-            use_container_width=True,
-        )
-    with download_two:
-        st.download_button(
-            "Download top priority tickers CSV",
-            data=priority_tickers.to_csv(index=False).encode("utf-8"),
-            file_name="dashboard_top_priority_tickers.csv",
-            mime="text/csv",
-            key="dashboard_download_priority_tickers",
-            use_container_width=True,
-        )
-    with download_three:
-        st.download_button(
-            "Download dashboard summary Markdown",
-            data=summary_markdown.encode("utf-8"),
-            file_name="dashboard_summary.md",
-            mime="text/markdown",
-            key="dashboard_download_summary",
-            use_container_width=True,
-        )
+
+    with downloads_tab:
+        st.markdown("#### Dashboard Downloads")
+        st.caption("Exports reflect the current processed Daily Research Brief session state.")
+        download_row_one = st.columns(3)
+        download_row_two = st.columns(2)
+        with download_row_one[0]:
+            st.download_button(
+                "Dashboard Summary Markdown",
+                data=summary_markdown.encode("utf-8"),
+                file_name="dashboard_summary.md",
+                mime="text/markdown",
+                key="dashboard_download_summary",
+                use_container_width=True,
+            )
+        with download_row_one[1]:
+            st.download_button(
+                "Signal Table CSV",
+                data=signals_df.to_csv(index=False).encode("utf-8"),
+                file_name="dashboard_investment_signals.csv",
+                mime="text/csv",
+                key="dashboard_download_signals",
+                use_container_width=True,
+            )
+        with download_row_one[2]:
+            st.download_button(
+                "Top Priority Tickers CSV",
+                data=display_priority.to_csv(index=False).encode("utf-8"),
+                file_name="dashboard_top_priority_tickers.csv",
+                mime="text/csv",
+                key="dashboard_download_priority_tickers",
+                use_container_width=True,
+            )
+        with download_row_two[0]:
+            st.download_button(
+                "Broker Coverage CSV",
+                data=broker_coverage.to_csv(index=False).encode("utf-8"),
+                file_name="dashboard_broker_coverage.csv",
+                mime="text/csv",
+                key="dashboard_download_broker_coverage",
+                use_container_width=True,
+            )
+        with download_row_two[1]:
+            st.download_button(
+                "Manual Review Queue CSV",
+                data=manual_review.to_csv(index=False).encode("utf-8"),
+                file_name="dashboard_manual_review_queue.csv",
+                mime="text/csv",
+                key="dashboard_download_manual_review",
+                use_container_width=True,
+            )
 
 
 def draw_daily_research_brief_section() -> None:
