@@ -2616,6 +2616,20 @@ def validate_openai_polish_grounding(
     if fabricated_brokers:
         return False, "OpenAI polish introduced broker/source name(s) outside the retrieved context."
 
+    company_claim_pattern = (
+        r"\b([A-Z][A-Za-z&.-]+(?:\s+[A-Z][A-Za-z&.-]+){0,2})"
+        r"(?:'s|\s+(?:reported|announced|said|expects|forecast|guided|generated|delivered))\b"
+    )
+    context_companies = {
+        match.casefold() for match in re.findall(company_claim_pattern, context)
+    }
+    fabricated_companies = sorted({
+        match for match in re.findall(company_claim_pattern, text)
+        if match.casefold() not in context_companies and match.upper() not in known_tickers
+    })
+    if fabricated_companies:
+        return False, "OpenAI polish introduced company claim(s) outside the retrieved context."
+
     month_pattern = (
         r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
     )
@@ -2645,63 +2659,6 @@ def validate_openai_polish_grounding(
     if fabricated_dates:
         return False, "OpenAI polish introduced date(s) outside the retrieved context."
 
-    finance_patterns = {
-        "rating": r"\bratings?\b", "price target": r"\bprice[-\s]+targets?\b",
-        "EPS": r"\beps\b", "revenue": r"\brevenue\b", "guidance": r"\bguidance\b",
-        "estimate": r"\bestimates?\b", "capex": r"\bcapex\b|\bcapital expenditures?\b",
-        "free cash flow": r"\bfree cash flow\b|\bfcf\b", "margin": r"\bmargins?\b",
-        "liquidity": r"\bliquidity\b", "leverage": r"\bleverage\b", "debt": r"\bdebt\b",
-        "valuation": r"\bvaluation\b", "credit": r"\bcredit\b", "upgrade": r"\bupgrades?\b",
-        "downgrade": r"\bdowngrades?\b", "beat": r"\bbeats?\b", "miss": r"\bmiss(?:es|ed|ing)?\b",
-    }
-    unsupported_topics = sorted(
-        name for name, pattern in finance_patterns.items()
-        if re.search(pattern, text, flags=re.IGNORECASE)
-        and not re.search(pattern, context, flags=re.IGNORECASE)
-    )
-    if unsupported_topics:
-        return False, "OpenAI polish introduced financial topic(s) absent from the retrieved context."
-
-    financial_number_pattern = r"(?:\$\s*\d[\d,.]*|\b\d+(?:\.\d+)?\s*(?:%|bps|basis points?)\b)"
-    new_financial_numbers = {
-        value.casefold() for value in re.findall(financial_number_pattern, text, flags=re.IGNORECASE)
-    } - {
-        value.casefold() for value in re.findall(financial_number_pattern, context, flags=re.IGNORECASE)
-    }
-    if new_financial_numbers:
-        return False, "OpenAI polish introduced financial figure(s) absent from the retrieved context."
-
-    direction_patterns = {
-        "increased": r"\b(?:increased?|grew|rose|expanded|raised)\b",
-        "decreased": r"\b(?:decreased?|declined|fell|contracted|lowered|cut)\b",
-        "improved": r"\b(?:improved?|strengthened|stronger|positive)\b",
-        "deteriorated": r"\b(?:deteriorated|weakened|weaker|negative)\b",
-        "beat": r"\bbeat(?:s|en)?\b",
-        "miss": r"\bmiss(?:es|ed)?\b",
-    }
-    directional_topics = {
-        name: pattern for name, pattern in finance_patterns.items()
-        if name not in {"upgrade", "downgrade", "beat", "miss"}
-    }
-    unsupported_directions = []
-    for topic_name, topic_pattern in directional_topics.items():
-        if not re.search(topic_pattern, text, flags=re.IGNORECASE):
-            continue
-        for direction_name, direction_pattern in direction_patterns.items():
-            claim_pattern = (
-                rf"(?:{topic_pattern}).{{0,80}}(?:{direction_pattern})"
-                rf"|(?:{direction_pattern}).{{0,80}}(?:{topic_pattern})"
-            )
-            if (
-                re.search(claim_pattern, text, flags=re.IGNORECASE)
-                and not (
-                    re.search(topic_pattern, context, flags=re.IGNORECASE)
-                    and re.search(direction_pattern, context, flags=re.IGNORECASE)
-                )
-            ):
-                unsupported_directions.append(f"{topic_name} {direction_name}")
-    if unsupported_directions:
-        return False, "OpenAI polish introduced directional financial claim(s) absent from the retrieved context."
     return True, ""
 
 

@@ -5703,11 +5703,11 @@ def _generate_broker_comparison_with_optional_llm(
         return fallback, "grounded_deterministic", "insufficient_extracted_text"
 
     system_prompt = (
-        "You are polishing a source-grounded research answer based only on retrieved snippets and metadata. "
-        "You may rephrase and summarize for clarity, but do not add facts beyond the provided evidence. Keep the "
+        "You are polishing a retrieved-evidence research answer. You may summarize and rephrase the retrieved "
+        "snippets into clear business language. Do not add facts beyond the retrieved evidence. Keep the "
         "answer concise and professional. You may summarize broker/source themes in readable English, but do not "
         "invent broker views or financial conclusions. Do not claim you reviewed full PDFs. Do not provide "
-        "buy/sell/hold advice. Include a `## Source References` section listing exact retrieved filenames."
+        "buy/sell/hold advice. Include source filenames in a `## Source References` section."
     )
     user_prompt = (
         "Polish the following grounded deterministic Broker Consensus Comparator Markdown. Return only the "
@@ -5771,12 +5771,12 @@ def _generate_ticker_memo_with_optional_llm(
         return fallback, "grounded_deterministic", "insufficient_extracted_text"
 
     system_prompt = (
-        "You are polishing a source-grounded research answer based only on retrieved snippets and metadata. "
-        "You may rephrase and summarize for clarity, but do not add facts beyond the provided evidence. Create a "
+        "You are polishing a retrieved-evidence research answer. You may summarize and rephrase the retrieved "
+        "snippets into clear business language. Do not add facts beyond the retrieved evidence. Create a "
         "clean concise memo with an executive summary, key evidence themes, credit/earnings/valuation notes where "
         "supported, risks/open questions, and source references. Do not invent bullish or bearish conclusions, "
-        "claim you reviewed full PDFs, or provide buy/sell/hold advice. Include a `## Source References` section "
-        "listing exact retrieved filenames."
+        "claim you reviewed full PDFs, or provide buy/sell/hold advice. Include source filenames in a "
+        "`## Source References` section."
     )
     user_prompt = (
         "Polish the following grounded deterministic Ticker-Level Memo Markdown. Return only the complete "
@@ -5896,8 +5896,8 @@ def _generate_historical_research_answer_with_optional_llm(
         return fallback, "grounded_deterministic", "no_search_results", {}
 
     system_prompt = (
-        "You are polishing a source-grounded research answer based only on retrieved snippets and metadata. "
-        "You may rephrase for clarity, but do not add facts beyond the provided evidence. Keep the answer concise "
+        "You are polishing a retrieved-evidence research answer. You may summarize and rephrase the retrieved "
+        "snippets into clear business language. Do not add facts beyond the retrieved evidence. Keep the answer concise "
         "and professional. Use 3-5 bullets for the answer summary, 3-5 key evidence bullets, a Source References "
         "section listing exact retrieved filenames, and a brief caveat. Do not claim you reviewed full PDFs and "
         "do not provide buy/sell/hold advice."
@@ -5961,7 +5961,7 @@ def _show_openai_fallback_warning(warning: str, *, compact: bool = False) -> Non
     if not warning:
         return
     if compact:
-        st.info("OpenAI polish skipped; showing grounded answer.")
+        st.info("OpenAI polish skipped; showing grounded deterministic answer.")
     elif warning == "missing_api_key":
         st.warning("OpenAI refinement was skipped because OPENAI_API_KEY is missing.")
     elif warning.startswith("openai_call_failed:"):
