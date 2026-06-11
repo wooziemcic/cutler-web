@@ -5703,11 +5703,11 @@ def _generate_broker_comparison_with_optional_llm(
         return fallback, "grounded_deterministic", "insufficient_extracted_text"
 
     system_prompt = (
-        "You are polishing a retrieved-evidence research answer. You may summarize and rephrase the retrieved "
-        "snippets into clear business language. Do not add facts beyond the retrieved evidence. Keep the "
-        "answer concise and professional. You may summarize broker/source themes in readable English, but do not "
-        "invent broker views or financial conclusions. Do not claim you reviewed full PDFs. Do not provide "
-        "buy/sell/hold advice. Include source filenames in a `## Source References` section."
+        "You are polishing a retrieved-evidence research answer. You may summarize and rephrase retrieved snippets "
+        "into clear, concise business language. Do not add facts beyond the retrieved evidence. Do not give "
+        "buy/sell/hold advice. Include exact source filenames under `## Source References`. You may summarize "
+        "company, business, financial, and sector topics found in the retrieved evidence. Do not claim you reviewed "
+        "full PDFs."
     )
     user_prompt = (
         "Polish the following grounded deterministic Broker Consensus Comparator Markdown. Return only the "
@@ -5771,12 +5771,12 @@ def _generate_ticker_memo_with_optional_llm(
         return fallback, "grounded_deterministic", "insufficient_extracted_text"
 
     system_prompt = (
-        "You are polishing a retrieved-evidence research answer. You may summarize and rephrase the retrieved "
-        "snippets into clear business language. Do not add facts beyond the retrieved evidence. Create a "
+        "You are polishing a retrieved-evidence research answer. You may summarize and rephrase retrieved snippets "
+        "into clear, concise business language. Do not add facts beyond the retrieved evidence. Create a "
         "clean concise memo with an executive summary, key evidence themes, credit/earnings/valuation notes where "
-        "supported, risks/open questions, and source references. Do not invent bullish or bearish conclusions, "
-        "claim you reviewed full PDFs, or provide buy/sell/hold advice. Include source filenames in a "
-        "`## Source References` section."
+        "supported, risks/open questions, and source references. Do not give buy/sell/hold advice. Include exact "
+        "source filenames under `## Source References`. You may summarize company, business, financial, and sector "
+        "topics found in the retrieved evidence. Do not claim you reviewed full PDFs."
     )
     user_prompt = (
         "Polish the following grounded deterministic Ticker-Level Memo Markdown. Return only the complete "
@@ -5896,11 +5896,12 @@ def _generate_historical_research_answer_with_optional_llm(
         return fallback, "grounded_deterministic", "no_search_results", {}
 
     system_prompt = (
-        "You are polishing a retrieved-evidence research answer. You may summarize and rephrase the retrieved "
-        "snippets into clear business language. Do not add facts beyond the retrieved evidence. Keep the answer concise "
+        "You are polishing a retrieved-evidence research answer. You may summarize and rephrase retrieved snippets "
+        "into clear, concise business language. Do not add facts beyond the retrieved evidence. Keep the answer concise "
         "and professional. Use 3-5 bullets for the answer summary, 3-5 key evidence bullets, a Source References "
-        "section listing exact retrieved filenames, and a brief caveat. Do not claim you reviewed full PDFs and "
-        "do not provide buy/sell/hold advice."
+        "section listing exact retrieved filenames, and a brief caveat. Do not give buy/sell/hold advice. You may "
+        "summarize company, business, financial, and sector topics found in the retrieved evidence. Do not claim "
+        "you reviewed full PDFs."
     )
     user_prompt = (
         "Polish the following grounded deterministic Historical Research Q&A Markdown. Return only the complete "

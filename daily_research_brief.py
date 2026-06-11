@@ -2546,7 +2546,8 @@ def validate_openai_polish_grounding(
     if len(text) < 180 or len([line for line in text.splitlines() if line.strip()]) < 4:
         return False, "OpenAI polish was empty or too short."
 
-    if not re.search(r"(?im)^#{1,4}\s+(?:Sources Used|Source References)\s*$", text):
+    source_heading = re.search(r"(?im)^#{1,4}\s+(?:Sources Used|Source References)\s*$", text)
+    if not source_heading:
         return False, "OpenAI polish did not include a Sources Used or Source References section."
 
     sources = {
@@ -2559,6 +2560,11 @@ def validate_openai_polish_grounding(
     }
     if not mentioned_sources:
         return False, "OpenAI polish did not include a recognizable retrieved source filename."
+    source_section_tail = text[source_heading.end():]
+    next_heading = re.search(r"(?m)^#{1,4}\s+\S", source_section_tail)
+    source_section = source_section_tail[:next_heading.start()] if next_heading else source_section_tail
+    if not any(source.casefold() in source_section.casefold() for source in sources):
+        return False, "Source References did not include an exact retrieved source filename."
 
     source_names_casefold = {source.casefold() for source in sources}
     unknown_file_lines = [
@@ -2616,20 +2622,6 @@ def validate_openai_polish_grounding(
     if fabricated_brokers:
         return False, "OpenAI polish introduced broker/source name(s) outside the retrieved context."
 
-    company_claim_pattern = (
-        r"\b([A-Z][A-Za-z&.-]+(?:\s+[A-Z][A-Za-z&.-]+){0,2})"
-        r"(?:'s|\s+(?:reported|announced|said|expects|forecast|guided|generated|delivered))\b"
-    )
-    context_companies = {
-        match.casefold() for match in re.findall(company_claim_pattern, context)
-    }
-    fabricated_companies = sorted({
-        match for match in re.findall(company_claim_pattern, text)
-        if match.casefold() not in context_companies and match.upper() not in known_tickers
-    })
-    if fabricated_companies:
-        return False, "OpenAI polish introduced company claim(s) outside the retrieved context."
-
     month_pattern = (
         r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
     )
@@ -2658,6 +2650,26 @@ def validate_openai_polish_grounding(
     fabricated_dates = sorted(date_signatures(text) - date_signatures(context))
     if fabricated_dates:
         return False, "OpenAI polish introduced date(s) outside the retrieved context."
+
+    relevance_stopwords = {
+        "about", "answer", "based", "business", "caveat", "clear", "concise",
+        "context", "document", "documents", "evidence", "files", "information",
+        "metadata", "only", "polish", "report", "reports", "research", "retrieved",
+        "review", "section", "snippet", "snippets", "source", "sources", "summary",
+        "used",
+    }
+
+    def relevance_terms(value: str) -> set[str]:
+        scrubbed = value
+        for source in sources:
+            scrubbed = re.sub(re.escape(source), " ", scrubbed, flags=re.IGNORECASE)
+        return {
+            word.casefold() for word in re.findall(r"\b[A-Za-z][A-Za-z0-9&.-]{4,}\b", scrubbed)
+            if word.casefold() not in relevance_stopwords
+        }
+
+    if not (relevance_terms(text) & relevance_terms(context)):
+        return False, "OpenAI polish was clearly unrelated to the retrieved evidence."
 
     return True, ""
 
