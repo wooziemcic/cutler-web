@@ -163,8 +163,9 @@ RESEARCH_SEARCH_RESULT_COLUMNS = RESEARCH_INDEX_COLUMNS + [
     "needs_manual_review", "matched_keywords", "display_snippet", "match_reason",
 ]
 DASHBOARD_SIGNAL_COLUMNS = [
-    "ticker", "signal_type", "signal_direction", "confidence", "evidence",
-    "source_file", "broker_or_source", "source_date", "needs_manual_review", "reason",
+    "ticker", "company_or_identifier", "signal_type", "signal_direction", "confidence",
+    "priority", "evidence", "source_file", "broker_or_source", "source_date", "category",
+    "document_type", "why_it_matters", "why_review", "needs_manual_review",
 ]
 DASHBOARD_PRIORITY_COLUMNS = [
     "ticker", "attention_score", "file_count", "high_priority_count", "broker_source_count",
@@ -173,18 +174,21 @@ DASHBOARD_PRIORITY_COLUMNS = [
 ]
 DASHBOARD_MANUAL_REVIEW_COLUMNS = [
     "ticker", "priority", "signal_type", "signal_direction", "confidence", "evidence",
-    "source_file", "broker_or_source", "why_review",
+    "source_file", "broker_or_source", "why_it_matters", "why_review",
 ]
 
 DASHBOARD_SIGNAL_PATTERNS = [
-    ("Rating / Price Target", (r"\brating\b", r"\bprice target\b", r"\bpt\b", r"\boverweight\b", r"\bunderweight\b", r"\bdowngrade\b", r"\bupgrade\b")),
-    ("Earnings / Results", (r"\bearnings?\b", r"\beps\b", r"\brevenue\b", r"\bsales\b", r"\bresults?\b", r"\bbeat\b", r"\bmiss\b")),
+    ("Rating / Price Target", (r"\brating\b", r"\bprice target\b", r"\bpt\b", r"\boverweight\b", r"\bunderweight\b", r"\bdowngrade\b", r"\bupgrade\b", r"\boutperform\b", r"\bunderperform\b")),
+    ("Earnings / Results", (r"\bearnings?\b", r"\beps\b", r"\bresults?\b", r"\bquarter\b", r"\bbeat\b", r"\bmiss\b")),
     ("Guidance / Estimates", (r"\bguidance\b", r"\bestimates?\b", r"\brevision\b", r"\bforecast\b")),
-    ("Credit / Liquidity", (r"\bcredit\b", r"\bliquidity\b", r"\bleverage\b", r"\bdebt\b", r"\bcovenant\b", r"\bissuance\b", r"\bcash flow\b")),
+    ("Credit / Liquidity", (r"\bcredit\b", r"\bliquidity\b", r"\bleverage\b", r"\bdebt\b", r"\bcovenant\b", r"\bissuance\b")),
     ("Valuation / Thesis", (r"\bvaluation\b", r"\bthesis\b", r"\bupside\b", r"\bdownside\b", r"\bmultiple\b")),
     ("Margin / Operating Performance", (r"\bmargins?\b", r"\boperating income\b", r"\boperating performance\b")),
     ("Capex / Investment Spend", (r"\bcapex\b", r"\bcapital expenditures?\b", r"\binvestment spend\b")),
+    ("Cash Flow / FCF", (r"\bfree cash flow\b", r"\bfcf\b", r"\bcash flow\b")),
+    ("Revenue / Growth", (r"\brevenue\b", r"\bsales\b", r"\bgrowth\b", r"\btop line\b")),
     ("Risk / Outlook", (r"\brisk\b", r"\boutlook\b", r"\bconcern\b")),
+    ("M&A / Strategic Action", (r"\bmerger\b", r"\bacquisition\b", r"\bstrategic review\b", r"\basset sale\b", r"\bspin-?off\b", r"\bdivestiture\b")),
 ]
 
 DASHBOARD_SIGNAL_TYPE_RANK = {
@@ -195,11 +199,14 @@ DASHBOARD_SIGNAL_TYPE_RANK = {
     "Valuation / Thesis": 4,
     "Margin / Operating Performance": 5,
     "Capex / Investment Spend": 6,
-    "Risk / Outlook": 7,
-    "Green Street / Sector": 8,
-    "Filing / Transcript": 9,
-    "Broker Coverage": 10,
-    "Other": 11,
+    "Cash Flow / FCF": 7,
+    "Revenue / Growth": 8,
+    "M&A / Strategic Action": 9,
+    "Risk / Outlook": 10,
+    "Green Street / Sector": 11,
+    "Filing / Transcript": 12,
+    "Broker Coverage": 13,
+    "Other": 14,
 }
 
 DASHBOARD_DIRECTION_PATTERNS = {
@@ -207,20 +214,20 @@ DASHBOARD_DIRECTION_PATTERNS = {
         "Positive": (
             r"\bupgrade[sd]?\b", r"\braise[sd]?\s+(?:the\s+)?(?:rating|price target|pt)\b",
             r"\b(?:rating|price target|pt)\s+(?:was\s+)?raise[sd]?\b",
-            r"\breiterate[sd]?\s+(?:an?\s+)?(?:overweight|outperform|buy)\b",
-            r"\bmaintain(?:s|ed)?\s+(?:an?\s+)?(?:overweight|outperform|buy)\b",
+            r"\binitiat(?:e|es|ed)\s+(?:at|with)\s+(?:an?\s+)?(?:overweight|outperform|buy)\b",
+            r"\b(?:overweight|outperform)\b",
         ),
         "Negative": (
             r"\bdowngrade[sd]?\b", r"\blower(?:ed|s)?\s+(?:the\s+)?(?:rating|price target|pt)\b",
             r"\bcut(?:s)?\s+(?:the\s+)?(?:rating|price target|pt)\b",
             r"\b(?:rating|price target|pt)\s+(?:was\s+)?lowered\b",
-            r"\breiterate[sd]?\s+(?:an?\s+)?(?:underweight|underperform|sell)\b",
-            r"\bmaintain(?:s|ed)?\s+(?:an?\s+)?(?:underweight|underperform|sell)\b",
+            r"\binitiat(?:e|es|ed)\s+(?:at|with)\s+(?:an?\s+)?(?:underweight|underperform|sell)\b",
+            r"\b(?:underweight|underperform)\b",
         ),
     },
     "Earnings / Results": {
-        "Positive": (r"\bbeat(?:s|en)?\b", r"\babove expectations?\b", r"\bstrong results?\b"),
-        "Negative": (r"\bmiss(?:es|ed)?\b", r"\bbelow expectations?\b", r"\bweaker results?\b"),
+        "Positive": (r"\bbeat(?:s|en)?\b", r"\babove expectations?\b", r"\bstrong (?:results?|quarter)\b"),
+        "Negative": (r"\bmiss(?:es|ed)?\b", r"\bbelow expectations?\b", r"\bweak(?:er)? (?:results?|quarter)\b"),
     },
     "Guidance / Estimates": {
         "Positive": (
@@ -234,16 +241,46 @@ DASHBOARD_DIRECTION_PATTERNS = {
     },
     "Credit / Liquidity": {
         "Positive": (
-            r"\bliquidity improve[sd]?\b", r"\bdeleverag(?:e|ed|ing)\b",
+            r"\bupgrade[sd]?\b", r"\bliquidity improve[sd]?\b", r"\bdeleverag(?:e|ed|ing)\b",
             r"\bleverage (?:declined|decreased|improved)\b", r"\bcredit improve[sd]?\b",
         ),
         "Negative": (
             r"\bdowngrade[sd]?\b", r"\bliquidity (?:pressure|concern|weakened)\b",
-            r"\bleverage (?:concern|increased|rose)\b", r"\bissuance need\b",
+            r"\bleverage (?:concern|increased|rose|pressure)\b", r"\bissuance (?:need|required|pressure)\b",
             r"\bdebt (?:concern|pressure)\b", r"\bcovenant (?:risk|breach|concern)\b",
-            r"\bcredit deterioration\b",
+            r"\bcredit deterioration\b", r"\brating pressure\b",
         ),
     },
+    "Capex / Investment Spend": {
+        "Positive": (r"\bcapex (?:declined|decreased|improved)\b",),
+        "Negative": (r"\b(?:rising|higher|increased) capex\b", r"\bcapex pressure\b", r"\bcapex .*hurt(?:s|ing)? (?:free cash flow|fcf)\b"),
+    },
+    "Cash Flow / FCF": {
+        "Positive": (r"\b(?:free cash flow|fcf) improve[sd]?\b", r"\bstronger (?:free cash flow|fcf)\b"),
+        "Negative": (r"\bnegative (?:free cash flow|fcf)\b", r"\b(?:free cash flow|fcf) pressure\b", r"\bweaker (?:free cash flow|fcf)\b"),
+    },
+    "Revenue / Growth": {
+        "Positive": (r"\braise[sd]? revenue\b", r"\bstronger growth\b", r"\b(?:revenue|sales) beat\b"),
+        "Negative": (r"\bgrowth slowdown\b", r"\b(?:revenue|sales) miss\b", r"\bweaker growth\b"),
+    },
+}
+
+DASHBOARD_WHY_IT_MATTERS = {
+    "Rating / Price Target": "May affect how broker positioning is interpreted.",
+    "Earnings / Results": "May affect assessment of reported operating performance.",
+    "Guidance / Estimates": "May affect forward estimates.",
+    "Credit / Liquidity": "Could affect credit risk perception.",
+    "Valuation / Thesis": "May affect valuation assumptions or thesis review.",
+    "Margin / Operating Performance": "May affect operating-performance expectations.",
+    "Capex / Investment Spend": "May affect investment-spend expectations.",
+    "Cash Flow / FCF": "May impact free cash flow expectations.",
+    "Revenue / Growth": "May affect revenue or growth expectations.",
+    "Risk / Outlook": "Highlights an area for risk review.",
+    "Broker Coverage": "Helps prioritize broker research review.",
+    "Green Street / Sector": "May affect sector-level research prioritization.",
+    "Filing / Transcript": "Flags primary-source material for review.",
+    "M&A / Strategic Action": "May affect strategic-action review.",
+    "Other": "Provides additional research context.",
 }
 
 INSUFFICIENT_TEXT_NOTICE = (
@@ -2069,6 +2106,14 @@ def _dashboard_signal_types(row: pd.Series) -> List[str]:
 
 
 def _dashboard_signal_direction(signal_type: str, snippet: str) -> Tuple[str, str]:
+    if signal_type == "Rating / Price Target" and re.search(
+        r"\b(?:maintain(?:s|ed)?|reiterate[sd]?)\b", snippet, flags=re.IGNORECASE
+    ) and not re.search(
+        r"\b(?:upgrade[sd]?|downgrade[sd]?|raise[sd]?|lowered|cut(?:s)?)\b",
+        snippet,
+        flags=re.IGNORECASE,
+    ):
+        return "Neutral", r"\b(?:maintain(?:s|ed)?|reiterate[sd]?)\b"
     rules = DASHBOARD_DIRECTION_PATTERNS.get(signal_type, {})
     positive = [
         pattern for pattern in rules.get("Positive", ())
@@ -2085,17 +2130,74 @@ def _dashboard_signal_direction(signal_type: str, snippet: str) -> Tuple[str, st
     return "Unknown", ""
 
 
+def _dashboard_signal_priority(
+    signal_type: str,
+    direction: str,
+    confidence: str,
+    evidence: str,
+    source_priority: str,
+) -> str:
+    evidence_lower = evidence.casefold()
+    if signal_type == "Broker Coverage":
+        return "Low"
+    critical_types = {
+        "Rating / Price Target", "Guidance / Estimates", "Credit / Liquidity", "Earnings / Results",
+    }
+    critical_terms = (
+        "upgrade", "downgrade", "price target", "pt raised", "pt cut", "guidance",
+        "estimate", "liquidity pressure", "rating pressure", "beat", "miss",
+    )
+    if (
+        signal_type in critical_types
+        and direction in {"Positive", "Negative"}
+        and any(term in evidence_lower for term in critical_terms)
+    ):
+        return "Critical"
+    if (
+        (confidence == "High" and direction in {"Positive", "Negative"})
+        or (signal_type in {"Credit / Liquidity", "Earnings / Results"} and confidence == "Medium")
+        or (
+            signal_type in {"Capex / Investment Spend", "Cash Flow / FCF"}
+            and direction == "Negative"
+        )
+    ):
+        return "High"
+    if confidence == "Medium" or source_priority == "High":
+        return "Medium"
+    return "Low"
+
+
+def _dashboard_review_reason(
+    signal_type: str,
+    direction: str,
+    confidence: str,
+    priority: str,
+    metadata_only: bool,
+) -> str:
+    if metadata_only:
+        return "Metadata-only signal; review the source file because extracted text did not verify details."
+    if direction in {"Positive", "Negative"}:
+        return f"Verify the explicit {direction.lower()} {signal_type.lower()} language in the source file."
+    if direction == "Neutral":
+        return "Verify the maintain/reiterate language and its surrounding context."
+    if priority in {"Critical", "High"}:
+        return "High-priority evidence is present, but the direction or full context requires verification."
+    if confidence == "Medium":
+        return "Relevant extracted evidence is present, but the direction remains unclear."
+    return "Weak or unclear evidence; review only if this topic is currently important."
+
+
 def build_dashboard_signal_table(index_df: pd.DataFrame) -> pd.DataFrame:
     """Extract conservative signals from already-indexed snippets and metadata."""
     if not isinstance(index_df, pd.DataFrame) or index_df.empty:
         return pd.DataFrame(columns=DASHBOARD_SIGNAL_COLUMNS)
-    review_worthy_types = {
-        "Rating / Price Target", "Earnings / Results", "Guidance / Estimates",
-        "Credit / Liquidity", "Valuation / Thesis", "Margin / Operating Performance",
-    }
     rows = []
     for _, row in index_df.iterrows():
         snippet = str(row.get("extracted_snippet") or "").strip()
+        metadata_only = not bool(snippet)
+        company_value = row.get("company_or_identifier")
+        if pd.isna(company_value) or not str(company_value).strip():
+            company_value = ""
         ticker_values = [
             value.strip()
             for value in str(row.get("all_detected_tickers") or row.get("ticker") or "").split(",")
@@ -2112,45 +2214,46 @@ def build_dashboard_signal_table(index_df: pd.DataFrame) -> pd.DataFrame:
                 )
                 if snippet and signal_direction != "Unknown":
                     confidence = "High"
-                    manual_review = signal_type in review_worthy_types
-                    reason = (
-                        f"Explicit directional phrase matched extracted text for {signal_type}. "
-                        "Verify in the source document before acting."
-                    )
                 elif snippet:
                     confidence = "Medium"
-                    manual_review = signal_type in review_worthy_types
-                    reason = (
-                        f"Extracted snippet contains {signal_type.lower()} terms, but no explicit "
-                        "positive or negative direction was verified."
-                    )
                 else:
                     confidence = "Low"
-                    manual_review = False
-                    reason = (
-                        f"Metadata-only {signal_type.lower()} classification from document type, "
-                        "filename, folder, or broker/source."
-                    )
-                    if str(row.get("priority_level") or "") == "High":
-                        reason += " Weak extraction on a high-priority document."
                 evidence = snippet[:900] if snippet else (
                     f"Metadata match only: {row.get('document_type') or 'other'} in "
                     f"{row.get('category') or 'Root'}."
                 )
+                priority = _dashboard_signal_priority(
+                    signal_type,
+                    signal_direction,
+                    confidence,
+                    evidence,
+                    str(row.get("priority_level") or ""),
+                )
+                needs_manual_review = priority in {"Critical", "High", "Medium"}
+                why_review = _dashboard_review_reason(
+                    signal_type, signal_direction, confidence, priority, metadata_only
+                )
                 if direction_pattern:
-                    reason += f" Direction rule: {direction_pattern}."
+                    why_review += f" Direction rule matched: {direction_pattern}."
                 rows.append(
                     {
                         "ticker": ticker,
+                        "company_or_identifier": company_value or ticker,
                         "signal_type": signal_type,
                         "signal_direction": signal_direction,
                         "confidence": confidence,
+                        "priority": priority,
                         "evidence": evidence,
                         "source_file": row.get("file_name") or row.get("relative_path") or "",
                         "broker_or_source": row.get("source_or_broker") or "",
                         "source_date": row.get("source_date") or "",
-                        "needs_manual_review": manual_review,
-                        "reason": reason,
+                        "category": row.get("category") or "",
+                        "document_type": row.get("document_type") or "",
+                        "why_it_matters": DASHBOARD_WHY_IT_MATTERS.get(
+                            signal_type, DASHBOARD_WHY_IT_MATTERS["Other"]
+                        ),
+                        "why_review": why_review,
+                        "needs_manual_review": needs_manual_review,
                     }
                 )
     result = pd.DataFrame(rows, columns=DASHBOARD_SIGNAL_COLUMNS).drop_duplicates(
@@ -2158,101 +2261,43 @@ def build_dashboard_signal_table(index_df: pd.DataFrame) -> pd.DataFrame:
     )
     result["_type_rank"] = result["signal_type"].map(DASHBOARD_SIGNAL_TYPE_RANK).fillna(99)
     result["_confidence_rank"] = result["confidence"].map({"High": 0, "Medium": 1, "Low": 2}).fillna(3)
+    result["_priority_rank"] = result["priority"].map({"Critical": 0, "High": 1, "Medium": 2, "Low": 3}).fillna(4)
     result = (
-        result.sort_values(["_confidence_rank", "_type_rank"])
+        result.sort_values(["_priority_rank", "_confidence_rank", "_type_rank"])
         .groupby(["ticker", "source_file", "evidence"], dropna=False, sort=False)
         .head(2)
-        .drop(columns=["_type_rank", "_confidence_rank"])
+        .drop(columns=["_type_rank", "_confidence_rank", "_priority_rank"])
     )
     confidence_order = pd.CategoricalDtype(["High", "Medium", "Low"], ordered=True)
     result["confidence"] = result["confidence"].astype(confidence_order)
     return result.sort_values(
-        ["needs_manual_review", "confidence", "ticker", "signal_type"],
+        ["priority", "confidence", "ticker", "signal_type"],
+        key=lambda column: (
+            column.map({"Critical": 0, "High": 1, "Medium": 2, "Low": 3})
+            if column.name == "priority" else column
+        ),
         ascending=[True, True, True, True],
     ).reset_index(drop=True)
 
 
 def build_dashboard_manual_review_queue(signals: pd.DataFrame) -> pd.DataFrame:
-    """Build a focused, prioritized queue for claims that merit source-file review."""
+    """Return the focused review subset from canonical Dashboard signal rows."""
     if not isinstance(signals, pd.DataFrame) or signals.empty:
         return pd.DataFrame(columns=DASHBOARD_MANUAL_REVIEW_COLUMNS)
-
-    sensitive_reasons = {
-        "Rating / Price Target": "Verify rating or price-target language in the source file.",
-        "Earnings / Results": "Verify any EPS, revenue, or results language in the source file.",
-        "Guidance / Estimates": "Verify guidance or estimate language in the source file.",
-        "Credit / Liquidity": "Verify credit, liquidity, leverage, or debt language in the source file.",
-        "Valuation / Thesis": "Verify valuation or thesis assumptions in the source file.",
-        "Margin / Operating Performance": "Verify margin or operating-performance language in the source file.",
-    }
-    rows = []
-    for _, row in signals.iterrows():
-        signal_type = str(row.get("signal_type") or "")
-        direction = str(row.get("signal_direction") or "")
-        confidence = str(row.get("confidence") or "")
-        evidence = str(row.get("evidence") or "")
-        reason = str(row.get("reason") or "")
-        metadata_only = "metadata match only" in evidence.casefold() or "metadata-only" in reason.casefold()
-        weak_high_priority = "weak extraction on a high-priority document" in reason.casefold()
-        explicit_sensitive = direction != "Unknown" and signal_type in sensitive_reasons
-        sensitive_snippet = confidence in {"High", "Medium"} and signal_type in sensitive_reasons
-        meaningful_metadata = metadata_only and signal_type in sensitive_reasons
-        needs_review = explicit_sensitive or sensitive_snippet or weak_high_priority or meaningful_metadata
-        if not needs_review:
-            continue
-
-        why = []
-        if weak_high_priority:
-            why.append("High-priority document has weak or metadata-only extraction.")
-        elif meaningful_metadata:
-            why.append("Sensitive metadata-only item; extracted text did not verify the claim.")
-        elif confidence == "Medium":
-            why.append("Extracted text mentions the topic but does not verify a direction.")
-        if signal_type in sensitive_reasons:
-            why.append(sensitive_reasons[signal_type])
-        if not why:
-            why.append("Manual verification is required before drawing an investment conclusion.")
-
-        evidence_casefold = evidence.casefold()
-        if direction == "Negative" and signal_type in {"Rating / Price Target", "Credit / Liquidity"}:
-            priority = "Critical"
-        elif explicit_sensitive or (
-            signal_type in {"Guidance / Estimates", "Earnings / Results"}
-            and direction != "Unknown"
-        ):
-            priority = "High"
-        elif weak_high_priority or signal_type in sensitive_reasons:
-            priority = "Medium"
-        else:
-            priority = "Low"
-        if metadata_only and not weak_high_priority:
-            priority = "Low"
-        if any(term in evidence_casefold for term in ["downgrade", "liquidity pressure", "covenant breach"]):
-            priority = "Critical"
-
-        item = {
-            "ticker": row.get("ticker", ""),
-            "priority": priority,
-            "signal_type": signal_type,
-            "signal_direction": direction,
-            "confidence": confidence,
-            "evidence": evidence,
-            "source_file": row.get("source_file", ""),
-            "broker_or_source": row.get("broker_or_source", ""),
-        }
-        item["why_review"] = " ".join(dict.fromkeys(why))
-        rows.append(item)
-
-    if not rows:
+    review_mask = (
+        signals.get("needs_manual_review", pd.Series(False, index=signals.index)).fillna(False).astype(bool)
+        | (signals.get("priority", pd.Series("", index=signals.index)).astype(str) == "Low")
+    )
+    result = signals[review_mask].reindex(columns=DASHBOARD_MANUAL_REVIEW_COLUMNS).copy()
+    if result.empty:
         return pd.DataFrame(columns=DASHBOARD_MANUAL_REVIEW_COLUMNS)
-    result = pd.DataFrame(rows, columns=DASHBOARD_MANUAL_REVIEW_COLUMNS)
     priority_rank = result["priority"].map({"Critical": 0, "High": 1, "Medium": 2, "Low": 3}).fillna(4)
     result = result.assign(_priority_rank=priority_rank)
     return result.sort_values(
         ["_priority_rank", "ticker", "signal_type", "source_file"],
         ascending=[True, True, True, True],
     ).drop(columns=["_priority_rank"]).drop_duplicates(
-        subset=["ticker", "source_file", "evidence"], keep="first"
+        subset=["ticker", "signal_type", "source_file", "evidence"], keep="first"
     ).reset_index(drop=True)
 
 
@@ -2269,10 +2314,11 @@ def build_dashboard_summary_markdown(
     high_files = int((relevance.get("priority_level", pd.Series(dtype=str)) == "High").sum()) if total_files else 0
     manual_review = build_dashboard_manual_review_queue(signals)
     review_counts = manual_review["priority"].value_counts() if not manual_review.empty else pd.Series(dtype=int)
+    signal_priority_counts = signals["priority"].value_counts() if not signals.empty else pd.Series(dtype=int)
     explicit_signals = int(
         (
             (signals.get("confidence", pd.Series(dtype=str)).astype(str) == "High")
-            & (signals.get("signal_direction", pd.Series(dtype=str)).astype(str) != "Unknown")
+            & signals.get("signal_direction", pd.Series(dtype=str)).astype(str).isin(["Positive", "Negative"])
         ).sum()
     ) if isinstance(signals, pd.DataFrame) and not signals.empty else 0
     metadata_low_count = int(
@@ -2301,6 +2347,7 @@ def build_dashboard_summary_markdown(
         f"- Critical manual review items: {int(review_counts.get('Critical', 0))}",
         f"- High manual review items: {int(review_counts.get('High', 0))}",
         f"- Medium manual review items: {int(review_counts.get('Medium', 0))}",
+        f"- Low-priority download-only review items: {int(review_counts.get('Low', 0))}",
         f"- Metadata-only low-priority signals excluded from the main review queue: {metadata_low_count}",
         f"- New cross-day files: {int(new_file_count)}",
         "",
@@ -2356,6 +2403,13 @@ def build_dashboard_summary_markdown(
                 f"- {explicit_signals} high-confidence explicit-direction signal(s) were found."
             ),
             "- The main manual-review view prioritizes Critical, High, and Medium items.",
+            (
+                "- Signal priority distribution: "
+                f"Critical {int(signal_priority_counts.get('Critical', 0))}, "
+                f"High {int(signal_priority_counts.get('High', 0))}, "
+                f"Medium {int(signal_priority_counts.get('Medium', 0))}, "
+                f"Low {int(signal_priority_counts.get('Low', 0))}."
+            ),
             f"- {metadata_low_count} metadata-only low-priority signal(s) remain available in downloads.",
             "- No financial conclusion should be used without checking the cited source file.",
         ]

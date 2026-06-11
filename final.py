@@ -6102,6 +6102,16 @@ def draw_dashboard_section() -> None:
         source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
     )
     dashboard_index = daily_research_brief.merge_research_index(existing_index, current_index)
+    if not dashboard_index.empty and not relevance_df.empty:
+        company_lookup = (
+            relevance_df.reindex(columns=["relative_path", "company_or_identifier"])
+            .dropna(subset=["relative_path"])
+            .drop_duplicates(subset=["relative_path"], keep="last")
+            .set_index("relative_path")["company_or_identifier"]
+        )
+        dashboard_index["company_or_identifier"] = (
+            dashboard_index["relative_path"].map(company_lookup).fillna("")
+        )
     priority_tickers = daily_research_brief.build_dashboard_priority_tickers(relevance_df)
     signals_df = daily_research_brief.build_dashboard_signal_table(dashboard_index)
     manual_review = daily_research_brief.build_dashboard_manual_review_queue(signals_df)
@@ -6138,11 +6148,14 @@ def draw_dashboard_section() -> None:
     high_confidence_actionable = int(
         (
             (signals_df.get("confidence", pd.Series(dtype=str)).astype(str) == "High")
-            & (signals_df.get("signal_direction", pd.Series(dtype=str)).astype(str) != "Unknown")
+            & signals_df.get("signal_direction", pd.Series(dtype=str)).astype(str).isin(["Positive", "Negative"])
         ).sum()
     )
     manual_review_main = manual_review[
-        manual_review.get("priority", pd.Series(dtype=str)).astype(str).isin(["Critical", "High", "Medium"])
+        manual_review.get("priority", pd.Series(dtype=str)).astype(str).isin(["Critical", "High"])
+    ] if not manual_review.empty else manual_review
+    manual_review_medium = manual_review[
+        manual_review.get("priority", pd.Series(dtype=str)).astype(str) == "Medium"
     ] if not manual_review.empty else manual_review
     manual_review_low = manual_review[
         manual_review.get("priority", pd.Series(dtype=str)).astype(str) == "Low"
@@ -6231,8 +6244,9 @@ def draw_dashboard_section() -> None:
         columns={"earnings_transcript_filing_count": "earnings_filing_transcript_count"}
     )
     signal_columns = [
-        "ticker", "signal_type", "signal_direction", "confidence", "evidence", "source_file",
-        "broker_or_source", "source_date", "needs_manual_review", "reason",
+        "ticker", "company_or_identifier", "signal_type", "signal_direction", "confidence",
+        "priority", "evidence", "source_file", "broker_or_source", "source_date", "category",
+        "document_type", "why_it_matters", "why_review", "needs_manual_review",
     ]
     broker_columns = [
         "ticker", "broker_report_count", "brokers_or_sources", "analyst_report_files",
@@ -6291,11 +6305,11 @@ def draw_dashboard_section() -> None:
 
         st.markdown("#### What to Review First")
         if manual_review_main.empty:
-            st.info("No current signals are marked for Critical, High, or Medium review.")
+            st.info("No current signals are marked for Critical or High review.")
         else:
             review_first_columns = [
                 "ticker", "priority", "signal_type", "signal_direction", "confidence",
-                "why_review", "source_file", "broker_or_source",
+                "why_it_matters", "why_review", "source_file", "broker_or_source",
             ]
             st.dataframe(
                 manual_review_main.reindex(columns=review_first_columns).head(10),
@@ -6317,8 +6331,16 @@ def draw_dashboard_section() -> None:
                 signal_chart, "signal_type", "signal_count",
                 top_n=12, debug_key="dashboard_chart_debug_signal_tab",
             )
+            st.markdown("##### Signal Direction Distribution")
+            direction_chart = _dashboard_count_chart_data(
+                signals_df, "signal_direction", "signal_count"
+            )
+            _safe_dashboard_bar_chart(
+                direction_chart, "signal_direction", "signal_count",
+                top_n=5, debug_key="dashboard_chart_debug_signal_direction",
+            )
             filter_row_one = st.columns(4)
-            filter_row_two = st.columns(3)
+            filter_row_two = st.columns(4)
 
             def _dashboard_options(column: str) -> List[str]:
                 return ["All"] + sorted(
@@ -6344,12 +6366,16 @@ def draw_dashboard_section() -> None:
             with filter_row_two[0]:
                 signal_broker = st.selectbox("Broker/source", _dashboard_options("broker_or_source"), key="dashboard_signal_broker")
             with filter_row_two[1]:
+                signal_priority = st.selectbox(
+                    "Priority", _dashboard_options("priority"), key="dashboard_signal_priority"
+                )
+            with filter_row_two[2]:
                 manual_filter = st.selectbox(
                     "Needs manual review",
                     ["All", "Yes", "No"],
                     key="dashboard_signal_manual_review",
                 )
-            with filter_row_two[2]:
+            with filter_row_two[3]:
                 signal_date = st.selectbox("Date/source folder", _dashboard_options("source_date"), key="dashboard_signal_date")
 
             filtered_signals = signals_df.copy()
@@ -6359,6 +6385,7 @@ def draw_dashboard_section() -> None:
                 "signal_direction": signal_direction,
                 "broker_or_source": signal_broker,
                 "confidence": signal_confidence,
+                "priority": signal_priority,
                 "source_date": signal_date,
             }.items():
                 if value != "All":
@@ -6403,7 +6430,7 @@ def draw_dashboard_section() -> None:
             r"covenant|cash flow|free cash flow"
         )
         credit_text = (
-            signals_df.reindex(columns=["signal_type", "evidence", "reason", "source_file"])
+            signals_df.reindex(columns=["signal_type", "evidence", "why_it_matters", "source_file"])
             .fillna("")
             .astype(str)
             .agg(" ".join, axis=1)
@@ -6428,7 +6455,7 @@ def draw_dashboard_section() -> None:
             r"transcript|10-q|10q|8-k|8k"
         )
         earnings_text = (
-            signals_df.reindex(columns=["signal_type", "evidence", "reason", "source_file"])
+            signals_df.reindex(columns=["signal_type", "evidence", "why_it_matters", "source_file"])
             .fillna("")
             .astype(str)
             .agg(" ".join, axis=1)
@@ -6446,14 +6473,50 @@ def draw_dashboard_section() -> None:
             with st.expander(f"View all earnings / guidance items ({len(earnings_watch)})"):
                 st.dataframe(earnings_watch.reindex(columns=signal_columns), use_container_width=True, hide_index=True)
 
+        st.markdown("#### Cash Flow / Capex Watch")
+        cash_flow_watch = signals_df[
+            signals_df.get("signal_type", pd.Series(dtype=str)).astype(str).isin(
+                ["Cash Flow / FCF", "Capex / Investment Spend"]
+            )
+        ] if not signals_df.empty else signals_df
+        if cash_flow_watch.empty:
+            st.info("No cash flow, FCF, or capex signals were detected.")
+        else:
+            cash_flow_chart = _dashboard_count_chart_data(cash_flow_watch, "ticker", "signal_count")
+            _safe_dashboard_bar_chart(
+                cash_flow_chart, "ticker", "signal_count",
+                top_n=12, debug_key="dashboard_chart_debug_cash_flow",
+            )
+            with st.expander(f"View cash flow / capex items ({len(cash_flow_watch)})"):
+                st.dataframe(cash_flow_watch.reindex(columns=signal_columns), use_container_width=True, hide_index=True)
+
+        st.markdown("#### Revenue / Growth Watch")
+        revenue_watch = signals_df[
+            signals_df.get("signal_type", pd.Series(dtype=str)).astype(str) == "Revenue / Growth"
+        ] if not signals_df.empty else signals_df
+        if revenue_watch.empty:
+            st.info("No revenue or growth signals were detected.")
+        else:
+            revenue_chart = _dashboard_count_chart_data(revenue_watch, "ticker", "signal_count")
+            _safe_dashboard_bar_chart(
+                revenue_chart, "ticker", "signal_count",
+                top_n=12, debug_key="dashboard_chart_debug_revenue",
+            )
+            with st.expander(f"View revenue / growth items ({len(revenue_watch)})"):
+                st.dataframe(revenue_watch.reindex(columns=signal_columns), use_container_width=True, hide_index=True)
+
     with manual_tab:
         st.markdown("#### Items Needing Manual Review")
+        main_review_columns = [
+            "ticker", "priority", "signal_type", "signal_direction", "confidence", "evidence",
+            "source_file", "broker_or_source", "why_it_matters", "why_review",
+        ]
         if manual_review_main.empty:
-            st.info("No current signals are marked for manual review.")
+            st.info("No current signals are marked for Critical or High review.")
         else:
             st.caption(
-                "The main queue focuses on Critical, High, and Medium items. Low-priority items remain "
-                "available below and in the download CSV."
+                "The main queue focuses on Critical and High items. Medium items are collapsed below; "
+                "Low-priority items remain download-only."
             )
             critical_high = manual_review_main[
                 manual_review_main["priority"].astype(str).isin(["Critical", "High"])
@@ -6469,24 +6532,26 @@ def draw_dashboard_section() -> None:
                     critical_high_chart, "ticker", "signal_count",
                     top_n=10, debug_key="dashboard_chart_debug_critical_high",
                 )
-            main_review_columns = [
-                "ticker", "priority", "signal_type", "signal_direction", "confidence", "evidence",
-                "source_file", "broker_or_source", "why_review",
-            ]
             st.dataframe(
                 manual_review_main.reindex(columns=main_review_columns).head(20),
                 use_container_width=True,
                 hide_index=True,
             )
-            with st.expander(f"View all Critical / High / Medium items ({len(manual_review_main)})"):
+            with st.expander(f"View all Critical / High items ({len(manual_review_main)})"):
                 st.dataframe(
                     manual_review_main.reindex(columns=main_review_columns),
                     use_container_width=True,
                     hide_index=True,
                 )
+        if not manual_review_medium.empty:
+            with st.expander(f"View Medium-priority review items ({len(manual_review_medium)})"):
+                st.dataframe(
+                    manual_review_medium.reindex(columns=main_review_columns),
+                    use_container_width=True,
+                    hide_index=True,
+                )
         if not manual_review_low.empty:
-            with st.expander(f"View low-priority review items ({len(manual_review_low)})"):
-                st.dataframe(manual_review_low, use_container_width=True, hide_index=True)
+            st.caption(f"{len(manual_review_low)} Low-priority review item(s) are available in the download CSV.")
 
     summary_markdown = daily_research_brief.build_dashboard_summary_markdown(
         relevance_df,
