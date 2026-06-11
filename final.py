@@ -6014,6 +6014,75 @@ def draw_dashboard_section() -> None:
     st.markdown("## Investment Research Dashboard")
     st.caption("Daily research priorities, broker coverage, investment signals, and manual review queue.")
 
+    def _safe_dashboard_bar_chart(
+        data,
+        label_col: str,
+        value_col: str,
+        *,
+        top_n: int = 10,
+        aggregation: str = "sum",
+        ascending: bool = False,
+        debug_key: str,
+    ) -> None:
+        """Render a version-compatible Dashboard chart from clean string/numeric columns."""
+        try:
+            if not isinstance(data, pd.DataFrame) or data.empty:
+                st.info("No chart data available yet.")
+                return
+            if label_col not in data.columns or value_col not in data.columns:
+                st.info("No chart data available yet.")
+                return
+
+            chart_df = data.loc[:, [label_col, value_col]].copy()
+            chart_df.columns = ["label", "value"]
+            chart_df["label"] = chart_df["label"].fillna("").astype(str).str.strip()
+            chart_df["value"] = pd.to_numeric(chart_df["value"], errors="coerce")
+            chart_df = chart_df[(chart_df["label"] != "") & chart_df["value"].notna()]
+            if chart_df.empty:
+                st.info("No chart data available yet.")
+                return
+
+            if aggregation == "max":
+                chart_df = chart_df.groupby("label", as_index=False)["value"].max()
+            elif aggregation == "count":
+                chart_df = chart_df.groupby("label", as_index=False)["value"].count()
+            else:
+                chart_df = chart_df.groupby("label", as_index=False)["value"].sum()
+            chart_df = chart_df.sort_values("value", ascending=ascending).head(max(1, int(top_n)))
+            chart_df = chart_df.set_index("label")[["value"]]
+            if chart_df.empty:
+                st.info("No chart data available yet.")
+                return
+
+            # Use the oldest supported st.bar_chart form because Streamlit Cloud is pinned to 1.33.
+            st.bar_chart(chart_df, use_container_width=True)
+        except Exception as exc:
+            st.warning("Chart could not be rendered for this section.")
+            with st.expander("Chart debug details"):
+                st.text_area(
+                    "Technical details",
+                    value=f"{type(exc).__name__}: {exc}",
+                    height=90,
+                    disabled=True,
+                    key=debug_key,
+                )
+
+    def _dashboard_count_chart_data(data, label_col: str, value_col: str = "item_count"):
+        """Return a clean two-column count dataframe without assuming a complete schema."""
+        try:
+            if not isinstance(data, pd.DataFrame) or data.empty or label_col not in data.columns:
+                return pd.DataFrame(columns=[label_col, value_col])
+            labels = data[label_col]
+            if isinstance(labels, pd.DataFrame):
+                labels = labels.iloc[:, 0]
+            labels = labels.fillna("").astype(str).str.strip()
+            labels = labels[labels != ""]
+            if labels.empty:
+                return pd.DataFrame(columns=[label_col, value_col])
+            return labels.value_counts().rename_axis(label_col).reset_index(name=value_col)
+        except Exception:
+            return pd.DataFrame(columns=[label_col, value_col])
+
     relevance_df = st.session_state.get("daily_relevance_df")
     inventory_df = st.session_state.get("daily_inventory_df")
     if not isinstance(relevance_df, pd.DataFrame):
@@ -6189,34 +6258,28 @@ def draw_dashboard_section() -> None:
             if display_priority.empty:
                 st.info("No priority ticker data is available.")
             else:
-                priority_chart = display_priority.head(10)[["ticker", "attention_score"]].sort_values(
-                    "attention_score", ascending=True
-                )
-                st.bar_chart(
-                    priority_chart, x="ticker", y="attention_score", horizontal=True,
-                    color="#2F5597", height=340,
+                _safe_dashboard_bar_chart(
+                    display_priority, "ticker", "attention_score",
+                    top_n=10, aggregation="max", debug_key="dashboard_chart_debug_priority",
                 )
         with overview_visual_two:
             st.markdown("##### Signal Type Distribution")
             if signals_df.empty:
                 st.info("No signal distribution is available.")
             else:
-                signal_chart = (
-                    signals_df["signal_type"].astype(str).value_counts().head(10)
-                    .rename_axis("signal_type").reset_index(name="signal_count")
-                )
-                st.bar_chart(
-                    signal_chart, x="signal_type", y="signal_count",
-                    color="#5B9BD5", height=340,
+                signal_chart = _dashboard_count_chart_data(signals_df, "signal_type", "signal_count")
+                _safe_dashboard_bar_chart(
+                    signal_chart, "signal_type", "signal_count",
+                    top_n=10, debug_key="dashboard_chart_debug_signal_overview",
                 )
         st.markdown("##### Manual Review by Priority")
         if manual_review.empty:
             st.info("No prioritized manual-review items are available.")
         else:
             review_chart = review_priority_counts.rename_axis("priority").reset_index(name="item_count")
-            st.bar_chart(
-                review_chart, x="priority", y="item_count",
-                color="#A5A5A5", height=250,
+            _safe_dashboard_bar_chart(
+                review_chart, "priority", "item_count",
+                top_n=4, debug_key="dashboard_chart_debug_review_priority",
             )
 
         st.markdown("#### Top Priority Tickers")
@@ -6249,13 +6312,10 @@ def draw_dashboard_section() -> None:
         if signals_df.empty:
             st.info("No signal rows are available from current metadata or extracted snippets.")
         else:
-            signal_chart = (
-                signals_df["signal_type"].astype(str).value_counts().head(12)
-                .rename_axis("signal_type").reset_index(name="signal_count")
-            )
-            st.bar_chart(
-                signal_chart, x="signal_type", y="signal_count",
-                color="#5B9BD5", height=300,
+            signal_chart = _dashboard_count_chart_data(signals_df, "signal_type", "signal_count")
+            _safe_dashboard_bar_chart(
+                signal_chart, "signal_type", "signal_count",
+                top_n=12, debug_key="dashboard_chart_debug_signal_tab",
             )
             filter_row_one = st.columns(4)
             filter_row_two = st.columns(3)
@@ -6320,12 +6380,9 @@ def draw_dashboard_section() -> None:
         if broker_coverage.empty:
             st.info("No recognized broker/source coverage is available.")
         else:
-            broker_chart = broker_coverage.head(10)[["ticker", "broker_report_count"]].sort_values(
-                "broker_report_count", ascending=True
-            )
-            st.bar_chart(
-                broker_chart, x="ticker", y="broker_report_count", horizontal=True,
-                color="#4472C4", height=340,
+            _safe_dashboard_bar_chart(
+                broker_coverage, "ticker", "broker_report_count",
+                top_n=10, aggregation="max", debug_key="dashboard_chart_debug_broker",
             )
             three_plus = broker_coverage[
                 pd.to_numeric(broker_coverage["broker_report_count"], errors="coerce").fillna(0) >= 3
@@ -6356,13 +6413,10 @@ def draw_dashboard_section() -> None:
         if credit_watch.empty:
             st.info("No credit, liquidity, leverage, debt, capex, rating, or risk items were detected.")
         else:
-            credit_chart = (
-                credit_watch["ticker"].astype(str).value_counts().head(12)
-                .rename_axis("ticker").reset_index(name="signal_count")
-            )
-            st.bar_chart(
-                credit_chart, x="ticker", y="signal_count",
-                color="#C55A11", height=280,
+            credit_chart = _dashboard_count_chart_data(credit_watch, "ticker", "signal_count")
+            _safe_dashboard_bar_chart(
+                credit_chart, "ticker", "signal_count",
+                top_n=12, debug_key="dashboard_chart_debug_credit",
             )
             with st.expander(f"View all credit / risk items ({len(credit_watch)})"):
                 st.dataframe(credit_watch.reindex(columns=signal_columns), use_container_width=True, hide_index=True)
@@ -6384,13 +6438,10 @@ def draw_dashboard_section() -> None:
         if earnings_watch.empty:
             st.info("No earnings, guidance, estimate, margin, filing, or transcript items were detected.")
         else:
-            earnings_chart = (
-                earnings_watch["ticker"].astype(str).value_counts().head(12)
-                .rename_axis("ticker").reset_index(name="signal_count")
-            )
-            st.bar_chart(
-                earnings_chart, x="ticker", y="signal_count",
-                color="#70AD47", height=280,
+            earnings_chart = _dashboard_count_chart_data(earnings_watch, "ticker", "signal_count")
+            _safe_dashboard_bar_chart(
+                earnings_chart, "ticker", "signal_count",
+                top_n=12, debug_key="dashboard_chart_debug_earnings",
             )
             with st.expander(f"View all earnings / guidance items ({len(earnings_watch)})"):
                 st.dataframe(earnings_watch.reindex(columns=signal_columns), use_container_width=True, hide_index=True)
@@ -6404,6 +6455,20 @@ def draw_dashboard_section() -> None:
                 "The main queue focuses on Critical, High, and Medium items. Low-priority items remain "
                 "available below and in the download CSV."
             )
+            critical_high = manual_review_main[
+                manual_review_main["priority"].astype(str).isin(["Critical", "High"])
+            ]
+            st.markdown("##### Top Tickers by Critical / High Signals")
+            if critical_high.empty:
+                st.info("No chart data available yet.")
+            else:
+                critical_high_chart = _dashboard_count_chart_data(
+                    critical_high, "ticker", "signal_count"
+                )
+                _safe_dashboard_bar_chart(
+                    critical_high_chart, "ticker", "signal_count",
+                    top_n=10, debug_key="dashboard_chart_debug_critical_high",
+                )
             main_review_columns = [
                 "ticker", "priority", "signal_type", "signal_direction", "confidence", "evidence",
                 "source_file", "broker_or_source", "why_review",
