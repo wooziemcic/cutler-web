@@ -7569,6 +7569,10 @@ def draw_daily_research_brief_section() -> None:
             "Creates a source-grounded daily research packet organized around Cutler themes: "
             "REITs, community banks, convertibles/credit, financials, and actionability."
         )
+        st.info(
+            "This brief is a first-pass research triage packet based on metadata and limited extracted snippets. "
+            "It prioritizes Cutler-relevant review items but does not replace source-PDF review."
+        )
         brief_mode = st.radio(
             "Daily brief depth",
             options=["Fast", "Deeper"],

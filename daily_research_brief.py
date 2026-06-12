@@ -3544,7 +3544,13 @@ def _cutler_brief_theme(row: Dict[str, Any]) -> str:
         return "Energy / Industrials / Commodities"
     if any(term in text for term in ["insider trading", "screen", "dividend", "income screen"]):
         return "Insider Trading / Screens"
-    if any(term in text for term in ["macro", "market backdrop", "fear and greed", "rates", "inflation"]):
+    if any(
+        term in text
+        for term in [
+            "macro", "market backdrop", "fear and greed", "rates", "inflation",
+            "jpm guide", "guide to the markets", "market recap", "monday guide",
+        ]
+    ):
         return "Macro / Market Backdrop"
     return "Other Notable Research"
 
@@ -3552,21 +3558,119 @@ def _cutler_brief_theme(row: Dict[str, Any]) -> str:
 def _cutler_actionability(row: Dict[str, Any], theme: str, watchlist: set[str]) -> str:
     ticker = str(row.get("ticker") or "").upper()
     signal_type = str(row.get("signal_type") or "")
-    priority = str(row.get("priority") or "")
     evidence = str(row.get("evidence") or "").casefold()
-    if "metadata match only" in evidence:
-        return "Needs source PDF verification"
+    text = " ".join(
+        str(row.get(column) or "")
+        for column in ["source_file", "document_type", "category", "signal_type", "evidence"]
+    ).casefold()
+    if theme == "Community Banks / Financials":
+        return "Relevant to community bank strategy"
     if theme == "REITs / Real Estate":
         if signal_type == "Valuation / Thesis" or "nav" in evidence:
             return "Potential NAV estimate impact"
         return "Relevant to REIT holdings/watchlist"
-    if theme == "Convertibles / Credit":
+    if theme == "Convertibles / Credit" and any(
+        term in text for term in ["convertible", "convertibles", "convert vantage", "dilution"]
+    ):
         return "Potential credit/convertible dilution impact"
     if theme == "Healthcare / Pharma" and any(term in evidence for term in ["clinical", "fda", "trial"]):
         return "Clinical catalyst; relevance depends on holding/watchlist"
-    if priority in {"Critical", "High"} or ticker in watchlist:
+    if "metadata match only" in evidence:
+        return "Needs source PDF verification"
+    if str(row.get("cutler_priority") or "") in {"Highest", "High"} or ticker in watchlist:
         return "Needs PM review"
     return "Monitor, no action"
+
+
+def _cutler_priority_calibration(
+    row: Dict[str, Any],
+    theme: str,
+    watchlist: set[str],
+) -> Tuple[str, int, str]:
+    """Rank a brief item by Cutler strategy relevance, independent of Dashboard signal priority."""
+    text = " ".join(
+        str(row.get(column) or "")
+        for column in [
+            "ticker", "company_or_identifier", "source_file", "file_name", "relative_path",
+            "category", "document_type", "signal_type", "broker_or_source",
+            "source_or_broker", "evidence",
+        ]
+    ).casefold()
+    ticker = str(row.get("ticker") or "").upper()
+    category = str(row.get("category") or "").casefold()
+    document_type = str(row.get("document_type") or "").casefold()
+    signal_direction = str(row.get("signal_direction") or "")
+    watchlist_hit = bool(ticker and ticker in watchlist)
+    weekly_or_guide = any(
+        term in text
+        for term in [
+            "weekly", "monday", "jpm guide", "guide to the markets", "market recap",
+            "convert vantage", "pricing report", "pricing toolkit", "reit toolkit",
+        ]
+    )
+    community_bank = category == "banks" or any(
+        term in text for term in ["community bank", "bank earnings", "bank investor", "bank shareholder"]
+    )
+    bank_primary_material = community_bank and (
+        document_type in {
+            "8-k/8k", "earnings release", "earnings presentation", "earnings supplement",
+            "prepared remarks", "transcript", "current report",
+        }
+        or any(term in text for term in ["investor presentation", "shareholder", "8-k", "8k"])
+    )
+    green_street = "green street" in text
+    reit_real_estate = theme == "REITs / Real Estate"
+    convertible_relevant = any(
+        term in text
+        for term in ["convertible", "convertibles", "convert vantage", "convert issuance", "convert offering"]
+    )
+    credit_concern = any(
+        term in text
+        for term in [
+            "downgrade", "liquidity pressure", "liquidity concern", "leverage concern",
+            "leverage pressure", "issuance need", "issuance pressure", "rating pressure",
+        ]
+    ) or (str(row.get("signal_type") or "") == "Credit / Liquidity" and signal_direction == "Negative")
+    industry_report = "industry report" in document_type or "sector report" in document_type
+    strategy_industry = industry_report and any(
+        term in text
+        for term in [
+            "reit", "real estate", "community bank", "banks", "financials", "convertible",
+            "convertibles", "dividend", "income",
+        ]
+    )
+
+    if weekly_or_guide:
+        return "Medium", 58 + (4 if watchlist_hit else 0), "Recurring weekly/guide material; useful context but not a first-pass must-have."
+    if bank_primary_material:
+        return "Highest", 100, "Community-bank primary material is directly relevant to Cutler strategy review."
+    if community_bank:
+        return "Highest", 97, "Community-bank research is a core Cutler strategy priority."
+    if green_street:
+        return "Highest", 96, "Green Street research is a core REIT/real-estate priority."
+    if reit_real_estate and industry_report:
+        return "Highest", 94, "REIT/real-estate industry research is directly relevant to Cutler strategy review."
+    if reit_real_estate:
+        return "High", 88 + (4 if watchlist_hit else 0), "Single-name REIT/real-estate research is relevant to holdings and NAV review."
+    if convertible_relevant:
+        return "High", 87 + (4 if watchlist_hit else 0), "Explicit convertible relevance connects the item to Cutler strategy."
+    if strategy_industry:
+        return "High", 84, "Industry research directly intersects with a Cutler strategy."
+    if theme == "Convertibles / Credit":
+        if watchlist_hit or credit_concern:
+            return "High", 82 + (4 if watchlist_hit else 0), "Credit evidence has a watchlist hit or explicit downside-risk concern."
+        return "Lower", 34, "Generic credit research is lower priority without convertible or direct strategy relevance."
+    if industry_report:
+        return "Medium", 62, "Broad industry research may provide context but lacks a direct Cutler strategy hit."
+    if watchlist_hit:
+        return "High", 80, "The item matches the Cutler watchlist/portfolio universe."
+    if theme == "Healthcare / Pharma":
+        return "Lower", 32, "Healthcare/pharma is lower priority without a watchlist or portfolio hit."
+    if theme == "Insider Trading / Screens":
+        return "Lower", 28, "Screening material is lower priority without a watchlist or portfolio hit."
+    if theme == "Macro / Market Backdrop":
+        return "Medium", 56, "Macro context is useful for triage but usually not a first-pass must-have."
+    return "Lower", 30, "Generic single-name research is lower priority without a direct Cutler strategy or watchlist hit."
 
 
 def build_cutler_style_daily_brief(
@@ -3596,20 +3700,10 @@ def build_cutler_style_daily_brief(
         file_name = str(row.get("file_name") or Path(str(row.get("relative_path") or "")).name)
         if file_name:
             source_meta[file_name] = row.to_dict()
-    priority_rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+    cutler_priority_rank = {"Highest": 0, "High": 1, "Medium": 2, "Lower": 3}
     max_per_section = 10 if str(mode).casefold().startswith("deeper") else 5
     max_must_have = 10 if str(mode).casefold().startswith("deeper") else 6
     watchlist_set = {str(value).strip().upper() for value in watchlist if str(value).strip()}
-    broker_counts = {
-        str(row.get("ticker") or ""): int(row.get("broker_report_count") or 0)
-        for _, row in broker_coverage.iterrows()
-    }
-    review_sources = {
-        str(row.get("source_file") or "")
-        for _, row in manual_review.iterrows()
-        if str(row.get("priority") or "") in {"Critical", "High"}
-    }
-
     records = []
     for _, signal in signals.iterrows():
         record = signal.to_dict()
@@ -3619,8 +3713,12 @@ def build_cutler_style_daily_brief(
             if not str(record.get(column) or "").strip():
                 record[column] = metadata.get(column) or ""
         record["relevance_score"] = int(metadata.get("relevance_score") or 0)
-        record["broker_report_count"] = broker_counts.get(str(record.get("ticker") or ""), 0)
         record["theme"] = _cutler_brief_theme(record)
+        (
+            record["cutler_priority"],
+            record["cutler_relevance_score"],
+            record["cutler_priority_reason"],
+        ) = _cutler_priority_calibration(record, record["theme"], watchlist_set)
         record["actionability"] = _cutler_actionability(record, record["theme"], watchlist_set)
         records.append(record)
 
@@ -3647,17 +3745,20 @@ def build_cutler_style_daily_brief(
             "why_it_matters": "Helps prioritize source-document review.",
             "why_review": "Metadata-only item; review the source PDF for details.",
             "relevance_score": int(row.get("relevance_score") or 0),
-            "broker_report_count": broker_counts.get(str(row.get("ticker") or ""), 0),
         }
         record["theme"] = _cutler_brief_theme(record)
+        (
+            record["cutler_priority"],
+            record["cutler_relevance_score"],
+            record["cutler_priority_reason"],
+        ) = _cutler_priority_calibration(record, record["theme"], watchlist_set)
         record["actionability"] = _cutler_actionability(record, record["theme"], watchlist_set)
         records.append(record)
 
     records.sort(
         key=lambda item: (
-            priority_rank.get(str(item.get("priority") or ""), 4),
-            -int(item.get("broker_report_count") or 0),
-            -int(item.get("relevance_score") or 0),
+            cutler_priority_rank.get(str(item.get("cutler_priority") or ""), 4),
+            -int(item.get("cutler_relevance_score") or 0),
             str(item.get("source_file") or ""),
         )
     )
@@ -3674,26 +3775,34 @@ def build_cutler_style_daily_brief(
 
     must_have_candidates = [
         record for record in records
-        if str(record.get("priority") or "") in {"Critical", "High"}
+        if str(record.get("cutler_priority") or "") in {"Highest", "High"}
     ]
-    must_have = [
-        record for record in must_have_candidates
-        if str(record.get("source_file") or "") in review_sources
-    ]
-    must_have.extend(
-        record for record in must_have_candidates
-        if str(record.get("source_file") or "") not in review_sources
-    )
-    must_have = must_have[:max_must_have]
+    must_have = []
+    seen_must_have_sources = set()
+    for record in must_have_candidates:
+        source = str(record.get("source_file") or "")
+        if not source or source in seen_must_have_sources:
+            continue
+        must_have.append(record)
+        seen_must_have_sources.add(source)
+        if len(must_have) >= max_must_have:
+            break
     if not must_have:
-        must_have = records[:max_must_have]
+        for record in records:
+            source = str(record.get("source_file") or "")
+            if not source or source in seen_must_have_sources:
+                continue
+            must_have.append(record)
+            seen_must_have_sources.add(source)
+            if len(must_have) >= max_must_have:
+                break
 
     def sourced_bullet(record: Dict[str, Any]) -> str:
         file_name = str(record.get("source_file") or "source unavailable")
         ticker = str(record.get("ticker") or record.get("company_or_identifier") or "Uncertain entity")
         signal_type = str(record.get("signal_type") or "Other")
         direction = str(record.get("signal_direction") or "Unknown")
-        priority = str(record.get("priority") or "Low")
+        priority = str(record.get("cutler_priority") or "Lower")
         evidence = re.sub(r"\s+", " ", str(record.get("evidence") or "")).strip()
         if "metadata match only" in evidence.casefold():
             detail = (
@@ -3705,7 +3814,7 @@ def build_cutler_style_daily_brief(
             detail = f"limited extracted snippet: \"{excerpt}\""
         return (
             f"- **{ticker} — {signal_type}** ({direction}; {priority}): {detail}. "
-            f"Why it matters: {record.get('why_it_matters') or 'Helps prioritize research review.'} "
+            f"Why it matters: {record.get('cutler_priority_reason') or record.get('why_it_matters') or 'Helps prioritize research review.'} "
             f"Actionability: {record.get('actionability') or 'Monitor, no action'}. "
             f"[Source: {file_name}]"
         )
@@ -3741,7 +3850,7 @@ def build_cutler_style_daily_brief(
             lines.append(
                 f"- **Topic:** {record.get('ticker') or record.get('company_or_identifier') or 'Uncertain entity'} — "
                 f"{record.get('signal_type') or 'Other'}. "
-                f"**Why it matters:** {record.get('why_it_matters') or 'Helps prioritize research review.'} "
+                f"**Why it matters:** {record.get('cutler_priority_reason') or record.get('why_it_matters') or 'Helps prioritize research review.'} "
                 f"**Suggested action:** {record.get('actionability') or 'Needs PM review'}. "
                 f"[Source: {record.get('source_file') or 'source unavailable'}]"
             )
