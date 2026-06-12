@@ -7532,7 +7532,8 @@ def draw_daily_research_brief_section() -> None:
             "It prioritizes Cutler-relevant review items but does not replace source-PDF review."
         )
         st.caption(
-            "Top Cutler-priority files receive deeper extraction; all other files use metadata/light snippets."
+            "Daily Brief uses targeted deeper extraction for must-have Cutler files; "
+            "all other files use metadata/light snippets."
         )
         brief_mode = st.radio(
             "Daily brief depth",
