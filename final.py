@@ -6706,7 +6706,7 @@ def draw_daily_research_brief_section() -> None:
                     "daily_selected_df", "daily_selected_text", "daily_processing_limits",
                     "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
                     "daily_brief_warning", "daily_brief_mode", "daily_brief_use_openai_polish",
-                    "daily_processing",
+                    "daily_brief_deep_selected_df", "daily_brief_selected_text", "daily_processing",
                 ],
                 prefixes=["daily_broker_comparison_", "daily_ticker_memo_", "daily_cross_day_"],
             )
@@ -6729,7 +6729,8 @@ def draw_daily_research_brief_section() -> None:
                         "daily_inventory_df",
                         "daily_relevance_df", "daily_selected_df", "daily_selected_text",
                         "daily_processing_limits", "daily_extract_warnings", "daily_brief_text",
-                        "daily_brief_method", "daily_brief_warning",
+                        "daily_brief_method", "daily_brief_warning", "daily_brief_deep_selected_df",
+                        "daily_brief_selected_text",
                     ],
                     prefixes=["daily_broker_comparison_", "daily_ticker_memo_"],
                 )
@@ -7573,6 +7574,9 @@ def draw_daily_research_brief_section() -> None:
             "This brief is a first-pass research triage packet based on metadata and limited extracted snippets. "
             "It prioritizes Cutler-relevant review items but does not replace source-PDF review."
         )
+        st.caption(
+            "Top Cutler-priority files receive deeper extraction; all other files use metadata/light snippets."
+        )
         brief_mode = st.radio(
             "Daily brief depth",
             options=["Fast", "Deeper"],
@@ -7592,15 +7596,34 @@ def draw_daily_research_brief_section() -> None:
             disabled=(not daily_ready) or daily_processing,
         )
         if generate_clicked and isinstance(relevance_df, pd.DataFrame):
-            with st.spinner("Generating source-grounded daily brief..."):
+            with st.spinner("Deeply scanning top Cutler-priority files and generating the daily brief..."):
+                deep_limits = (
+                    {"max_files": 15, "max_pdf_pages": 8, "max_chars": 15000}
+                    if str(brief_mode).casefold().startswith("deeper")
+                    else {"max_files": 8, "max_pdf_pages": 4, "max_chars": 8000}
+                )
+                brief_watchlist = set(tickers.keys()) if isinstance(tickers, dict) else set()
+                deep_selected_df = daily_research_brief.select_cutler_daily_brief_files(
+                    relevance_df,
+                    max_files=deep_limits["max_files"],
+                    watchlist=brief_watchlist,
+                )
+                brief_selected_text = daily_research_brief.prepare_cutler_daily_brief_text(
+                    deep_selected_df,
+                    selected_text,
+                    max_pdf_pages=deep_limits["max_pdf_pages"],
+                    max_chars_per_file=deep_limits["max_chars"],
+                )
                 brief, method, brief_warning = _generate_daily_research_brief_with_optional_llm(
                     relevance_df,
-                    selected_text,
+                    brief_selected_text,
                     source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
                     mode=brief_mode,
                     use_openai_polish=use_openai_polish,
-                    watchlist=set(tickers.keys()) if isinstance(tickers, dict) else set(),
+                    watchlist=brief_watchlist,
                 )
+            st.session_state["daily_brief_deep_selected_df"] = deep_selected_df
+            st.session_state["daily_brief_selected_text"] = brief_selected_text
             st.session_state["daily_brief_text"] = brief
             st.session_state["daily_brief_method"] = method
             st.session_state["daily_brief_warning"] = brief_warning
@@ -7610,6 +7633,21 @@ def draw_daily_research_brief_section() -> None:
         if brief_text:
             method = st.session_state.get("daily_brief_method") or "grounded_deterministic"
             st.caption(f"Generation method: {method}")
+            deep_selected_df = st.session_state.get("daily_brief_deep_selected_df")
+            if isinstance(deep_selected_df, pd.DataFrame) and not deep_selected_df.empty:
+                with st.expander(
+                    f"Top Cutler-priority files selected for deeper extraction ({len(deep_selected_df)})"
+                ):
+                    st.dataframe(
+                        deep_selected_df.reindex(
+                            columns=[
+                                "cutler_priority", "cutler_topic", "cutler_document_type", "category",
+                                "file_name", "cutler_priority_reason",
+                            ]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
             _show_openai_fallback_warning(
                 st.session_state.get("daily_brief_warning") or "",
                 compact=True,

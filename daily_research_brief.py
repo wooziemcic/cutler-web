@@ -3514,7 +3514,8 @@ def _cutler_brief_theme(row: Dict[str, Any]) -> str:
         str(row.get(column) or "")
         for column in [
             "ticker", "company_or_identifier", "signal_type", "category", "document_type",
-            "source_file", "broker_or_source", "evidence",
+            "source_file", "file_name", "relative_path", "broker_or_source",
+            "source_or_broker", "evidence",
         ]
     ).casefold()
     category = str(row.get("category") or "").casefold()
@@ -3532,7 +3533,13 @@ def _cutler_brief_theme(row: Dict[str, Any]) -> str:
         ]
     ):
         return "Convertibles / Credit"
-    if any(term in text for term in ["healthcare", "pharma", "biotech", "clinical", "fda", "drug"]):
+    if any(
+        term in text
+        for term in [
+            "healthcare", "pharma", "biotech", "clinical", "fda", "drug", "asco",
+            "keytruda", "melanoma", "braftovi",
+        ]
+    ):
         return "Healthcare / Pharma"
     if any(
         term in text
@@ -3613,10 +3620,10 @@ def _cutler_priority_calibration(
     )
     bank_primary_material = community_bank and (
         document_type in {
-            "8-k/8k", "earnings release", "earnings presentation", "earnings supplement",
+            "8-k/8k", "10-k/10k", "earnings release", "earnings presentation", "earnings supplement",
             "prepared remarks", "transcript", "current report",
         }
-        or any(term in text for term in ["investor presentation", "shareholder", "8-k", "8k"])
+        or any(term in text for term in ["investor presentation", "shareholder", "8-k", "8k", "10-k", "10k"])
     )
     green_street = "green street" in text
     reit_real_estate = theme == "REITs / Real Estate"
@@ -3673,6 +3680,277 @@ def _cutler_priority_calibration(
     return "Lower", 30, "Generic single-name research is lower priority without a direct Cutler strategy or watchlist hit."
 
 
+_CUTLER_DEEP_EVIDENCE_PATTERNS = {
+    "REIT / Real Estate": (
+        r"\breits?\b", r"\bnav\b", r"\bcap rates?\b", r"\bnoi\b", r"\baffo\b",
+        r"\bffo\b", r"\boccupancy\b", r"\brent growth\b", r"\bdividends?\b",
+        r"\bgreen street\b", r"\bmalls?\b", r"\bresidential\b", r"\bsector update\b",
+        r"\brecommendation\b", r"\bacquisition\b", r"\bdisposition\b",
+        r"\bpreferred stock\b",
+    ),
+    "Community Banks / Financials": (
+        r"\bbanks?\b", r"\bcommunity banks?\b", r"\bdeposits?\b", r"\bnim\b",
+        r"\bnet interest margin\b",
+        r"\bcapital ratios?\b", r"\bloan growth\b", r"\basset quality\b", r"\bm&a\b",
+        r"\bmergers?\b", r"\bdividends?\b",
+    ),
+    "Convertibles / Credit": (
+        r"\bconvertible notes?\b", r"\bconvertibles?\b", r"\bcapped calls?\b",
+        r"\bdilution\b", r"\bissuance\b", r"\buse of proceeds\b", r"\bleverage\b",
+        r"\bliquidity\b", r"\bdebt\b",
+    ),
+    "Macro / Weekly": (
+        r"\bweekly\b", r"\bjpm guide\b", r"\bguide to the markets\b", r"\bmarket recap\b",
+        r"\bfear\s+(?:and|&)\s+greed\b", r"\bpayrolls?\b", r"\bpmi\b",
+    ),
+    "Healthcare / Clinical Catalyst": (
+        r"\basco\b", r"\bclinical\b", r"\btrials?\b", r"\bkeytruda\b",
+        r"\bmelanoma\b", r"\bbraftovi\b",
+    ),
+}
+
+
+def _cutler_metadata_text(row: Dict[str, Any]) -> str:
+    return " ".join(
+        str(row.get(column) or "")
+        for column in [
+            "ticker", "company_or_identifier", "source_file", "file_name", "relative_path",
+            "category", "document_type", "signal_type", "broker_or_source",
+            "source_or_broker", "evidence",
+        ]
+    )
+
+
+def cutler_daily_brief_document_type(row: Dict[str, Any]) -> str:
+    """Normalize display document types for the Cutler daily packet only."""
+    text = _normalize_metadata_text(_cutler_metadata_text(row)).casefold()
+    category = str(row.get("category") or "").casefold()
+    source = str(row.get("source_or_broker") or row.get("broker_or_source") or "").casefold()
+    if re.search(r"\b10\s*k\b", text):
+        return "Filing / 10-K"
+    if re.search(r"\b8\s*k\b", text):
+        return "Filing / 8-K"
+    if any(term in text for term in ["asco", "clinical", "trial", "keytruda", "melanoma", "braftovi"]):
+        return "Healthcare / Clinical Catalyst"
+    if any(term in text for term in ["convertible note", "convertible notes", "senior notes", "capped call"]):
+        return "Convertible Financing"
+    if any(term in text for term in ["fear and greed", "fear & greed"]):
+        return "Macro Sentiment"
+    if any(term in text for term in ["jpm weekly", "jpm guide", "monday guide", "market recap"]):
+        return "Macro / Weekly Guide"
+    if "insider trading" in text:
+        return "Insider Trading Screen"
+    if any(term in text for term in ["investor ppt", "investor presentation", "presentation", " deck"]):
+        return "Investor Presentation"
+    if category == "green street" or source == "green street" or "green street" in text:
+        return "Green Street / Sector Report"
+    if any(
+        term in text
+        for term in ["mall sector", "residential", "reit pricing", "reit toolkit", "real estate report"]
+    ):
+        return "REIT / Real Estate Report"
+    if "transcript" in text:
+        return "Earnings Transcript"
+    if any(term in text for term in ["press release", "announces", "completion", "acquisition"]):
+        return "Company Press Release"
+    if "industry" in text:
+        return "Industry Report"
+    if category == "credit" or "credit" in text or source == "gimme credit":
+        return "Credit Report"
+    raw = str(row.get("document_type") or row.get("signal_type") or "").strip()
+    return raw if raw and raw.casefold() != "other" else "Unclassified Document"
+
+
+def cutler_daily_brief_topic(row: Dict[str, Any]) -> str:
+    """Create a concise topic/entity label for the Cutler daily packet."""
+    text = _normalize_metadata_text(_cutler_metadata_text(row))
+    folded = text.casefold()
+    if "fear and greed" in folded or "fear & greed" in folded:
+        return "Fear & Greed Index"
+    if any(term in folded for term in ["jpm weekly", "jpm guide", "monday guide", "guide to the markets"]):
+        return "JPM Weekly Market Guide"
+    if "insider trading" in folded:
+        return "Insider Trading Screen"
+    if "green street" in folded:
+        if "vre" in folded and any(term in folded for term in ["dropping research coverage", "coverage dropped"]):
+            return "VRE / Coverage Dropped"
+        if "qt" in folded and "fertitta" in folded and "caesars" in folded:
+            return "QT / Caesars-Fertitta Read-Through"
+        if "mall sector" in folded:
+            return "Mall Sector Update"
+        if "residential" in folded:
+            return "Residential Sector Update"
+
+    ticker = str(row.get("ticker") or "").strip().upper()
+    if ticker and ticker.casefold() not in {"uncertain", "unclassified", "unknown", "n/a", "none"}:
+        return ticker
+    identifier = str(row.get("company_or_identifier") or "").strip()
+    if identifier.casefold() in {"uncertain", "unclassified", "unknown", "n/a", "none"}:
+        identifier = ""
+    if identifier:
+        cleaned = _normalize_metadata_text(identifier)
+    else:
+        file_name = str(row.get("source_file") or row.get("file_name") or "")
+        cleaned = _normalize_metadata_text(Path(file_name).stem)
+    cleaned = re.sub(
+        r"\b(?:green street|jpmorgan|jpm|goldman sachs|wells fargo|gimme credit)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\b\d{1,2}\s+\d{1,2}\s+\d{2,4}\b|\b20\d{2}\b", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_/")
+    return cleaned[:100] if cleaned else "Unclassified"
+
+
+def best_cutler_daily_brief_evidence(item: Dict[str, Any], *, max_chars: int = 900) -> Dict[str, Any]:
+    """Return a useful Cutler-theme passage from limited or deeper extracted text."""
+    status = str(item.get("text_extraction_status") or "")
+    text = _normalized_extracted_text(item)
+    result = {"snippet": "", "evidence_type": "Other", "quality": "unavailable"}
+    if status != "scanned" or not text:
+        return result
+
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+|\s{2,}", text)
+        if sentence.strip()
+    ] or [text]
+    candidates = []
+    for index in range(len(sentences)):
+        for window_size in (1, 2, 3):
+            passage = " ".join(sentences[index:index + window_size]).strip()[:max_chars]
+            if not passage:
+                continue
+            scored_types = []
+            for evidence_type, patterns in _CUTLER_DEEP_EVIDENCE_PATTERNS.items():
+                hits = sum(bool(re.search(pattern, passage, flags=re.IGNORECASE)) for pattern in patterns)
+                if hits:
+                    scored_types.append((hits, evidence_type))
+            useful_hits = sum(hits for hits, _ in scored_types)
+            disclosure_hits = sum(phrase in passage.casefold() for phrase in DISCLOSURE_PHRASES)
+            score = (useful_hits * 8) - (disclosure_hits * 18) + min(len(passage), max_chars) / max_chars
+            evidence_type = max(scored_types, default=(0, "Other"))[1]
+            candidates.append((score, useful_hits, passage, evidence_type))
+    best = max(candidates, default=None, key=lambda value: value[0])
+    if best and best[1] > 0 and best[0] > 0:
+        return {
+            "snippet": best[2],
+            "evidence_type": best[3],
+            "quality": "cutler_useful",
+        }
+    generic = best_investment_useful_snippet(item, max_chars=max_chars)
+    return {
+        "snippet": str(generic.get("snippet") or ""),
+        "evidence_type": str(generic.get("evidence_type") or "Other"),
+        "quality": str(generic.get("quality") or "no_useful_snippet"),
+    }
+
+
+def select_cutler_daily_brief_files(
+    relevance: pd.DataFrame,
+    *,
+    max_files: int,
+    watchlist: Iterable[str] = (),
+) -> pd.DataFrame:
+    """Select only the highest-value files for the Daily Brief deeper extraction pass."""
+    if not isinstance(relevance, pd.DataFrame) or relevance.empty:
+        return relevance.iloc[0:0].copy() if isinstance(relevance, pd.DataFrame) else pd.DataFrame()
+    watchlist_set = {str(value).strip().upper() for value in watchlist if str(value).strip()}
+    eligible = relevance[
+        relevance["file_extension"].astype(str).isin(SUPPORTED_TEXT_EXTENSIONS)
+        & relevance["extraction_status"].astype(str).eq("extracted")
+    ].copy()
+    if eligible.empty:
+        return eligible
+
+    ranked = []
+    priority_rank = {"Highest": 0, "High": 1, "Medium": 2, "Lower": 3}
+    for _, row in eligible.iterrows():
+        record = row.to_dict()
+        theme = _cutler_brief_theme(record)
+        priority, score, reason = _cutler_priority_calibration(record, theme, watchlist_set)
+        text = " ".join(
+            str(record.get(column) or "")
+            for column in ["ticker", "file_name", "relative_path", "category", "document_type"]
+        ).casefold()
+        explicit_odv_convertible = "odv" in text and any(
+            term in text for term in ["convertible", "convertible note", "convert note"]
+        )
+        strategy_candidate = (
+            priority in {"Highest", "High"}
+            or explicit_odv_convertible
+            or any(
+                term in text
+                for term in [
+                    "green street", "reit", "real estate", "convertible", "convert note",
+                    "community bank", "industry report", "industry update", "pricing toolkit",
+                    "pricing report",
+                ]
+            )
+            or (str(record.get("ticker") or "").upper() in watchlist_set)
+        )
+        if not strategy_candidate:
+            continue
+        record["_cutler_priority_rank"] = priority_rank.get(priority, 4)
+        record["_cutler_deep_score"] = score + (8 if explicit_odv_convertible else 0)
+        record["cutler_priority"] = priority
+        record["cutler_priority_reason"] = reason
+        record["cutler_topic"] = cutler_daily_brief_topic(record)
+        record["cutler_document_type"] = cutler_daily_brief_document_type(record)
+        ranked.append(record)
+    if not ranked:
+        return eligible.iloc[0:0].copy()
+    return (
+        pd.DataFrame(ranked)
+        .sort_values(
+            ["_cutler_priority_rank", "_cutler_deep_score", "relevance_score", "file_name"],
+            ascending=[True, False, False, True],
+        )
+        .drop_duplicates(subset=["relative_path"])
+        .head(int(max_files))
+        .drop(columns=["_cutler_priority_rank", "_cutler_deep_score"])
+        .reset_index(drop=True)
+    )
+
+
+def prepare_cutler_daily_brief_text(
+    selected: pd.DataFrame,
+    existing_text: List[Dict[str, Any]],
+    *,
+    max_pdf_pages: int,
+    max_chars_per_file: int,
+) -> List[Dict[str, Any]]:
+    """Deeply rescan selected Cutler-priority files and merge them over light snippets."""
+    existing_by_path = {
+        str(item.get("relative_path") or ""): dict(item)
+        for item in existing_text or []
+        if str(item.get("relative_path") or "")
+    }
+    if not isinstance(selected, pd.DataFrame) or selected.empty:
+        return list(existing_by_path.values())
+    deeper = extract_selected_text(
+        selected,
+        max_pdf_pages=max_pdf_pages,
+        max_chars_per_file=max_chars_per_file,
+    )
+    for item in deeper:
+        path = str(item.get("relative_path") or "")
+        prior = existing_by_path.get(path)
+        if str(item.get("text_extraction_status") or "") != "scanned" and prior:
+            prior["deeper_extraction_attempt_status"] = item.get("text_extraction_status") or "not_scanned"
+            continue
+        item["extraction_depth"] = "deeper"
+        evidence = best_cutler_daily_brief_evidence(item, max_chars=1200)
+        item["cutler_evidence_snippet"] = evidence["snippet"]
+        item["cutler_evidence_type"] = evidence["evidence_type"]
+        item["cutler_evidence_quality"] = evidence["quality"]
+        existing_by_path[path] = item
+    for item in existing_by_path.values():
+        item.setdefault("extraction_depth", "limited")
+    return list(existing_by_path.values())
+
+
 def build_cutler_style_daily_brief(
     relevance: pd.DataFrame,
     selected_text: List[Dict[str, Any]],
@@ -3700,6 +3978,16 @@ def build_cutler_style_daily_brief(
         file_name = str(row.get("file_name") or Path(str(row.get("relative_path") or "")).name)
         if file_name:
             source_meta[file_name] = row.to_dict()
+    selected_by_file = {}
+    for item in selected_text or []:
+        file_name = str(item.get("file_name") or Path(str(item.get("relative_path") or "")).name)
+        if file_name:
+            selected_by_file[file_name] = {
+                "evidence": str(item.get("cutler_evidence_snippet") or "").strip(),
+                "evidence_type": str(item.get("cutler_evidence_type") or ""),
+                "extraction_depth": str(item.get("extraction_depth") or "limited"),
+                "text_extraction_status": str(item.get("text_extraction_status") or ""),
+            }
     cutler_priority_rank = {"Highest": 0, "High": 1, "Medium": 2, "Lower": 3}
     max_per_section = 10 if str(mode).casefold().startswith("deeper") else 5
     max_must_have = 10 if str(mode).casefold().startswith("deeper") else 6
@@ -3713,7 +4001,15 @@ def build_cutler_style_daily_brief(
             if not str(record.get(column) or "").strip():
                 record[column] = metadata.get(column) or ""
         record["relevance_score"] = int(metadata.get("relevance_score") or 0)
+        extracted = selected_by_file.get(source_file, {})
+        if extracted.get("evidence"):
+            record["evidence"] = extracted["evidence"]
+            record["signal_type"] = extracted.get("evidence_type") or record.get("signal_type") or "Other"
+            record["confidence"] = "High"
+        record["extraction_depth"] = extracted.get("extraction_depth") or "limited"
         record["theme"] = _cutler_brief_theme(record)
+        record["cutler_topic"] = cutler_daily_brief_topic(record)
+        record["cutler_document_type"] = cutler_daily_brief_document_type(record)
         (
             record["cutler_priority"],
             record["cutler_relevance_score"],
@@ -3727,14 +4023,16 @@ def build_cutler_style_daily_brief(
         file_name = str(row.get("file_name") or Path(str(row.get("relative_path") or "")).name)
         if not file_name or file_name in represented_sources:
             continue
+        extracted = selected_by_file.get(file_name, {})
+        extracted_evidence = str(extracted.get("evidence") or "")
         record = {
             "ticker": row.get("ticker") or "",
             "company_or_identifier": row.get("company_or_identifier") or "",
-            "signal_type": row.get("document_type") or "Other",
+            "signal_type": extracted.get("evidence_type") or row.get("document_type") or "Other",
             "signal_direction": "Unknown",
-            "confidence": "Low",
+            "confidence": "High" if extracted_evidence else "Low",
             "priority": "Medium" if str(row.get("priority_level") or "") == "High" else "Low",
-            "evidence": (
+            "evidence": extracted_evidence or (
                 f"Metadata match only: {row.get('document_type') or 'other'} in "
                 f"{row.get('category') or 'Root'}."
             ),
@@ -3745,8 +4043,11 @@ def build_cutler_style_daily_brief(
             "why_it_matters": "Helps prioritize source-document review.",
             "why_review": "Metadata-only item; review the source PDF for details.",
             "relevance_score": int(row.get("relevance_score") or 0),
+            "extraction_depth": extracted.get("extraction_depth") or "limited",
         }
         record["theme"] = _cutler_brief_theme(record)
+        record["cutler_topic"] = cutler_daily_brief_topic(record)
+        record["cutler_document_type"] = cutler_daily_brief_document_type(record)
         (
             record["cutler_priority"],
             record["cutler_relevance_score"],
@@ -3799,21 +4100,26 @@ def build_cutler_style_daily_brief(
 
     def sourced_bullet(record: Dict[str, Any]) -> str:
         file_name = str(record.get("source_file") or "source unavailable")
-        ticker = str(record.get("ticker") or record.get("company_or_identifier") or "Uncertain entity")
-        signal_type = str(record.get("signal_type") or "Other")
+        topic = str(record.get("cutler_topic") or "Unclassified")
+        document_type = str(record.get("cutler_document_type") or "Unclassified Document")
         direction = str(record.get("signal_direction") or "Unknown")
         priority = str(record.get("cutler_priority") or "Lower")
         evidence = re.sub(r"\s+", " ", str(record.get("evidence") or "")).strip()
         if "metadata match only" in evidence.casefold():
             detail = (
-                f"metadata-only: {record.get('document_type') or signal_type} is available in "
+                f"metadata-only: {document_type} is available in "
                 f"{record.get('category') or 'Root'}"
             )
         else:
             excerpt = evidence[:320] + ("..." if len(evidence) > 320 else "")
-            detail = f"limited extracted snippet: \"{excerpt}\""
+            label = (
+                "deeper extracted evidence"
+                if str(record.get("extraction_depth") or "") == "deeper"
+                else "limited extracted snippet"
+            )
+            detail = f"{label}: \"{excerpt}\""
         return (
-            f"- **{ticker} — {signal_type}** ({direction}; {priority}): {detail}. "
+            f"- **{topic} — {document_type}** ({direction}; {priority}): {detail}. "
             f"Why it matters: {record.get('cutler_priority_reason') or record.get('why_it_matters') or 'Helps prioritize research review.'} "
             f"Actionability: {record.get('actionability') or 'Monitor, no action'}. "
             f"[Source: {file_name}]"
@@ -3848,8 +4154,8 @@ def build_cutler_style_daily_brief(
     if must_have:
         for record in must_have:
             lines.append(
-                f"- **Topic:** {record.get('ticker') or record.get('company_or_identifier') or 'Uncertain entity'} — "
-                f"{record.get('signal_type') or 'Other'}. "
+                f"- **Topic:** {record.get('cutler_topic') or 'Unclassified'} — "
+                f"{record.get('cutler_document_type') or 'Unclassified Document'}. "
                 f"**Why it matters:** {record.get('cutler_priority_reason') or record.get('why_it_matters') or 'Helps prioritize research review.'} "
                 f"**Suggested action:** {record.get('actionability') or 'Needs PM review'}. "
                 f"[Source: {record.get('source_file') or 'source unavailable'}]"
@@ -3862,8 +4168,8 @@ def build_cutler_style_daily_brief(
         for record in must_have[:5]:
             lines.append(
                 f"- {record.get('actionability') or 'Monitor, no action'}: verify "
-                f"{record.get('ticker') or record.get('company_or_identifier') or 'the entity'} "
-                f"{str(record.get('signal_type') or 'research').casefold()} evidence in the source document. "
+                f"{record.get('cutler_topic') or 'the unclassified topic'} "
+                f"{str(record.get('cutler_document_type') or 'research').casefold()} evidence in the source document. "
                 f"[Source: {record.get('source_file') or 'source unavailable'}]"
             )
     else:
@@ -3878,12 +4184,14 @@ def build_cutler_style_daily_brief(
     if used_sources:
         for source in used_sources:
             metadata = source_meta.get(source, {})
-            status = "limited snippet/metadata"
-            if source in {
-                Path(str(item.get("relative_path") or "")).name
-                for item in verified_extracted_text_items(selected_text)
-            }:
-                status = "limited extracted snippet"
+            extracted = selected_by_file.get(source, {})
+            status = "metadata-only"
+            if extracted.get("text_extraction_status") == "scanned":
+                status = (
+                    "deeper extracted evidence"
+                    if extracted.get("extraction_depth") == "deeper" and extracted.get("evidence")
+                    else "limited snippet"
+                )
             lines.append(f"- [Source: {source}] — {status}; {metadata.get('category') or 'category uncertain'}")
     else:
         lines.append("No source references were available.")
