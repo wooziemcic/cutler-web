@@ -3492,6 +3492,347 @@ def build_deterministic_brief(
     return "\n".join(lines)
 
 
+CUTLER_BRIEF_SECTIONS = [
+    "Executive Summary",
+    "Macro / Market Backdrop",
+    "Convertibles / Credit",
+    "REITs / Real Estate",
+    "Community Banks / Financials",
+    "Healthcare / Pharma",
+    "Energy / Industrials / Commodities",
+    "Insider Trading / Screens",
+    "Other Notable Research",
+    "Must-Have Items for Review",
+    "Actionability / Suggested Follow-Up",
+    "Source References",
+    "Caveats / Manual Verification",
+]
+
+
+def _cutler_brief_theme(row: Dict[str, Any]) -> str:
+    text = " ".join(
+        str(row.get(column) or "")
+        for column in [
+            "ticker", "company_or_identifier", "signal_type", "category", "document_type",
+            "source_file", "broker_or_source", "evidence",
+        ]
+    ).casefold()
+    category = str(row.get("category") or "").casefold()
+    if any(term in text for term in ["reit", "real estate", "green street", "property", "nav"]):
+        return "REITs / Real Estate"
+    if category == "banks" or any(
+        term in text for term in ["community bank", "banking", "bank ", "financials", "financial services"]
+    ):
+        return "Community Banks / Financials"
+    if category == "credit" or any(
+        term in text
+        for term in [
+            "convertible", "convertibles", "credit", "liquidity", "leverage", "debt",
+            "covenant", "issuance", "cash flow / fcf",
+        ]
+    ):
+        return "Convertibles / Credit"
+    if any(term in text for term in ["healthcare", "pharma", "biotech", "clinical", "fda", "drug"]):
+        return "Healthcare / Pharma"
+    if any(
+        term in text
+        for term in [
+            "energy", "oil", "gas", "industrial", "commodity", "commodities", "metals",
+            "mining", "copper", "refining",
+        ]
+    ):
+        return "Energy / Industrials / Commodities"
+    if any(term in text for term in ["insider trading", "screen", "dividend", "income screen"]):
+        return "Insider Trading / Screens"
+    if any(term in text for term in ["macro", "market backdrop", "fear and greed", "rates", "inflation"]):
+        return "Macro / Market Backdrop"
+    return "Other Notable Research"
+
+
+def _cutler_actionability(row: Dict[str, Any], theme: str, watchlist: set[str]) -> str:
+    ticker = str(row.get("ticker") or "").upper()
+    signal_type = str(row.get("signal_type") or "")
+    priority = str(row.get("priority") or "")
+    evidence = str(row.get("evidence") or "").casefold()
+    if "metadata match only" in evidence:
+        return "Needs source PDF verification"
+    if theme == "REITs / Real Estate":
+        if signal_type == "Valuation / Thesis" or "nav" in evidence:
+            return "Potential NAV estimate impact"
+        return "Relevant to REIT holdings/watchlist"
+    if theme == "Convertibles / Credit":
+        return "Potential credit/convertible dilution impact"
+    if theme == "Healthcare / Pharma" and any(term in evidence for term in ["clinical", "fda", "trial"]):
+        return "Clinical catalyst; relevance depends on holding/watchlist"
+    if priority in {"Critical", "High"} or ticker in watchlist:
+        return "Needs PM review"
+    return "Monitor, no action"
+
+
+def build_cutler_style_daily_brief(
+    relevance: pd.DataFrame,
+    selected_text: List[Dict[str, Any]],
+    *,
+    source_name: str,
+    signals: Optional[pd.DataFrame] = None,
+    broker_coverage: Optional[pd.DataFrame] = None,
+    manual_review: Optional[pd.DataFrame] = None,
+    watchlist: Iterable[str] = (),
+    mode: str = "Fast",
+) -> str:
+    """Build a deterministic, source-cited daily packet organized around Cutler themes."""
+    if not isinstance(relevance, pd.DataFrame):
+        relevance = pd.DataFrame(columns=RELEVANCE_COLUMNS)
+    if not isinstance(signals, pd.DataFrame):
+        index_rows = build_research_index_rows(relevance, selected_text, source_name=source_name)
+        signals = build_dashboard_signal_table(index_rows)
+    if not isinstance(broker_coverage, pd.DataFrame):
+        broker_coverage = build_broker_coverage_summary(relevance)
+    if not isinstance(manual_review, pd.DataFrame):
+        manual_review = build_dashboard_manual_review_queue(signals)
+
+    source_meta = {}
+    for _, row in relevance.iterrows():
+        file_name = str(row.get("file_name") or Path(str(row.get("relative_path") or "")).name)
+        if file_name:
+            source_meta[file_name] = row.to_dict()
+    priority_rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+    max_per_section = 10 if str(mode).casefold().startswith("deeper") else 5
+    max_must_have = 10 if str(mode).casefold().startswith("deeper") else 6
+    watchlist_set = {str(value).strip().upper() for value in watchlist if str(value).strip()}
+    broker_counts = {
+        str(row.get("ticker") or ""): int(row.get("broker_report_count") or 0)
+        for _, row in broker_coverage.iterrows()
+    }
+    review_sources = {
+        str(row.get("source_file") or "")
+        for _, row in manual_review.iterrows()
+        if str(row.get("priority") or "") in {"Critical", "High"}
+    }
+
+    records = []
+    for _, signal in signals.iterrows():
+        record = signal.to_dict()
+        source_file = str(record.get("source_file") or "")
+        metadata = source_meta.get(source_file, {})
+        for column in ["category", "document_type", "company_or_identifier", "ticker"]:
+            if not str(record.get(column) or "").strip():
+                record[column] = metadata.get(column) or ""
+        record["relevance_score"] = int(metadata.get("relevance_score") or 0)
+        record["broker_report_count"] = broker_counts.get(str(record.get("ticker") or ""), 0)
+        record["theme"] = _cutler_brief_theme(record)
+        record["actionability"] = _cutler_actionability(record, record["theme"], watchlist_set)
+        records.append(record)
+
+    represented_sources = {str(record.get("source_file") or "") for record in records}
+    for _, row in relevance.sort_values("relevance_score", ascending=False).iterrows():
+        file_name = str(row.get("file_name") or Path(str(row.get("relative_path") or "")).name)
+        if not file_name or file_name in represented_sources:
+            continue
+        record = {
+            "ticker": row.get("ticker") or "",
+            "company_or_identifier": row.get("company_or_identifier") or "",
+            "signal_type": row.get("document_type") or "Other",
+            "signal_direction": "Unknown",
+            "confidence": "Low",
+            "priority": "Medium" if str(row.get("priority_level") or "") == "High" else "Low",
+            "evidence": (
+                f"Metadata match only: {row.get('document_type') or 'other'} in "
+                f"{row.get('category') or 'Root'}."
+            ),
+            "source_file": file_name,
+            "broker_or_source": row.get("source_or_broker") or "",
+            "category": row.get("category") or "",
+            "document_type": row.get("document_type") or "",
+            "why_it_matters": "Helps prioritize source-document review.",
+            "why_review": "Metadata-only item; review the source PDF for details.",
+            "relevance_score": int(row.get("relevance_score") or 0),
+            "broker_report_count": broker_counts.get(str(row.get("ticker") or ""), 0),
+        }
+        record["theme"] = _cutler_brief_theme(record)
+        record["actionability"] = _cutler_actionability(record, record["theme"], watchlist_set)
+        records.append(record)
+
+    records.sort(
+        key=lambda item: (
+            priority_rank.get(str(item.get("priority") or ""), 4),
+            -int(item.get("broker_report_count") or 0),
+            -int(item.get("relevance_score") or 0),
+            str(item.get("source_file") or ""),
+        )
+    )
+    thematic_sections = CUTLER_BRIEF_SECTIONS[1:9]
+    by_theme = {section: [] for section in thematic_sections}
+    seen_theme_sources = set()
+    for record in records:
+        theme = str(record.get("theme") or "Other Notable Research")
+        key = (theme, str(record.get("source_file") or ""))
+        if theme not in by_theme or key in seen_theme_sources or len(by_theme[theme]) >= max_per_section:
+            continue
+        by_theme[theme].append(record)
+        seen_theme_sources.add(key)
+
+    must_have_candidates = [
+        record for record in records
+        if str(record.get("priority") or "") in {"Critical", "High"}
+    ]
+    must_have = [
+        record for record in must_have_candidates
+        if str(record.get("source_file") or "") in review_sources
+    ]
+    must_have.extend(
+        record for record in must_have_candidates
+        if str(record.get("source_file") or "") not in review_sources
+    )
+    must_have = must_have[:max_must_have]
+    if not must_have:
+        must_have = records[:max_must_have]
+
+    def sourced_bullet(record: Dict[str, Any]) -> str:
+        file_name = str(record.get("source_file") or "source unavailable")
+        ticker = str(record.get("ticker") or record.get("company_or_identifier") or "Uncertain entity")
+        signal_type = str(record.get("signal_type") or "Other")
+        direction = str(record.get("signal_direction") or "Unknown")
+        priority = str(record.get("priority") or "Low")
+        evidence = re.sub(r"\s+", " ", str(record.get("evidence") or "")).strip()
+        if "metadata match only" in evidence.casefold():
+            detail = (
+                f"metadata-only: {record.get('document_type') or signal_type} is available in "
+                f"{record.get('category') or 'Root'}"
+            )
+        else:
+            excerpt = evidence[:320] + ("..." if len(evidence) > 320 else "")
+            detail = f"limited extracted snippet: \"{excerpt}\""
+        return (
+            f"- **{ticker} — {signal_type}** ({direction}; {priority}): {detail}. "
+            f"Why it matters: {record.get('why_it_matters') or 'Helps prioritize research review.'} "
+            f"Actionability: {record.get('actionability') or 'Monitor, no action'}. "
+            f"[Source: {file_name}]"
+        )
+
+    source_suffix = daily_source_title_suffix(source_name, relevance.get("relative_path", []))
+    lines = [
+        f"# Cutler-Style Daily Research Brief - {source_suffix}",
+        "",
+        f"Source archive: `{source_name}`",
+        (
+            "This packet is based on inventory metadata and limited extracted snippets. "
+            "It does not claim full-PDF review."
+        ),
+        "",
+        "## Executive Summary",
+    ]
+    if must_have:
+        for record in must_have[:5]:
+            lines.append(sourced_bullet(record))
+    else:
+        lines.append("No source-grounded research items were available for this packet.")
+
+    for section in thematic_sections:
+        lines.extend(["", f"## {section}"])
+        if by_theme[section]:
+            lines.extend(sourced_bullet(record) for record in by_theme[section])
+        else:
+            lines.append("No qualifying source-grounded items were identified for this section.")
+
+    lines.extend(["", "## Must-Have Items for Review"])
+    if must_have:
+        for record in must_have:
+            lines.append(
+                f"- **Topic:** {record.get('ticker') or record.get('company_or_identifier') or 'Uncertain entity'} — "
+                f"{record.get('signal_type') or 'Other'}. "
+                f"**Why it matters:** {record.get('why_it_matters') or 'Helps prioritize research review.'} "
+                f"**Suggested action:** {record.get('actionability') or 'Needs PM review'}. "
+                f"[Source: {record.get('source_file') or 'source unavailable'}]"
+            )
+    else:
+        lines.append("No must-have items were identified from the available evidence.")
+
+    lines.extend(["", "## Actionability / Suggested Follow-Up"])
+    if must_have:
+        for record in must_have[:5]:
+            lines.append(
+                f"- {record.get('actionability') or 'Monitor, no action'}: verify "
+                f"{record.get('ticker') or record.get('company_or_identifier') or 'the entity'} "
+                f"{str(record.get('signal_type') or 'research').casefold()} evidence in the source document. "
+                f"[Source: {record.get('source_file') or 'source unavailable'}]"
+            )
+    else:
+        lines.append("No source-specific follow-up was generated.")
+
+    used_sources = []
+    for section_records in by_theme.values():
+        used_sources.extend(str(record.get("source_file") or "") for record in section_records)
+    used_sources.extend(str(record.get("source_file") or "") for record in must_have)
+    used_sources = list(dict.fromkeys(source for source in used_sources if source))
+    lines.extend(["", "## Source References"])
+    if used_sources:
+        for source in used_sources:
+            metadata = source_meta.get(source, {})
+            status = "limited snippet/metadata"
+            if source in {
+                Path(str(item.get("relative_path") or "")).name
+                for item in verified_extracted_text_items(selected_text)
+            }:
+                status = "limited extracted snippet"
+            lines.append(f"- [Source: {source}] — {status}; {metadata.get('category') or 'category uncertain'}")
+    else:
+        lines.append("No source references were available.")
+
+    lines.extend(
+        [
+            "",
+            "## Caveats / Manual Verification",
+            (
+                "Financial conclusions, ratings, targets, estimates, and directional interpretations must be "
+                "verified directly in the cited source files."
+            ),
+            (
+                "Metadata-only observations establish file availability and classification only. "
+                "This packet does not provide an investment recommendation."
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def validate_cutler_brief_polish(
+    text: str,
+    *,
+    deterministic_brief: str,
+    allowed_sources: Iterable[str],
+    allowed_tickers: Iterable[str] = (),
+    allowed_brokers: Iterable[str] = (),
+) -> Tuple[bool, str]:
+    valid, reason = validate_openai_polish_grounding(
+        text,
+        context_text=deterministic_brief,
+        allowed_sources=allowed_sources,
+        allowed_tickers=allowed_tickers,
+        allowed_brokers=allowed_brokers,
+    )
+    if not valid:
+        return valid, reason
+    missing = [section for section in CUTLER_BRIEF_SECTIONS if f"## {section}" not in text]
+    if missing:
+        return False, "OpenAI polish removed required Cutler brief section(s): " + ", ".join(missing)
+    source_names = {
+        Path(str(source or "").replace("\\", "/")).name
+        for source in allowed_sources if str(source or "").strip()
+    }
+    section = ""
+    sourced_sections = set(CUTLER_BRIEF_SECTIONS[:11])
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            section = stripped[3:]
+            continue
+        if section in sourced_sections and stripped.startswith("- "):
+            if "[Source:" not in stripped or not any(source in stripped for source in source_names):
+                return False, f"OpenAI polish removed an exact source citation from section: {section}"
+    return True, ""
+
+
 def _normalized_extracted_text(item: Dict[str, Any]) -> str:
     return re.sub(r"\s+", " ", str(item.get("extracted_text") or "")).strip()
 

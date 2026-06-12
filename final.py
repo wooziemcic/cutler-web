@@ -5625,44 +5625,48 @@ def _generate_daily_research_brief_with_optional_llm(
     selected_text: List[Dict[str, Any]],
     *,
     source_name: str,
+    mode: str = "Fast",
+    use_openai_polish: bool = False,
+    watchlist: Optional[set[str]] = None,
 ) -> Tuple[str, str, str]:
-    fallback = daily_research_brief.build_deterministic_brief(
+    index_rows = daily_research_brief.build_research_index_rows(
         relevance_df,
         selected_text,
         source_name=source_name,
     )
+    signals = daily_research_brief.build_dashboard_signal_table(index_rows)
+    broker_coverage = daily_research_brief.build_broker_coverage_summary(relevance_df)
+    manual_review = daily_research_brief.build_dashboard_manual_review_queue(signals)
+    fallback = daily_research_brief.build_cutler_style_daily_brief(
+        relevance_df,
+        selected_text,
+        source_name=source_name,
+        signals=signals,
+        broker_coverage=broker_coverage,
+        manual_review=manual_review,
+        watchlist=watchlist or set(),
+        mode=mode,
+    )
+    grounded_fallback = daily_research_brief.add_generation_method(fallback, "grounded_deterministic")
+    if not use_openai_polish:
+        return grounded_fallback, "grounded_deterministic", ""
+
     api_key = os.getenv("OPENAI_API_KEY") or ""
     if not api_key:
-        return fallback, "deterministic_fallback", "missing_api_key"
+        return grounded_fallback, "grounded_deterministic", "missing_api_key"
 
-    verified_text = daily_research_brief.verified_extracted_text_items(selected_text)
-    if not verified_text:
-        return fallback, "deterministic_fallback", "insufficient_extracted_text"
-
-    evidence = daily_research_brief.build_llm_evidence_payload(relevance_df, selected_text)
     system_prompt = (
-        "You create a strictly source-grounded daily investment research brief. "
-        "Metadata can support only file existence, ticker occurrence, broker/source coverage counts, "
-        "detected document type, and folder/category location. A filename or document type never proves "
-        "a rating change, beat/miss, price target change, guidance change, EPS, revenue, underwriting "
-        "performance, credit deterioration/improvement, margins, capex, liquidity, valuation, weight "
-        "change, or operational strength/weakness. State such a financial claim only when a supplied "
-        "record has verified_text_available=true and its limited_text explicitly supports the exact claim. "
-        "Every financial claim must cite its source relative_path in backticks on the same bullet. "
-        "Every other factual observation must also cite one or more source relative_path values; "
-        "recommendation bullets are the only exception. "
-        "Never infer direction, magnitude, causality, or investment conclusions. "
-        "When evidence is insufficient, use the supplied insufficiency notice exactly."
+        "You are polishing a completed, source-grounded Cutler daily research packet. Rewrite only for clarity "
+        "and concise analyst-style readability. Do not add facts, claims, tickers, brokers, dates, sources, or "
+        "investment conclusions. Preserve every required heading and every `[Source: exact_filename]` citation. "
+        "Preserve metadata-only labels. Do not claim full-PDF review. Do not give buy/sell/hold recommendations. "
+        "If you cannot improve safely, return the original Markdown unchanged."
     )
     user_prompt = (
-        f"Title the memo `Daily Research Brief - "
-        f"{daily_research_brief.daily_source_title_suffix(source_name, relevance_df.get('relative_path', []))}`. "
-        "Create a Markdown memo with exactly these top-level sections: Metadata-Based Observations, "
-        "Extracted-Text Signals, Recommended Follow-Up, and Source References. "
-        "Keep broker coverage highlights and scoring rationales inside Metadata-Based Observations. "
-        "Use Potential Areas to Review instead of signals when extracted text is weak. "
-        "Cite a source filename/path for every extracted-text claim.\n\n"
-        f"Source archive: {source_name}\n\nEvidence JSON:\n{evidence}"
+        "Polish the following deterministic Cutler-style daily brief. Return only the complete Markdown packet. "
+        "Keep all 13 required sections, exact filenames, citations, actionability labels, and caveats unchanged "
+        "in meaning.\n\n"
+        f"{fallback}"
     )
     text, error = chat_completion_text(
         api_key=api_key,
@@ -5671,14 +5675,22 @@ def _generate_daily_research_brief_with_optional_llm(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0.1,
-        max_tokens=1800,
+        temperature=0.0,
+        max_tokens=4200 if str(mode).casefold().startswith("deeper") else 2600,
     )
     if error:
-        return fallback, "deterministic_fallback", error
-    if text and daily_research_brief.validate_llm_brief_grounding(text, selected_text):
-        return text, "openai_refined", ""
-    return fallback, "deterministic_fallback", "openai_response_failed_grounding"
+        return grounded_fallback, "grounded_deterministic", error
+    allowed_sources = list(relevance_df.get("file_name", [])) + list(relevance_df.get("relative_path", []))
+    valid, reason = daily_research_brief.validate_cutler_brief_polish(
+        text,
+        deterministic_brief=fallback,
+        allowed_sources=allowed_sources,
+        allowed_tickers=relevance_df.get("all_detected_tickers", []),
+        allowed_brokers=relevance_df.get("source_or_broker", []),
+    )
+    if valid:
+        return daily_research_brief.add_generation_method(text, "openai_polished"), "openai_polished", ""
+    return grounded_fallback, "grounded_deterministic", f"grounding_failed: {reason}"
 
 
 def _generate_broker_comparison_with_optional_llm(
@@ -6693,7 +6705,8 @@ def draw_daily_research_brief_section() -> None:
                     "daily_source_name", "daily_inventory_df", "daily_relevance_df",
                     "daily_selected_df", "daily_selected_text", "daily_processing_limits",
                     "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
-                    "daily_brief_warning", "daily_processing",
+                    "daily_brief_warning", "daily_brief_mode", "daily_brief_use_openai_polish",
+                    "daily_processing",
                 ],
                 prefixes=["daily_broker_comparison_", "daily_ticker_memo_", "daily_cross_day_"],
             )
@@ -7551,9 +7564,25 @@ def draw_daily_research_brief_section() -> None:
 
 
     with daily_brief_tab:
-        st.markdown("#### 6. Generate Daily Brief")
+        st.markdown("#### 6. Generate Cutler-Style Daily Brief")
+        st.caption(
+            "Creates a source-grounded daily research packet organized around Cutler themes: "
+            "REITs, community banks, convertibles/credit, financials, and actionability."
+        )
+        brief_mode = st.radio(
+            "Daily brief depth",
+            options=["Fast", "Deeper"],
+            horizontal=True,
+            key="daily_brief_mode",
+        )
+        use_openai_polish = st.checkbox(
+            "Use OpenAI polish",
+            value=False,
+            key="daily_brief_use_openai_polish",
+            help="OpenAI may polish readability only. The deterministic sourced packet remains the safety fallback.",
+        )
         generate_clicked = st.button(
-            "Generate Daily Brief",
+            "Generate Cutler-Style Daily Brief",
             key="daily_generate_btn",
             use_container_width=True,
             disabled=(not daily_ready) or daily_processing,
@@ -7564,6 +7593,9 @@ def draw_daily_research_brief_section() -> None:
                     relevance_df,
                     selected_text,
                     source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
+                    mode=brief_mode,
+                    use_openai_polish=use_openai_polish,
+                    watchlist=set(tickers.keys()) if isinstance(tickers, dict) else set(),
                 )
             st.session_state["daily_brief_text"] = brief
             st.session_state["daily_brief_method"] = method
@@ -7572,17 +7604,20 @@ def draw_daily_research_brief_section() -> None:
 
         brief_text = st.session_state.get("daily_brief_text") or ""
         if brief_text:
-            method = st.session_state.get("daily_brief_method") or "deterministic_fallback"
+            method = st.session_state.get("daily_brief_method") or "grounded_deterministic"
             st.caption(f"Generation method: {method}")
-            _show_openai_fallback_warning(st.session_state.get("daily_brief_warning") or "")
+            _show_openai_fallback_warning(
+                st.session_state.get("daily_brief_warning") or "",
+                compact=True,
+            )
             st.markdown(brief_text)
         else:
-            st.info("After processing, click Generate Daily Brief to create the memo.")
+            st.info("After processing, click Generate Cutler-Style Daily Brief to create the packet.")
 
         st.download_button(
-            "Download daily brief Markdown",
+            "Download Cutler-style daily brief Markdown",
             data=brief_text.encode("utf-8") if brief_text else b"",
-            file_name="daily_research_brief.md",
+            file_name="cutler_style_daily_research_brief.md",
             mime="text/markdown",
             key="daily_download_brief",
             disabled=not bool(brief_text),
