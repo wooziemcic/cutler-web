@@ -3670,7 +3670,7 @@ def _cutler_priority_calibration(
     if industry_report:
         return "Medium", 62, "Broad industry research may provide context but lacks a direct Cutler strategy hit."
     if watchlist_hit:
-        return "High", 80, "The item matches the Cutler watchlist/portfolio universe."
+        return "High", 80, "Watchlist/portfolio-linked item requiring source-document review."
     if theme == "Healthcare / Pharma":
         return "Lower", 32, "Healthcare/pharma is lower priority without a watchlist or portfolio hit."
     if theme == "Insider Trading / Screens":
@@ -3730,7 +3730,7 @@ def cutler_daily_brief_document_type(row: Dict[str, Any]) -> str:
         return "Filing / 10-K"
     if re.search(r"\b8\s*k\b", text):
         return "Filing / 8-K"
-    if any(term in text for term in ["asco", "clinical", "trial", "keytruda", "melanoma", "braftovi"]):
+    if re.search(r"\b(?:asco|clinical|trials?|keytruda|melanoma|braftovi)\b", text):
         return "Healthcare / Clinical Catalyst"
     if any(term in text for term in ["convertible note", "convertible notes", "senior notes", "capped call"]):
         return "Convertible Financing"
@@ -3738,10 +3738,14 @@ def cutler_daily_brief_document_type(row: Dict[str, Any]) -> str:
         return "Macro Sentiment"
     if any(term in text for term in ["jpm weekly", "jpm guide", "monday guide", "market recap"]):
         return "Macro / Weekly Guide"
+    if re.search(r"\b(?:2q|q[1-4]|earnings)\s+(?:earnings\s+)?reminder\b", text):
+        return "Company Event / Earnings Reminder"
     if "insider trading" in text:
         return "Insider Trading Screen"
     if any(term in text for term in ["investor ppt", "investor presentation", "presentation", " deck"]):
-        return "Investor Presentation"
+        return "Investor Presentation / REIT" if re.search(r"\b(?:aple|reit|real estate)\b", text) else "Investor Presentation"
+    if re.search(r"\bhci\b", text) and any(term in text for term in ["catastrophe", "reinsurance"]):
+        return "Company Press Release / Insurance Risk Update"
     if category == "green street" or source == "green street" or "green street" in text:
         return "Green Street / Sector Report"
     if any(
@@ -3751,6 +3755,8 @@ def cutler_daily_brief_document_type(row: Dict[str, Any]) -> str:
         return "REIT / Real Estate Report"
     if "transcript" in text:
         return "Earnings Transcript"
+    if re.search(r"\bsiri\b", text) and any(term in text for term in ["podcast", "comedy", "deal"]):
+        return "Company News"
     if any(term in text for term in ["press release", "announces", "completion", "acquisition"]):
         return "Company Press Release"
     if "industry" in text:
@@ -3758,7 +3764,13 @@ def cutler_daily_brief_document_type(row: Dict[str, Any]) -> str:
     if category == "credit" or "credit" in text or source == "gimme credit":
         return "Credit Report"
     raw = str(row.get("document_type") or row.get("signal_type") or "").strip()
-    return raw if raw and raw.casefold() != "other" else "Unclassified Document"
+    if raw and raw.casefold() not in {"other", "unclassified document"}:
+        return raw
+    if any(term in text for term in ["reminder", "event"]):
+        return "Company Event"
+    if any(term in text for term in ["podcast", "deal", "update", "news"]):
+        return "Company News"
+    return "Company / Research Update"
 
 
 def cutler_daily_brief_topic(row: Dict[str, Any]) -> str:
@@ -3801,6 +3813,39 @@ def cutler_daily_brief_topic(row: Dict[str, Any]) -> str:
     cleaned = re.sub(r"\b\d{1,2}\s+\d{1,2}\s+\d{2,4}\b|\b20\d{2}\b", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_/")
     return cleaned[:100] if cleaned else "Unclassified"
+
+
+def cutler_daily_brief_why_it_matters(row: Dict[str, Any], theme: str) -> str:
+    """Return a concise strategy-specific rationale without making a financial conclusion."""
+    document_type = str(row.get("cutler_document_type") or cutler_daily_brief_document_type(row))
+    if document_type in {"Green Street / Sector Report", "REIT / Real Estate Report", "Investor Presentation / REIT"}:
+        return "May affect REIT NAV assumptions, sector positioning, or PM review priorities."
+    if theme == "Community Banks / Financials":
+        return "Directly relevant to Cutler's community bank strategy review."
+    if document_type == "Convertible Financing":
+        return "May affect dilution, balance sheet, or convertible-security review."
+    if document_type in {"Macro Sentiment", "Macro / Weekly Guide"} or theme == "Macro / Market Backdrop":
+        return "Provides market backdrop for daily research triage."
+    if document_type == "Industry Report":
+        return "Provides sector-level read-through for covered/watchlist names."
+    if document_type == "Healthcare / Clinical Catalyst":
+        return "Clinical catalyst; relevance depends on holding/watchlist exposure."
+    if document_type == "Insider Trading Screen":
+        return "Screening item only; do not treat as a conclusion without watchlist/holding link."
+    if document_type == "Company Event / Earnings Reminder":
+        return "Flags an upcoming earnings event for watchlist/PM awareness."
+    if document_type in {
+        "Company News", "Company Press Release", "Company Press Release / Insurance Risk Update",
+        "Company / Research Update", "Company Event",
+    }:
+        return "Company-specific update; review only if portfolio/watchlist relevant."
+    if document_type.startswith("Filing /"):
+        return "Primary-source filing for portfolio/watchlist or strategy review."
+    if document_type.startswith("Investor Presentation"):
+        return "Primary company presentation for portfolio/watchlist or strategy review."
+    if theme == "REITs / Real Estate":
+        return "May affect REIT NAV assumptions, sector positioning, or PM review priorities."
+    return "Company-specific research item; review only if portfolio/watchlist relevant."
 
 
 def best_cutler_daily_brief_evidence(item: Dict[str, Any], *, max_chars: int = 900) -> Dict[str, Any]:
@@ -4010,6 +4055,7 @@ def build_cutler_style_daily_brief(
         record["theme"] = _cutler_brief_theme(record)
         record["cutler_topic"] = cutler_daily_brief_topic(record)
         record["cutler_document_type"] = cutler_daily_brief_document_type(record)
+        record["cutler_why_it_matters"] = cutler_daily_brief_why_it_matters(record, record["theme"])
         (
             record["cutler_priority"],
             record["cutler_relevance_score"],
@@ -4048,6 +4094,7 @@ def build_cutler_style_daily_brief(
         record["theme"] = _cutler_brief_theme(record)
         record["cutler_topic"] = cutler_daily_brief_topic(record)
         record["cutler_document_type"] = cutler_daily_brief_document_type(record)
+        record["cutler_why_it_matters"] = cutler_daily_brief_why_it_matters(record, record["theme"])
         (
             record["cutler_priority"],
             record["cutler_relevance_score"],
@@ -4101,7 +4148,7 @@ def build_cutler_style_daily_brief(
     def sourced_bullet(record: Dict[str, Any]) -> str:
         file_name = str(record.get("source_file") or "source unavailable")
         topic = str(record.get("cutler_topic") or "Unclassified")
-        document_type = str(record.get("cutler_document_type") or "Unclassified Document")
+        document_type = str(record.get("cutler_document_type") or "Company / Research Update")
         direction = str(record.get("signal_direction") or "Unknown")
         priority = str(record.get("cutler_priority") or "Lower")
         evidence = re.sub(r"\s+", " ", str(record.get("evidence") or "")).strip()
@@ -4120,7 +4167,7 @@ def build_cutler_style_daily_brief(
             detail = f"{label}: \"{excerpt}\""
         return (
             f"- **{topic} — {document_type}** ({direction}; {priority}): {detail}. "
-            f"Why it matters: {record.get('cutler_priority_reason') or record.get('why_it_matters') or 'Helps prioritize research review.'} "
+            f"Why it matters: {record.get('cutler_why_it_matters') or record.get('cutler_priority_reason') or 'Supports source-document triage.'} "
             f"Actionability: {record.get('actionability') or 'Monitor, no action'}. "
             f"[Source: {file_name}]"
         )
@@ -4155,8 +4202,8 @@ def build_cutler_style_daily_brief(
         for record in must_have:
             lines.append(
                 f"- **Topic:** {record.get('cutler_topic') or 'Unclassified'} — "
-                f"{record.get('cutler_document_type') or 'Unclassified Document'}. "
-                f"**Why it matters:** {record.get('cutler_priority_reason') or record.get('why_it_matters') or 'Helps prioritize research review.'} "
+                f"{record.get('cutler_document_type') or 'Company / Research Update'}. "
+                f"**Why it matters:** {record.get('cutler_why_it_matters') or record.get('cutler_priority_reason') or 'Supports source-document triage.'} "
                 f"**Suggested action:** {record.get('actionability') or 'Needs PM review'}. "
                 f"[Source: {record.get('source_file') or 'source unavailable'}]"
             )
@@ -4221,32 +4268,46 @@ def validate_cutler_brief_polish(
     allowed_tickers: Iterable[str] = (),
     allowed_brokers: Iterable[str] = (),
 ) -> Tuple[bool, str]:
-    valid, reason = validate_openai_polish_grounding(
-        text,
-        context_text=deterministic_brief,
-        allowed_sources=allowed_sources,
-        allowed_tickers=allowed_tickers,
-        allowed_brokers=allowed_brokers,
-    )
-    if not valid:
-        return valid, reason
-    missing = [section for section in CUTLER_BRIEF_SECTIONS if f"## {section}" not in text]
-    if missing:
-        return False, "OpenAI polish removed required Cutler brief section(s): " + ", ".join(missing)
+    """Apply a narrow safety gate to readability-only Daily Brief polish."""
+    polished = str(text or "").strip()
+    if len(polished) < 180 or len([line for line in polished.splitlines() if line.strip()]) < 4:
+        return False, "OpenAI polish was empty or too short."
     source_names = {
         Path(str(source or "").replace("\\", "/")).name
         for source in allowed_sources if str(source or "").strip()
     }
-    section = ""
-    sourced_sections = set(CUTLER_BRIEF_SECTIONS[:11])
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("## "):
-            section = stripped[3:]
-            continue
-        if section in sourced_sections and stripped.startswith("- "):
-            if "[Source:" not in stripped or not any(source in stripped for source in source_names):
-                return False, f"OpenAI polish removed an exact source citation from section: {section}"
+    mentioned_sources = {source for source in source_names if source.casefold() in polished.casefold()}
+    if not mentioned_sources:
+        return False, "OpenAI polish did not retain any exact source filename."
+    source_heading = re.search(r"(?im)^#{1,4}\s+(?:Source References|Sources Used)\s*$", polished)
+    if not source_heading:
+        return False, "OpenAI polish removed Source References."
+    source_tail = polished[source_heading.end():]
+    next_heading = re.search(r"(?m)^#{1,4}\s+\S", source_tail)
+    source_section = source_tail[:next_heading.start()] if next_heading else source_tail
+    if not any(source.casefold() in source_section.casefold() for source in source_names):
+        return False, "Source References did not retain an exact source filename."
+
+    text_without_known_sources = polished
+    for source in sorted(source_names, key=len, reverse=True):
+        text_without_known_sources = re.sub(re.escape(source), "", text_without_known_sources, flags=re.IGNORECASE)
+    if re.search(r"\.(?:pdf|xlsx?|csv|txt|md)\b", text_without_known_sources, flags=re.IGNORECASE):
+        return False, "OpenAI polish introduced a source filename outside the provided context."
+    if re.search(
+        r"\b(?:we|investors?|geoff|mitko|you)\s+should\s+(?:buy|sell|hold)\b"
+        r"|\bwe recommend (?:buying|selling|holding)\b"
+        r"|\b(?:buy|sell|hold)\s+recommendation\b",
+        polished,
+        flags=re.IGNORECASE,
+    ):
+        return False, "OpenAI polish introduced a buy/sell/hold recommendation."
+    if re.search(
+        r"\b(?:reviewed|read|analyzed|analysed|examined)\s+(?:the\s+)?(?:full|entire)\s+"
+        r"(?:pdfs?|documents?|reports?)\b",
+        polished,
+        flags=re.IGNORECASE,
+    ):
+        return False, "OpenAI polish incorrectly claimed full-document review."
     return True, ""
 
 

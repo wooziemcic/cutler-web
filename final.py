@@ -5656,16 +5656,15 @@ def _generate_daily_research_brief_with_optional_llm(
         return grounded_fallback, "grounded_deterministic", "missing_api_key"
 
     system_prompt = (
-        "You are polishing a completed, source-grounded Cutler daily research packet. Rewrite only for clarity "
-        "and concise analyst-style readability. Do not add facts, claims, tickers, brokers, dates, sources, or "
-        "investment conclusions. Preserve every required heading and every `[Source: exact_filename]` citation. "
-        "Preserve metadata-only labels. Do not claim full-PDF review. Do not give buy/sell/hold recommendations. "
-        "If you cannot improve safely, return the original Markdown unchanged."
+        "You are polishing a source-grounded Cutler daily research brief. Keep the same sections. Keep exact "
+        "source filenames. Do not add facts. Do not remove source references. Improve readability, reduce "
+        "repetition, and make language more analyst-style. Preserve metadata-only labels. Do not claim full-PDF "
+        "review. No buy/sell/hold advice."
     )
     user_prompt = (
-        "Polish the following deterministic Cutler-style daily brief. Return only the complete Markdown packet. "
-        "Keep all 13 required sections, exact filenames, citations, actionability labels, and caveats unchanged "
-        "in meaning.\n\n"
+        "Polish the following deterministic, source-grounded Cutler-style daily brief for readability. Return "
+        "only the complete Markdown packet. Keep exact source filenames and a Source References section. Do not "
+        "add facts or investment recommendations.\n\n"
         f"{fallback}"
     )
     text, error = chat_completion_text(
@@ -7648,10 +7647,14 @@ def draw_daily_research_brief_section() -> None:
                         use_container_width=True,
                         hide_index=True,
                     )
-            _show_openai_fallback_warning(
-                st.session_state.get("daily_brief_warning") or "",
-                compact=True,
-            )
+            brief_warning = st.session_state.get("daily_brief_warning") or ""
+            if brief_warning:
+                st.info(
+                    "Showing source-grounded deterministic brief. "
+                    "OpenAI polish was skipped to preserve source references."
+                )
+                with st.expander("OpenAI polish technical details"):
+                    st.code(brief_warning)
             st.markdown(brief_text)
         else:
             st.info("After processing, click Generate Cutler-Style Daily Brief to create the packet.")
