@@ -3874,7 +3874,7 @@ def cutler_daily_brief_why_it_matters(row: Dict[str, Any], theme: str) -> str:
 def best_cutler_daily_brief_evidence(item: Dict[str, Any], *, max_chars: int = 900) -> Dict[str, Any]:
     """Return a useful Cutler-theme passage from limited or deeper extracted text."""
     status = str(item.get("text_extraction_status") or "")
-    text = _normalized_extracted_text(item)
+    text = clean_cutler_daily_brief_text(_normalized_extracted_text(item))
     result = {"snippet": "", "evidence_type": "Other", "quality": "unavailable"}
     if status != "scanned" or not text:
         return result
@@ -3919,7 +3919,7 @@ def extract_cutler_daily_brief_facts(item: Dict[str, Any], *, max_facts: int = 4
     """Select concise, source-verbatim fact sentences from targeted extracted text."""
     if str(item.get("text_extraction_status") or "") != "scanned":
         return []
-    text = _normalized_extracted_text(item)
+    text = clean_cutler_daily_brief_text(_normalized_extracted_text(item))
     if not text:
         return []
     candidates = []
@@ -3953,6 +3953,33 @@ def extract_cutler_daily_brief_facts(item: Dict[str, Any], *, max_facts: int = 4
         if len(selected) >= max_facts:
             break
     return selected
+
+
+def clean_cutler_daily_brief_text(text: str) -> str:
+    """Remove common research-report boilerplate before selecting Daily Brief facts."""
+    cleaned = str(text or "").replace("\x00", " ")
+    cleaned = re.sub(r"\b(20)\s+(\d{2})\b", r"\1\2", cleaned)
+    cleaned = re.sub(r"\b(page)\s+\d+\s+(?:of\s+\d+)?\b", " ", cleaned, flags=re.IGNORECASE)
+    boilerplate_patterns = [
+        r"important disclosures?.*?(?=(?:[.!?]\s+|$))",
+        r"terms of use.*?(?=(?:[.!?]\s+|$))",
+        r"my\.greenstreet\.com\S*",
+        r"copyright\s+©?.*?(?=(?:[.!?]\s+|$))",
+        r"all rights reserved.*?(?=(?:[.!?]\s+|$))",
+        r"(?:phone|fax|tel|telephone)\s*[:.]?\s*[\d()+.\-\s]+",
+        r"\b\d{3,5}\s+[A-Za-z0-9 .'-]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr)\b[^.!?]*",
+        r"\b(?:rmz|djia|t-note)\b[^.!?]*",
+        r"\b[A-Za-z .'-]+,\s*(?:CFA|CPA|Managing Director|Analyst)\b[^.!?]*",
+    ]
+    for pattern in boilerplate_patterns:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    lines = []
+    for line in re.split(r"[\r\n]+", cleaned):
+        stripped = re.sub(r"\s+", " ", line).strip().strip(" .;,:")
+        if not stripped or re.fullmatch(r"\d{1,3}", stripped):
+            continue
+        lines.append(stripped)
+    return re.sub(r"\s+", " ", " ".join(lines)).strip()
 
 
 def _is_targeted_cutler_deep_file(row: Dict[str, Any]) -> bool:
@@ -4261,7 +4288,7 @@ def build_cutler_style_daily_brief(
         return f"[Sources: {'; '.join(unique)}]"
 
     def evidence_summary(record: Dict[str, Any]) -> str:
-        evidence = re.sub(r"\s+", " ", str(record.get("evidence") or "")).strip()
+        evidence = clean_cutler_daily_brief_text(str(record.get("evidence") or ""))
         document_type = str(record.get("cutler_document_type") or "Company / Research Update")
         if "metadata match only" in evidence.casefold() or not evidence:
             return f"Metadata-only: a {document_type} file is present and relevant for review."
@@ -4271,8 +4298,10 @@ def build_cutler_style_daily_brief(
             if str(fact).strip()
         ]
         if facts:
-            label = "Targeted deeper extraction" if str(record.get("extraction_depth") or "") == "deeper" else "Limited extraction"
-            return f"{label} identifies " + "; ".join(facts[:3]) + "."
+            fact_summary = "; ".join(facts[:2])
+            if len(fact_summary) > 420:
+                fact_summary = fact_summary[:417].rstrip() + "..."
+            return f"Extracted evidence highlights {fact_summary}."
         sentences = [
             sentence.strip()
             for sentence in re.split(r"(?<=[.!?])\s+", evidence)
@@ -4297,53 +4326,63 @@ def build_cutler_style_daily_brief(
             f"**{priority} priority.** Actionability: {action}. {source_citation([file_name])}"
         )
 
-    def executive_group_key(record: Dict[str, Any]) -> Tuple[str, str]:
-        theme = str(record.get("theme") or "")
-        topic = str(record.get("cutler_topic") or "Unclassified")
-        ticker = str(record.get("ticker") or "").upper()
-        if theme == "Community Banks / Financials":
-            return ("theme", "Community Banks")
-        if theme == "REITs / Real Estate":
-            return ("reit", topic.casefold())
-        if ticker and ticker not in {"UNCERTAIN", "UNCLASSIFIED", "UNKNOWN"}:
-            return ("ticker", ticker)
-        return ("topic", topic.casefold())
-
-    executive_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-    for record in must_have:
-        executive_groups.setdefault(executive_group_key(record), []).append(record)
-
-    def executive_bullet(group: List[Dict[str, Any]]) -> str:
-        ordered = sorted(
-            group,
-            key=lambda item: (
+    def best_by_source(items: Iterable[Dict[str, Any]], limit: int = 10) -> List[Dict[str, Any]]:
+        best = {}
+        for item in items:
+            source = str(item.get("source_file") or "")
+            if not source:
+                continue
+            current = best.get(source)
+            if current is None or (
                 evidence_rank(item),
                 cutler_priority_rank.get(str(item.get("cutler_priority") or ""), 4),
-                -int(item.get("cutler_relevance_score") or 0),
-            ),
-        )
-        lead = ordered[0]
+            ) < (
+                evidence_rank(current),
+                cutler_priority_rank.get(str(current.get("cutler_priority") or ""), 4),
+            ):
+                best[source] = item
+        return list(best.values())[:limit]
+
+    executive_specs = [
+        ("REIT / Green Street", lambda item: str(item.get("theme") or "") == "REITs / Real Estate"),
+        ("Community Banks", lambda item: str(item.get("theme") or "") == "Community Banks / Financials"),
+        (
+            "Convertibles / ODV",
+            lambda item: str(item.get("theme") or "") == "Convertibles / Credit"
+            and ("convert" in _cutler_metadata_text(item).casefold() or str(item.get("ticker") or "").upper() == "ODV"),
+        ),
+        ("Healthcare Catalysts", lambda item: str(item.get("theme") or "") == "Healthcare / Pharma"),
+        ("Macro / Insider Screen", lambda item: str(item.get("theme") or "") in {"Macro / Market Backdrop", "Insider Trading / Screens"}),
+    ]
+
+    def executive_theme_bullet(label: str, group: List[Dict[str, Any]]) -> str:
+        ordered = sorted(best_by_source(group), key=lambda item: (evidence_rank(item), -int(item.get("cutler_relevance_score") or 0)))
+        topics = list(dict.fromkeys(str(item.get("cutler_topic") or "Unclassified") for item in ordered))
         sources = [str(item.get("source_file") or "") for item in ordered]
-        if str(lead.get("theme") or "") == "Community Banks / Financials":
-            topic_docs = []
-            seen_topics = set()
-            for item in ordered:
-                topic = str(item.get("cutler_topic") or "Unclassified")
-                if topic in seen_topics:
-                    continue
-                topic_docs.append(f"{topic} has a {item.get('cutler_document_type') or 'research file'}")
-                seen_topics.add(topic)
-            coverage = "; ".join(topic_docs[:4])
-            evidence_note = ""
-            if evidence_rank(lead) < 2:
-                evidence_note = " " + evidence_summary(lead)
-            return (
-                f"- **Community Banks:** {coverage}. Directly relevant to Cutler's community bank strategy review."
-                f"{evidence_note} {source_citation(sources)}"
-            )
-        topic = str(lead.get("cutler_topic") or "Unclassified")
-        rationale = str(lead.get("cutler_why_it_matters") or "Supports source-document triage.")
-        return f"- **{topic}:** {evidence_summary(lead)} {rationale} {source_citation(sources)}"
+        lead = ordered[0]
+        summary = evidence_summary(lead)
+        if len(summary) > 210:
+            summary = summary[:207].rstrip() + "..."
+        return f"- **{label}:** {', '.join(topics[:5])}. {summary} {source_citation(sources[:6])}"
+
+    action_groups = [
+        ("REIT / Green Street", "Review NAV and sector implications.", lambda item: str(item.get("theme") or "") == "REITs / Real Estate"),
+        ("Banks", "Review BORT/FCCO and other community-bank source documents.", lambda item: str(item.get("theme") or "") == "Community Banks / Financials"),
+        ("Convertibles", "Verify ODV dilution, capped-call, and use-of-proceeds details.", lambda item: str(item.get("theme") or "") == "Convertibles / Credit"),
+        ("Healthcare", "Monitor only when linked to MRK/PFE/MRNA exposure.", lambda item: str(item.get("theme") or "") == "Healthcare / Pharma"),
+        ("Insider Screen", "Treat as a screen only unless linked to the watchlist or portfolio.", lambda item: str(item.get("theme") or "") == "Insider Trading / Screens"),
+    ]
+
+    def grouped_actionability_lines() -> List[str]:
+        grouped_lines = []
+        for label, action, matcher in action_groups:
+            matching = best_by_source([record for record in records if matcher(record)], 5)
+            if matching:
+                grouped_lines.append(
+                    f"- **{label}:** {action} "
+                    f"{source_citation([record.get('source_file') or '' for record in matching])}"
+                )
+        return grouped_lines
 
     source_suffix = daily_source_title_suffix(source_name, relevance.get("relative_path", []))
     lines = [
@@ -4357,16 +4396,20 @@ def build_cutler_style_daily_brief(
         "",
         "## Executive Summary",
     ]
-    if must_have:
-        for group in list(executive_groups.values())[:5]:
-            lines.append(executive_bullet(group))
+    executive_bullets = []
+    for label, matcher in executive_specs:
+        group = [record for record in records if matcher(record)]
+        if group:
+            executive_bullets.append(executive_theme_bullet(label, group))
+    if executive_bullets:
+        lines.extend(executive_bullets[:6])
     else:
         lines.append("No source-grounded research items were available for this packet.")
 
     for section in thematic_sections:
         lines.extend(["", f"## {section}"])
         if by_theme[section]:
-            lines.extend(section_bullet(record) for record in by_theme[section])
+            lines.extend(section_bullet(record) for record in best_by_source(by_theme[section], max_per_section))
         else:
             lines.append("No qualifying source-grounded items were identified for this section.")
 
@@ -4387,30 +4430,25 @@ def build_cutler_style_daily_brief(
     lines.extend(["", "## What the Report Should Definitely Catch"])
     included_catch_sources = set()
     for heading, matcher in definite_groups:
-        group_records = [
+        group_records = best_by_source([
             record for record in records
             if matcher(record) and str(record.get("source_file") or "") not in included_catch_sources
-        ][:4]
+        ], 4)
         if not group_records:
             continue
         lines.extend(["", f"### {heading}"])
         for record in group_records:
-            lines.append(section_bullet(record))
-            included_catch_sources.add(str(record.get("source_file") or ""))
-    lines.extend(["", "### Actionability"])
-    if must_have:
-        for record in must_have[:6]:
+            topic = str(record.get("cutler_topic") or "Unclassified")
+            document_type = str(record.get("cutler_document_type") or "Company / Research Update")
+            note = "metadata-only" if evidence_rank(record) == 2 else "extracted evidence available"
             lines.append(
-                f"- {record.get('actionability') or 'Monitor, no action'}: "
-                f"{record.get('cutler_topic') or 'Unclassified'} requires source-document verification. "
+                f"- {topic}: {document_type}; {note}. "
                 f"{source_citation([record.get('source_file') or 'source unavailable'])}"
             )
-    else:
-        lines.append("No source-grounded actionability items were identified.")
-
+            included_catch_sources.add(str(record.get("source_file") or ""))
     lines.extend(["", "## Must-Have Items for Review"])
     if must_have:
-        for record in must_have:
+        for record in best_by_source(must_have, max_must_have):
             lines.append(
                 f"- **{record.get('cutler_topic') or 'Unclassified'} — "
                 f"{record.get('cutler_document_type') or 'Company / Research Update'}:** "
@@ -4422,14 +4460,9 @@ def build_cutler_style_daily_brief(
         lines.append("No must-have items were identified from the available evidence.")
 
     lines.extend(["", "## Actionability / Suggested Follow-Up"])
-    if must_have:
-        for record in must_have[:5]:
-            lines.append(
-                f"- {record.get('actionability') or 'Monitor, no action'}: verify "
-                f"{record.get('cutler_topic') or 'the unclassified topic'} "
-                f"{str(record.get('cutler_document_type') or 'research').casefold()} evidence in the source document. "
-                f"[Source: {record.get('source_file') or 'source unavailable'}]"
-            )
+    action_lines = grouped_actionability_lines()
+    if action_lines:
+        lines.extend(action_lines)
     else:
         lines.append("No source-specific follow-up was generated.")
 
