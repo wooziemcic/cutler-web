@@ -5620,13 +5620,12 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 
 # ---------- Daily Research Brief ----------
 
-def _generate_daily_research_brief_with_optional_llm(
+def _generate_daily_research_brief(
     relevance_df,
     selected_text: List[Dict[str, Any]],
     *,
     source_name: str,
     mode: str = "Fast",
-    use_openai_polish: bool = False,
     watchlist: Optional[set[str]] = None,
 ) -> Tuple[str, str, str]:
     index_rows = daily_research_brief.build_research_index_rows(
@@ -5637,7 +5636,7 @@ def _generate_daily_research_brief_with_optional_llm(
     signals = daily_research_brief.build_dashboard_signal_table(index_rows)
     broker_coverage = daily_research_brief.build_broker_coverage_summary(relevance_df)
     manual_review = daily_research_brief.build_dashboard_manual_review_queue(signals)
-    fallback = daily_research_brief.build_cutler_style_daily_brief(
+    brief = daily_research_brief.build_cutler_style_daily_brief(
         relevance_df,
         selected_text,
         source_name=source_name,
@@ -5647,49 +5646,8 @@ def _generate_daily_research_brief_with_optional_llm(
         watchlist=watchlist or set(),
         mode=mode,
     )
-    grounded_fallback = daily_research_brief.add_generation_method(fallback, "grounded_deterministic")
-    if not use_openai_polish:
-        return grounded_fallback, "grounded_deterministic", ""
-
-    api_key = os.getenv("OPENAI_API_KEY") or ""
-    if not api_key:
-        return grounded_fallback, "grounded_deterministic", "missing_api_key"
-
-    system_prompt = (
-        "You are polishing a source-grounded Cutler daily research brief. Keep the same sections. Keep exact "
-        "source filenames. Do not add facts. Do not remove source references. Improve readability, reduce "
-        "repetition, and make language more analyst-style. Preserve metadata-only labels. Do not claim full-PDF "
-        "review. No buy/sell/hold advice."
-    )
-    user_prompt = (
-        "Polish the following deterministic, source-grounded Cutler-style daily brief for readability. Return "
-        "only the complete Markdown packet. Keep exact source filenames and a Source References section. Do not "
-        "add facts or investment recommendations.\n\n"
-        f"{fallback}"
-    )
-    text, error = chat_completion_text(
-        api_key=api_key,
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.0,
-        max_tokens=4200 if str(mode).casefold().startswith("deeper") else 2600,
-    )
-    if error:
-        return grounded_fallback, "grounded_deterministic", error
-    allowed_sources = list(relevance_df.get("file_name", [])) + list(relevance_df.get("relative_path", []))
-    valid, reason = daily_research_brief.validate_cutler_brief_polish(
-        text,
-        deterministic_brief=fallback,
-        allowed_sources=allowed_sources,
-        allowed_tickers=relevance_df.get("all_detected_tickers", []),
-        allowed_brokers=relevance_df.get("source_or_broker", []),
-    )
-    if valid:
-        return daily_research_brief.add_generation_method(text, "openai_polished"), "openai_polished", ""
-    return grounded_fallback, "grounded_deterministic", f"grounding_failed: {reason}"
+    method = "deterministic_source_grounded"
+    return daily_research_brief.add_generation_method(brief, method), method, ""
 
 
 def _generate_broker_comparison_with_optional_llm(
@@ -6704,7 +6662,7 @@ def draw_daily_research_brief_section() -> None:
                     "daily_source_name", "daily_inventory_df", "daily_relevance_df",
                     "daily_selected_df", "daily_selected_text", "daily_processing_limits",
                     "daily_extract_warnings", "daily_brief_text", "daily_brief_method",
-                    "daily_brief_warning", "daily_brief_mode", "daily_brief_use_openai_polish",
+                    "daily_brief_warning", "daily_brief_mode",
                     "daily_brief_deep_selected_df", "daily_brief_selected_text", "daily_processing",
                 ],
                 prefixes=["daily_broker_comparison_", "daily_ticker_memo_", "daily_cross_day_"],
@@ -7582,12 +7540,6 @@ def draw_daily_research_brief_section() -> None:
             horizontal=True,
             key="daily_brief_mode",
         )
-        use_openai_polish = st.checkbox(
-            "Use OpenAI polish",
-            value=False,
-            key="daily_brief_use_openai_polish",
-            help="OpenAI may polish readability only. The deterministic sourced packet remains the safety fallback.",
-        )
         generate_clicked = st.button(
             "Generate Cutler-Style Daily Brief",
             key="daily_generate_btn",
@@ -7613,12 +7565,11 @@ def draw_daily_research_brief_section() -> None:
                     max_pdf_pages=deep_limits["max_pdf_pages"],
                     max_chars_per_file=deep_limits["max_chars"],
                 )
-                brief, method, brief_warning = _generate_daily_research_brief_with_optional_llm(
+                brief, method, brief_warning = _generate_daily_research_brief(
                     relevance_df,
                     brief_selected_text,
                     source_name=st.session_state.get("daily_source_name") or "daily_research.zip",
                     mode=brief_mode,
-                    use_openai_polish=use_openai_polish,
                     watchlist=brief_watchlist,
                 )
             st.session_state["daily_brief_deep_selected_df"] = deep_selected_df
@@ -7630,7 +7581,7 @@ def draw_daily_research_brief_section() -> None:
 
         brief_text = st.session_state.get("daily_brief_text") or ""
         if brief_text:
-            method = st.session_state.get("daily_brief_method") or "grounded_deterministic"
+            method = st.session_state.get("daily_brief_method") or "deterministic_source_grounded"
             st.caption(f"Generation method: {method}")
             deep_selected_df = st.session_state.get("daily_brief_deep_selected_df")
             if isinstance(deep_selected_df, pd.DataFrame) and not deep_selected_df.empty:
@@ -7647,14 +7598,6 @@ def draw_daily_research_brief_section() -> None:
                         use_container_width=True,
                         hide_index=True,
                     )
-            brief_warning = st.session_state.get("daily_brief_warning") or ""
-            if brief_warning:
-                st.info(
-                    "Showing source-grounded deterministic brief. "
-                    "OpenAI polish was skipped to preserve source references."
-                )
-                with st.expander("OpenAI polish technical details"):
-                    st.code(brief_warning)
             st.markdown(brief_text)
         else:
             st.info("After processing, click Generate Cutler-Style Daily Brief to create the packet.")
