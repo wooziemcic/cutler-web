@@ -124,12 +124,17 @@ def _parse_sheet_csv(text: str) -> Dict[str, List[str]]:
     if not rows:
         raise ValueError("Google Sheet CSV export returned no rows.")
 
-    # Many internal Sheets are a plain one-column ticker tab with no header.
-    if rows and len(rows[0]) == 1 and _looks_like_ticker_cell(rows[0][0]):
+    # Headerless ticker tab: Column A ticker, optional Column B company name.
+    if rows and _looks_like_ticker_cell(rows[0][0]) and not _find_column(rows[0], {"ticker", "symbol", "ticker symbol", "stock ticker"}):
         out: Dict[str, List[str]] = {}
         for row in rows:
-            for ticker in _split_ticker_cell(row[0] if row else ""):
+            ticker_cell = row[0] if row else ""
+            company = row[1].strip() if len(row) > 1 else ""
+            for ticker in _split_ticker_cell(ticker_cell):
                 out.setdefault(ticker, [])
+                display_name = company or ticker
+                if display_name and display_name not in out[ticker]:
+                    out[ticker].append(display_name)
         return dict(sorted(out.items()))
 
     # Headered sheet path. Scan the first few rows because Sheets sometimes
@@ -152,8 +157,13 @@ def _parse_sheet_csv(text: str) -> Dict[str, List[str]]:
         if rows and sum(1 for row in rows if row and _looks_like_ticker_cell(row[0])) >= max(1, len(rows) // 2):
             out: Dict[str, List[str]] = {}
             for row in rows:
-                for ticker in _split_ticker_cell(row[0] if row else ""):
+                ticker_cell = row[0] if row else ""
+                company = row[1].strip() if len(row) > 1 else ""
+                for ticker in _split_ticker_cell(ticker_cell):
                     out.setdefault(ticker, [])
+                    display_name = company or ticker
+                    if display_name and display_name not in out[ticker]:
+                        out[ticker].append(display_name)
             return dict(sorted(out.items()))
         raise ValueError("No ticker-like column found in Google Sheet Tickers tab.")
 
@@ -164,8 +174,9 @@ def _parse_sheet_csv(text: str) -> Dict[str, List[str]]:
         company = row[company_col_idx].strip() if company_col_idx is not None and company_col_idx < len(row) else ""
         for ticker in _split_ticker_cell(ticker_value):
             out.setdefault(ticker, [])
-            if company and company not in out[ticker]:
-                out[ticker].append(company)
+            display_name = company or ticker
+            if display_name and display_name not in out[ticker]:
+                out[ticker].append(display_name)
     return dict(sorted(out.items()))
 
 

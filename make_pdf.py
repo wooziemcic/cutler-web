@@ -156,9 +156,24 @@ def _safe_filename(name: str) -> str:
 
 def _load_ticker_display_names(here: Path) -> Dict[str, str]:
     """
-    Import tickers.py and return {ticker: preferred_display_name}.
+    Return {ticker: preferred_display_name}, preferring the live Google Sheet
+    ticker helper and falling back to local tickers.py.
     """
     mapping: Dict[str, str] = {}
+    try:
+        from live_tickers import get_ticker_universe  # type: ignore
+
+        live = get_ticker_universe()
+        if isinstance(live, dict) and live:
+            for tkr, names in live.items():
+                mapping[str(tkr).strip().upper()] = (
+                    str(names[0]).strip() if isinstance(names, list) and names and str(names[0]).strip() else str(tkr).strip().upper()
+                )
+            if mapping:
+                return mapping
+    except Exception:
+        pass
+
     tp = here / "tickers.py"
     if not tp.exists():
         return mapping
@@ -334,6 +349,117 @@ def _format_article_header_html(raw_txt: str) -> str:
         )
         return f"<b>{first}</b><br/>{rest_html}"
     return f"<b>{first}</b>"
+
+
+def _is_structured_article_header(raw_txt: str) -> bool:
+    lines = [ln.strip() for ln in clean_display_text(raw_txt).splitlines() if ln.strip()]
+    return bool(lines) and any(
+        ln.lower().startswith(("title:", "author:", "publication:", "date:", "source:", "credibility:", "relevance:"))
+        for ln in lines
+    )
+
+
+def _render_structured_article_header(story: List[Any], raw_txt: str) -> None:
+    lines = [ln.strip() for ln in clean_display_text(raw_txt).splitlines() if ln.strip()]
+    if not lines:
+        return
+    title_style = ParagraphStyle(
+        "ArticleMetaTitle",
+        parent=ArticleHeader,
+        fontSize=9.5,
+        leading=14,
+        textColor=colors.HexColor("#111827"),
+        spaceBefore=6,
+        spaceAfter=2,
+        keepWithNext=1,
+    )
+    meta_style = ParagraphStyle(
+        "ArticleMetaLine",
+        parent=MetaX,
+        fontSize=8,
+        leading=12,
+        spaceAfter=2,
+        splitLongWords=1,
+        wordWrap="CJK",
+    )
+    rows: List[List[Any]] = []
+    for ln in lines:
+        safe = escape(ln)
+        if ln.lower().startswith("title:"):
+            rows.append([Paragraph(f"<b>{safe}</b>", title_style)])
+        else:
+            rows.append([Paragraph(safe, meta_style)])
+    if rows:
+        table = Table(
+            rows,
+            colWidths=[None],
+            style=TableStyle(
+                [
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            ),
+        )
+        story.append(table)
+    story.append(Spacer(1, 8))
+
+
+def _is_structured_body_block(text: str) -> bool:
+    first = (clean_display_text(text).splitlines() or [""])[0].strip().lower()
+    return first in {"brief summary:", "evidence excerpts:", "risk / counterpoint:"}
+
+
+def _render_structured_body_block(story: List[Any], text: str, body_style: ParagraphStyle) -> None:
+    lines = [ln.rstrip() for ln in clean_display_text(text).splitlines()]
+    if not lines:
+        return
+    label = lines[0].strip()
+    label_style = ParagraphStyle(
+        f"StructuredLabel_{re.sub(r'[^A-Za-z0-9]+', '_', label)}",
+        parent=ArticleHeader,
+        fontSize=9.3,
+        leading=11,
+        textColor=colors.HexColor("#4b2142"),
+        spaceBefore=7,
+        spaceAfter=3,
+        keepWithNext=1,
+    )
+    rows: List[List[Any]] = [[Paragraph(escape(label), label_style)]]
+    current: List[str] = []
+    for raw in lines[1:]:
+        ln = raw.strip()
+        if not ln:
+            if current:
+                rows.append([Paragraph(escape(" ".join(current)), body_style)])
+                current = []
+            continue
+        if re.match(r"^(?:[-•]|\d+\.)\s+", ln):
+            if current:
+                rows.append([Paragraph(escape(" ".join(current)), body_style)])
+                current = []
+            rows.append([Paragraph(escape(ln), body_style)])
+        else:
+            current.append(ln)
+    if current:
+        rows.append([Paragraph(escape(" ".join(current)), body_style)])
+    table = Table(
+        rows,
+        colWidths=[None],
+        style=TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        ),
+    )
+    story.append(table)
+    story.append(Spacer(1, 4))
 
 
 @dataclass
@@ -670,13 +796,21 @@ def _render_group_block_table(
         if it.get("is_header"):
             # For table mode, we keep header rendering as-is (not the primary SA output mode).
             story.append(Spacer(1, 6))
-            story.append(Paragraph(_format_article_header_html(txt), ArticleHeaderBox))
+            if _is_structured_article_header(txt):
+                _render_structured_article_header(story, txt)
+            else:
+                story.append(Paragraph(_format_article_header_html(txt), ArticleHeaderBox))
             story.append(Spacer(1, 4))
             continue
 
         ipages = it.get("pages") or []
         if ipages and set(ipages) != set(group.pages):
             rows.append(["", Paragraph(f"Page/s: {', '.join(map(str, ipages))}", PagesLegacy)])
+        if _is_structured_body_block(txt):
+            for line in txt.splitlines():
+                if line.strip():
+                    rows.append(["", Paragraph(escape(line.strip()), BodyLegacy)])
+            continue
         for chunk in _chunk_text(txt, max_words=140):
             rows.append(["", Paragraph(chunk, BodyLegacy)])
 
@@ -830,8 +964,15 @@ def _render_group_block_compact(
                 _emit_ticker_header()
             first_article_seen = True
             story.append(Spacer(1, 6))
-            story.append(Paragraph(_format_article_header_html(txt), ArticleHeaderBox))
+            if _is_structured_article_header(txt):
+                _render_structured_article_header(story, txt)
+            else:
+                story.append(Paragraph(_format_article_header_html(txt), ArticleHeaderBox))
             story.append(Spacer(1, 4))
+            continue
+
+        if _is_structured_body_block(txt):
+            _render_structured_body_block(story, txt, sa_style if has_article_headers else body_style)
             continue
 
         for chunk in _chunk_text(txt, max_words=140):

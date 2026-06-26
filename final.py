@@ -784,9 +784,9 @@ def _substack_report_items_for_post(post: dict, ticker: str, idx: int = 1) -> li
         return []
 
     relevance = _substack_relevance_label(candidate_text or title, ticker)
-    header_lines = [title or f"Post {idx}"]
+    header_lines = [f"Title: {title or f'Post {idx}'}"]
     if author:
-        header_lines[0] = f"{header_lines[0]} — {author}"
+        header_lines.append(f"Author/Publication: {author}")
     if published:
         header_lines.append(f"Date: {published[:19]}")
     if url:
@@ -795,10 +795,10 @@ def _substack_report_items_for_post(post: dict, ticker: str, idx: int = 1) -> li
 
     items = [{"text": "\n".join(header_lines), "pages": [], "is_header": True}]
     bullets = _summary_bullets_from_evidence(title, candidate_text, ticker=ticker, max_items=4)
-    items.append({"text": "Brief summary:\n" + "\n".join(f"- {b}" for b in bullets[:4]), "pages": []})
+    items.append({"text": "Brief Summary:\n" + "\n".join(f"- {b}" for b in bullets[:4]), "pages": []})
     evidence = _best_evidence_paragraphs(candidate_text, ticker=ticker, max_items=2, max_words=180)
     if evidence:
-        items.append({"text": "Evidence excerpts:\n" + "\n\n".join(f"{i}. {p}" for i, p in enumerate(evidence, 1)), "pages": []})
+        items.append({"text": "Evidence Excerpts:\n" + "\n\n".join(f"{i}. {p}" for i, p in enumerate(evidence, 1)), "pages": []})
     return items
 
 def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: int, model: str) -> Path:
