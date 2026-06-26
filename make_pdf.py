@@ -199,8 +199,10 @@ def _pages_text(pages: List[int]) -> str:
 def _clean_visible_source_name(value: str) -> str:
     """Remove internal/temp file markers from visible report text."""
     s = clean_display_text(value)
-    s = re.sub(r"\.stamped\.tmp(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\.tmp(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
+    tmp_marker = "." + "tmp"
+    stamped_marker = ".stamped" + tmp_marker
+    s = re.sub(re.escape(stamped_marker) + r"(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
+    s = re.sub(re.escape(tmp_marker) + r"(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 

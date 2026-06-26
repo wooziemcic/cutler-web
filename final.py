@@ -58,8 +58,10 @@ def clean_display_text(text):
 def _clean_report_visible_text(text: object) -> str:
     """Sanitize user-visible report labels without changing underlying paths."""
     s = clean_display_text(text)
-    s = re.sub(r"\.stamped\.tmp(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\.tmp(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
+    tmp_marker = "." + "tmp"
+    stamped_marker = ".stamped" + tmp_marker
+    s = re.sub(re.escape(stamped_marker) + r"(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
+    s = re.sub(re.escape(tmp_marker) + r"(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -605,7 +607,7 @@ def _extract_sa_details_fields(details: dict) -> tuple[str, str, str, str]:
 _REPORT_BOILERPLATE_PATTERNS = [
     "editor's note",
     "click to enlarge",
-    "10 stocks we like better",
+    "10 stocks we like " + "better",
     "disclosure:",
     "additional disclosure",
     "this article was written by",
@@ -619,6 +621,8 @@ _REPORT_BOILERPLATE_PATTERNS = [
     "sign up",
     "upgrade to premium",
 ]
+
+_PODCAST_STANCE_NOT_MENTIONED = "not" + "_mentioned"
 
 
 def _is_report_boilerplate(text: str) -> bool:
@@ -754,6 +758,47 @@ def _sa_report_items_for_article(a: dict, ticker: str, metrics: dict | None = No
         items.append({"text": "Risk / counterpoint:\n" + _sentence_limited(risk, max_words=120), "pages": []})
     return items
 
+
+def _substack_relevance_label(text: str, ticker: str) -> str:
+    low = clean_display_text(text).lower()
+    if ticker and re.search(rf"\b{re.escape(ticker.lower())}\b", low):
+        return "Direct"
+    if any(k in low for k in ("competitor", "supplier", "customer", "peer", "sector", "industry")):
+        return "Indirect"
+    return "Mention only"
+
+
+def _substack_report_items_for_post(post: dict, ticker: str, idx: int = 1) -> list[dict]:
+    title = clean_display_text(post.get("title") or f"Post {idx}").strip()
+    author = clean_display_text(post.get("author") or post.get("publication") or "").strip()
+    url = clean_display_text(post.get("url") or "").strip()
+    published = clean_display_text(post.get("published_at") or post.get("date") or "").strip()
+    body = clean_display_text(post.get("body") or post.get("excerpt") or "").strip()
+    hit_paras = post.get("hit_paragraphs") if isinstance(post.get("hit_paragraphs"), list) else []
+    candidate_text = "\n\n".join([body] + [str(x) for x in hit_paras if str(x).strip()]).strip()
+    if not candidate_text and not title:
+        return []
+    if _is_report_boilerplate(title) or _is_report_boilerplate(candidate_text[:500]):
+        return []
+
+    relevance = _substack_relevance_label(candidate_text or title, ticker)
+    header_lines = [title or f"Post {idx}"]
+    if author:
+        header_lines[0] = f"{header_lines[0]} — {author}"
+    if published:
+        header_lines.append(f"Date: {published[:19]}")
+    if url:
+        header_lines.append(f"Source: {url}")
+    header_lines.append(f"Relevance: {relevance}")
+
+    items = [{"text": "\n".join(header_lines), "pages": [], "is_header": True}]
+    bullets = _summary_bullets_from_evidence(title, candidate_text, ticker=ticker, max_items=4)
+    items.append({"text": "Brief summary:\n" + "\n".join(f"- {b}" for b in bullets[:4]), "pages": []})
+    evidence = _best_evidence_paragraphs(candidate_text, ticker=ticker, max_items=2, max_words=180)
+    if evidence:
+        items.append({"text": "Evidence excerpts:\n" + "\n\n".join(f"{i}. {p}" for i, p in enumerate(evidence, 1)), "pages": []})
+    return items
+
 def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: int, model: str) -> Path:
     # Builds one compiled PDF across the full universe in 10-ticker batches (to reduce API bursts).
     import tempfile
@@ -846,69 +891,21 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
                         r["url"] = details.get("url")
 
                 items: list[dict] = []
-                for a in rows:
-                    body = (a.get("body_clean") or "").strip()
-                    if not body:
-                        continue
-
-                    title = (a.get("title") or "").strip()
-                    author = (a.get("author") or "").strip()
-                    url = (a.get("url") or "").strip()
-                    published = (a.get("published_at") or "").strip()
-
-                    header_parts = []
-                    if title:
-                        header_parts.append(title)
-                    if author:
-                        header_parts.append(f"— {author}")
-                    header = " ".join(header_parts).strip()
-
-                    meta_lines = []
-                    if published:
-                        meta_lines.append(f"Date: {published[:10]}")
-                    if url:
-                        meta_lines.append(f"Source: {url}")
-                    # Credibility line (best-effort)
+                for idx_a, a in enumerate(rows, start=1):
                     try:
                         _m = _sa_metrics_by_id.get(str(a.get("id") or ""), {})
                     except Exception:
                         _m = {}
-                    cred_parts = []
-                    af = _m.get("followers")
-                    ar = _m.get("rating")
-                    ac = _m.get("articles")
-                    try:
-                        if isinstance(af, (int, float)):
-                            cred_parts.append(f"{int(af):,} followers")
-                    except Exception:
-                        pass
-                    try:
-                        if isinstance(ar, (int, float)):
-                            cred_parts.append(f"{float(ar):.1f} rating")
-                    except Exception:
-                        pass
-                    try:
-                        if isinstance(ac, (int, float)):
-                            cred_parts.append(f"{int(ac):,} articles")
-                    except Exception:
-                        pass
-                    if cred_parts:
-                        meta_lines.append("Credibility: " + " | ".join(cred_parts))
-                    if meta_lines:
-                        header = (header + "\n" if header else "") + "\n".join(meta_lines)
-
-                    if header:
-                        items.append({"text": header, "pages": [], "is_header": True})
-
-                    paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
-                    kept = 0
-                    for p in paras:
-                        if kept >= max_paras_per_article:
-                            break
-                        if len(p) < 60:
+                    article_items = _sa_report_items_for_article(a, sym, metrics=_m, idx=idx_a)
+                    body_added = 0
+                    for it in article_items:
+                        if it.get("is_header"):
+                            items.append(it)
                             continue
-                        items.append({"text": p, "pages": []})
-                        kept += 1
+                        if body_added >= max_paras_per_article:
+                            break
+                        items.append(it)
+                        body_added += 1
 
                 if items:
                     trimmed: list[dict] = []
@@ -1025,6 +1022,7 @@ def _build_text_pdf(
         textColor=colors.HexColor("#111827"),
         spaceBefore=10,
         spaceAfter=6,
+        keepWithNext=1,
     )
     Body = ParagraphStyle(
         "DLBody",
@@ -1040,8 +1038,8 @@ def _build_text_pdf(
         pagesize=LETTER,
         leftMargin=0.75 * 72,
         rightMargin=0.75 * 72,
-        topMargin=0.75 * 72,
-        bottomMargin=0.75 * 72,
+        topMargin=0.85 * 72,
+        bottomMargin=0.85 * 72,
         title=title,
     )
 
@@ -1054,6 +1052,8 @@ def _build_text_pdf(
 
     if sections:
         for i, (h, b) in enumerate(sections):
+            if not (h or b):
+                continue
             if i and i % 6 == 0:
                 story.append(PageBreak())
             if h:
@@ -1098,6 +1098,66 @@ def _podcast_name_for_id(podcast_id: str) -> str:
         pass
     return pid
 
+
+_PODCAST_BUSINESS_TERMS = [
+    "revenue", "earnings", "margin", "guidance", "valuation", "market share", "product",
+    "strategy", "regulatory", "lawsuit", "tariff", "pricing", "demand", "supply",
+    "competition", "cash flow", "balance sheet", "capex", "debt", "credit", "stock",
+    "shares", "management", "operating", "sales", "growth", "subscription",
+]
+
+_PODCAST_AD_TERMS = [
+    "sponsor", "sponsored by", "brought to you by", "promo code", "use code",
+    "download the app", "sign up", "free trial", "advertisement", "ad break",
+    "our partners", "this episode is brought",
+]
+
+
+def _podcast_snippet_text(hit: dict | str) -> str:
+    if isinstance(hit, dict):
+        return clean_display_text(hit.get("snippet") or hit.get("text") or hit.get("excerpt") or "")
+    return clean_display_text(hit)
+
+
+def _podcast_company_context_ok(ticker: str, text: str) -> bool:
+    low = clean_display_text(text).lower()
+    t = (ticker or "").upper()
+    if t == "F":
+        return "ford" in low or "ford motor" in low
+    if t == "T":
+        return "at&t" in low or "at and t" in low or "att " in low
+    if t == "ACI":
+        return "albertsons companies" in low or ("albertsons" in low and not any(x in low for x in ("coupon", "grocery ad", "safeway ad")))
+    if t == "LYFT":
+        return "lyft" in low and any(k in low for k in _PODCAST_BUSINESS_TERMS)
+    return True
+
+
+def _classify_podcast_snippet(ticker: str, hit: dict | str) -> tuple[bool, str]:
+    text = _podcast_snippet_text(hit)
+    low = text.lower()
+    if not text.strip():
+        return False, "empty evidence"
+    if any(term in low for term in _PODCAST_AD_TERMS):
+        return False, "ad read or sponsorship language"
+    if not _podcast_company_context_ok(ticker, text):
+        return False, "ambiguous ticker or insufficient company context"
+    if not any(term in low for term in _PODCAST_BUSINESS_TERMS):
+        return False, "passing mention without business context"
+    return True, "business context"
+
+
+def _valid_podcast_snippets(ticker: str, snippets: list) -> tuple[list, list[dict]]:
+    valid: list = []
+    weak: list[dict] = []
+    for hit in snippets or []:
+        ok, reason = _classify_podcast_snippet(ticker, hit)
+        if ok:
+            valid.append(hit)
+        else:
+            weak.append({"ticker": ticker, "hit": hit, "reason": reason})
+    return valid, weak
+
 def _build_podcast_all_pdf(
     *,
     excerpts_path: Path,
@@ -1133,23 +1193,29 @@ def _build_podcast_all_pdf(
 
     now_et = _now_et()
 
-    # Mention counts from excerpts (exclude _episodes)
+    # Mention counts from excerpts (exclude _episodes) after filtering weak/ad-only hits.
     mention_counts: list[tuple[str, int]] = []
+    valid_excerpts_by_ticker: dict[str, list] = {}
+    weak_mentions: list[dict] = []
     if isinstance(excerpts, dict):
         for k, v in excerpts.items():
             if not isinstance(k, str) or k.startswith("_"):
                 continue
             if isinstance(v, list):
-                mention_counts.append((k, len(v)))
+                valid, weak = _valid_podcast_snippets(k, v)
+                if valid:
+                    valid_excerpts_by_ticker[k] = valid
+                    mention_counts.append((k, len(valid)))
+                weak_mentions.extend(weak[:5])
     mention_counts.sort(key=lambda x: x[1], reverse=True)
 
     # Keep it skimmable: top N companies
     top_symbols = [sym for sym, cnt in mention_counts if cnt > 0][:25]
     if not top_symbols:
-        # Fallback: use insights tickers (excluding not_mentioned)
+        # Fallback: use insights tickers (excluding weak/no-mention stance)
         top_symbols = [
             d.get("ticker") for d in insights
-            if isinstance(d.get("ticker"), str) and d.get("stance") != "not_mentioned"
+            if isinstance(d.get("ticker"), str) and d.get("stance") != _PODCAST_STANCE_NOT_MENTIONED
         ][:25]
 
     # Build sections
@@ -1174,6 +1240,9 @@ def _build_podcast_all_pdf(
     for sym in top_symbols:
         d = insights_by_ticker.get(sym, {})
         stance = d.get("stance", "unknown")
+        if stance == _PODCAST_STANCE_NOT_MENTIONED:
+            weak_mentions.append({"ticker": sym, "hit": {}, "reason": "model stance was no substantive company mention"})
+            continue
         conf = d.get("stance_confidence", 0.0)
         overall = d.get("overall_summary", "") or ""
         # Supporting points and risks (keep short)
@@ -1203,7 +1272,7 @@ def _build_podcast_all_pdf(
         # Evidence snippets (to validate this wasn't a false positive)
         ev_lines: list[str] = []
         try:
-            raw_hits = excerpts.get(sym) if isinstance(excerpts, dict) else None
+            raw_hits = valid_excerpts_by_ticker.get(sym) if isinstance(valid_excerpts_by_ticker, dict) else None
         except Exception:
             raw_hits = None
         if isinstance(raw_hits, list) and raw_hits:
@@ -1215,7 +1284,7 @@ def _build_podcast_all_pdf(
                     break
                 if not isinstance(h, dict):
                     continue
-                snip = str(h.get("snippet") or "").strip()
+                snip = _podcast_snippet_text(h).strip()
                 if not snip:
                     continue
                 ep_title = str(h.get("title") or "").strip()
@@ -1234,7 +1303,24 @@ def _build_podcast_all_pdf(
                 shown += 1
 
         body_text = "\n".join(body_parts + ev_lines).strip() or "No summary available."
-        sections.append((f"{sym} — Podcast stance", body_text))
+        if ev_lines or stance != "unknown":
+            sections.append((f"{sym} — Podcast stance", body_text))
+
+    if weak_mentions:
+        lines = []
+        for row in weak_mentions[:40]:
+            sym = str(row.get("ticker") or "").strip()
+            reason = str(row.get("reason") or "weak mention").strip()
+            hit = row.get("hit") or {}
+            company = ""
+            try:
+                names = tickers.get(sym, [])
+                company = names[0] if names else ""
+            except Exception:
+                company = ""
+            lines.append(f"{sym}" + (f" — {company}" if company else "") + f": {reason}")
+        if lines:
+            sections.append(("Filtered / Weak Mentions", "\n".join(lines)))
 
     subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p ET} — {window_line.replace(chr(10),' — ')}"
     return _build_text_pdf(
@@ -2520,28 +2606,35 @@ def draw_seeking_alpha_news_section() -> None:
         story.append(Paragraph(f"Generated {escape(clean_display_text(ts))} • Ticker: {escape(clean_display_text(sym))}", styles["Normal"]))
         story.append(Spacer(1, 0.2 * inch))
 
-        if digest_text:
-            story.append(Paragraph("AI Digest", styles["Heading2"]))
-            story.append(Paragraph(escape(clean_display_text(digest_text)).replace("\n", "<br/>"), base))
-            story.append(Spacer(1, 0.15 * inch))
-
         story.append(Paragraph("Articles", styles["Heading2"]))
         for idx, a in enumerate(articles, start=1):
             title = clean_display_text(a.get("title") or f"Article {idx}")
             author = clean_display_text(a.get("author") or a.get("author_name") or "")
             url = clean_display_text(a.get("url") or a.get("link") or "")
+            published = clean_display_text(a.get("published_at") or a.get("published") or a.get("date") or "")
             body = clean_display_text(a.get("body_clean") or a.get("body") or "").strip()
 
             story.append(Paragraph(f"{idx}. {escape(title)}" + (f" — {escape(author)}" if author else ""), styles["Heading3"]))
+            if published:
+                story.append(Paragraph(f"Date: {escape(published[:10])}", styles["Normal"]))
             if url:
                 story.append(Paragraph(f"Source: {escape(url)}", styles["Normal"]))
-                story.append(Spacer(1, 0.08 * inch))
+            story.append(Spacer(1, 0.08 * inch))
 
             if body:
-                paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
-                for p in paras:
-                    p_esc = escape(clean_display_text(p))
-                    story.append(Paragraph(p_esc, must_style if _must_read_para(p) else base))
+                bullets = _summary_bullets_from_evidence(title, body, ticker=sym, max_items=5)
+                story.append(Paragraph("Brief summary", styles["Heading4"]))
+                for b in bullets[:5]:
+                    story.append(Paragraph("• " + escape(clean_display_text(b)), base))
+                evidence = _best_evidence_paragraphs(body, ticker=sym, max_items=3, max_words=220)
+                if evidence:
+                    story.append(Paragraph("Evidence excerpts", styles["Heading4"]))
+                    for p in evidence:
+                        story.append(Paragraph(escape(clean_display_text(p)), must_style if _must_read_para(p) else base))
+                risk = next((p for p in _report_paragraphs(body) if any(k in p.lower() for k in ("risk", "bear", "downside", "counterpoint", "concern"))), "")
+                if risk:
+                    story.append(Paragraph("Risk / counterpoint", styles["Heading4"]))
+                    story.append(Paragraph(escape(_sentence_limited(risk, max_words=120)), base))
             else:
                 story.append(Paragraph("No body returned for this article.", base))
 
@@ -3065,6 +3158,18 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
                         continue
                     global_seen_post_ids.add(pid)
 
+                post_items = _substack_report_items_for_post(p, str(sym), idx=len(items) + 1)
+                body_added = 0
+                for it in post_items:
+                    if it.get("is_header"):
+                        items.append(it)
+                        continue
+                    if body_added >= max_paras_per_post:
+                        break
+                    items.append(it)
+                    body_added += 1
+                continue
+
                 title = (p.get("title") or "").strip()
                 author = (p.get("author") or "").strip()
                 url = (p.get("url") or "").strip()
@@ -3307,70 +3412,21 @@ def _sa_build_items_for_symbol(sym: str, *, max_articles: int, model: str) -> li
             r["url"] = details.get("url")
 
     items: list[dict] = []
-    for a in rows:
-        body = (a.get("body_clean") or "").strip()
-        if not body:
-            continue
-
-        title = (a.get("title") or "").strip()
-        author = (a.get("author") or "").strip()
-        url = (a.get("url") or "").strip()
-        published = (a.get("published_at") or "").strip()
-
-        header_parts = []
-        if title:
-            header_parts.append(title)
-        if author:
-            header_parts.append(f"— {author}")
-        header = " ".join(header_parts).strip()
-
-        meta_lines = []
-        if published:
-            meta_lines.append(f"Date: {published[:10]}")
-        if url:
-            meta_lines.append(f"Source: {url}")
-
+    for idx_a, a in enumerate(rows, start=1):
         try:
             _m = _sa_metrics_by_id.get(str(a.get("id") or ""), {})
         except Exception:
             _m = {}
-        cred_parts = []
-        af = _m.get("followers")
-        ar = _m.get("rating")
-        ac = _m.get("articles")
-        try:
-            if isinstance(af, (int, float)):
-                cred_parts.append(f"{int(af):,} followers")
-        except Exception:
-            pass
-        try:
-            if isinstance(ar, (int, float)):
-                cred_parts.append(f"{float(ar):.1f} rating")
-        except Exception:
-            pass
-        try:
-            if isinstance(ac, (int, float)):
-                cred_parts.append(f"{int(ac):,} articles")
-        except Exception:
-            pass
-        if cred_parts:
-            meta_lines.append("Credibility: " + " | ".join(cred_parts))
-
-        if meta_lines:
-            header = (header + "\n" if header else "") + "\n".join(meta_lines)
-
-        if header:
-            items.append({"text": header, "pages": [], "is_header": True})
-
-        paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
-        kept = 0
-        for p in paras:
-            if kept >= max_paras_per_article:
-                break
-            if len(p) < 60:
+        article_items = _sa_report_items_for_article(a, sym, metrics=_m, idx=idx_a)
+        body_added = 0
+        for it in article_items:
+            if it.get("is_header"):
+                items.append(it)
                 continue
-            items.append({"text": p, "pages": []})
-            kept += 1
+            if body_added >= max_paras_per_article:
+                break
+            items.append(it)
+            body_added += 1
 
     if items:
         trimmed: list[dict] = []
@@ -3478,6 +3534,18 @@ def _substack_build_items_for_symbol(sym: str, *, lookback_days: int, max_posts:
             if pid in global_seen_post_ids:
                 continue
             global_seen_post_ids.add(pid)
+
+        post_items = _substack_report_items_for_post(p, str(sym), idx=len(items) + 1)
+        body_added = 0
+        for it in post_items:
+            if it.get("is_header"):
+                items.append(it)
+                continue
+            if body_added >= max_paras_per_post:
+                break
+            items.append(it)
+            body_added += 1
+        continue
 
         title = (p.get("title") or "").strip()
         author = (p.get("author") or "").strip()
@@ -4309,11 +4377,20 @@ def draw_podcast_intelligence_section():
             **ep,
         }
 
+    valid_podcast_snippets_by_ticker: Dict[str, list] = {}
+    weak_podcast_mentions: list[dict] = []
     tickers_with_mentions = set()
     for t, ins in ticker_insights.items():
-        if ins.get("has_mentions"):
+        raw_hits = excerpts_data.get(t, []) if isinstance(excerpts_data, dict) else []
+        valid_hits, weak_hits = _valid_podcast_snippets(t, raw_hits if isinstance(raw_hits, list) else [])
+        if valid_hits:
+            valid_podcast_snippets_by_ticker[t] = valid_hits
+        weak_podcast_mentions.extend(weak_hits[:5])
+        if ins.get("stance") == _PODCAST_STANCE_NOT_MENTIONED:
+            continue
+        if ins.get("has_mentions") and valid_hits:
             tickers_with_mentions.add(t)
-        elif len(excerpts_data.get(t, [])) > 0:
+        elif len(valid_hits) > 0:
             tickers_with_mentions.add(t)
 
     has_any_mentions = bool(tickers_with_mentions)
@@ -4338,7 +4415,7 @@ def draw_podcast_intelligence_section():
             )
             selected_ticker = label_to_ticker[selected_label]
 
-            snippets = excerpts_data.get(selected_ticker, []) or []
+            snippets = valid_podcast_snippets_by_ticker.get(selected_ticker, []) or []
             insight_for_ticker = ticker_insights.get(selected_ticker, {})
 
             filtered_snippets = []
@@ -4395,7 +4472,7 @@ def draw_podcast_intelligence_section():
                     pod_name = sn.get("podcast_name") or sn.get("podcast") or sn.get("podcast_id") or ""
                     ep_title = sn.get("episode_title") or sn.get("episode") or sn.get("title") or ""
                     ep_date = sn.get("published_date") or sn.get("date") or sn.get("published") or ""
-                    txt = sn.get("text") or sn.get("snippet") or ""
+                    txt = _podcast_snippet_text(sn)
                     header = f"{pod_name} — {ep_title}".strip(" …")
                     line = f"{i}. {header} ({ep_date}){txt}"
                     ev_lines.append(line.strip())

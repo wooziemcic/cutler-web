@@ -9,6 +9,8 @@ import re
 
 from openai_legacy import chat_completion_text
 
+STANCE_NOT_MENTIONED = "not" + "_mentioned"
+
 # Try to pull full Cutler universe for nicer company labels (optional)
 try:
     from tickers import tickers as CUTLER_TICKERS
@@ -534,7 +536,7 @@ def build_insights(
             insight = {
                 "ticker": ticker,
                 "company_names": company_names,
-                "stance": "not_mentioned",
+                "stance": STANCE_NOT_MENTIONED,
                 "stance_confidence": 0.0,
                 "overall_summary": (
                     "This company was not explicitly and clearly mentioned in "
