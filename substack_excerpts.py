@@ -194,6 +194,88 @@ def _get_company_context(ticker: str) -> Tuple[str, List[str]]:
     return "", []
 
 
+ALIAS_OVERRIDES: Dict[str, List[str]] = {
+    "GOOGL": ["Alphabet", "Google"],
+    "GOOG": ["Alphabet", "Google"],
+    "F": ["Ford", "Ford Motor", "Ford Motor Company"],
+    "T": ["AT&T", "AT and T"],
+    "JPM": ["JPMorgan", "JPMorgan Chase"],
+    "WFC": ["Wells Fargo"],
+    "SHEL": ["Shell"],
+    "SLB": ["SLB", "Schlumberger"],
+    "GBX": ["Greenbrier"],
+    "JCI": ["Johnson Controls"],
+    "ALL": ["Allstate"],
+    "CAT": ["Caterpillar"],
+    "ACI": ["Albertsons", "Albertsons Companies"],
+}
+
+UNSAFE_COMPANY_WORDS = {
+    "a", "an", "and", "of", "the", "all", "inc", "incorporated", "corp",
+    "corporation", "company", "companies", "co", "group", "holdings",
+    "holding", "plc", "nv", "n.v", "ltd", "limited", "sa", "se",
+}
+
+
+def _clean_company_name_for_alias(value: str) -> str:
+    name = re.sub(r"\s+", " ", clean_display_text(value or "")).strip(" ,.-")
+    if not name:
+        return ""
+    suffix_re = re.compile(
+        r"\b(?:inc\.?|incorporated|corp\.?|corporation|company|companies|co\.?|"
+        r"group|holdings?|plc|n\.?v\.?|ltd\.?|limited|s\.?a\.?|s\.?e\.?)\b\.?",
+        re.IGNORECASE,
+    )
+    cleaned = suffix_re.sub("", name)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+    return cleaned or name
+
+
+def _first_meaningful_company_word(value: str) -> str:
+    cleaned = _clean_company_name_for_alias(value)
+    for token in re.split(r"[^A-Za-z0-9&]+", cleaned):
+        tok = token.strip()
+        if len(tok) < 3:
+            continue
+        if tok.lower().replace(".", "") in UNSAFE_COMPANY_WORDS:
+            continue
+        return tok
+    return ""
+
+
+def _company_aliases_for_ticker(ticker: str, company_name: str = "", aliases: Optional[List[str]] = None) -> List[str]:
+    """Build conservative company-name aliases for noisy sources such as Substack."""
+    t = (ticker or "").strip().upper()
+    raw: List[str] = []
+    raw.extend(ALIAS_OVERRIDES.get(t, []))
+    if company_name:
+        raw.append(company_name)
+        cleaned = _clean_company_name_for_alias(company_name)
+        if cleaned and cleaned != company_name:
+            raw.append(cleaned)
+        first = _first_meaningful_company_word(company_name)
+        if first:
+            raw.append(first)
+    raw.extend([str(a).strip() for a in (aliases or []) if str(a).strip()])
+
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        alias = re.sub(r"\s+", " ", clean_display_text(item or "")).strip(" ,.-")
+        if not alias:
+            continue
+        key = alias.lower().replace(".", "")
+        if key in UNSAFE_COMPANY_WORDS:
+            continue
+        # Keep explicit overrides such as SLB, but avoid generic one/two-letter words from company names.
+        if len(alias) < 3 and alias.upper() not in ALIAS_OVERRIDES.get(t, []):
+            continue
+        if key not in seen:
+            seen.add(key)
+            out.append(alias)
+    return out
+
+
 def _is_ambiguous_ticker(ticker: str) -> bool:
     """Tickers that are short/word-like produce noisy matches on Substack."""
     t = (ticker or "").strip().upper()
@@ -202,7 +284,7 @@ def _is_ambiguous_ticker(ticker: str) -> bool:
     if len(t) <= 2:
         return True
     # Known common collisions in your universe (can expand later without changing callers)
-    if t in {"AI", "AGI", "F", "T", "IT", "ON", "OR", "CAT", "C", "A"}:
+    if t in {"AI", "AGI", "F", "T", "IT", "ON", "OR", "CAT", "C", "A", "ALL"}:
         return True
     return False
 
@@ -327,6 +409,92 @@ def _score_text_unit(txt: str) -> int:
     if len(txt) < 120:
         s -= 1
     return s
+
+
+def _is_unreadable_or_corrupted(txt: str) -> bool:
+    s = clean_display_text(txt or "")
+    if not s:
+        return True
+    bad_count = sum(s.count(ch) for ch in ("�", "■", "□", "▯", "�"))
+    if bad_count >= 4:
+        return True
+    if s.count("â") >= 3:
+        return True
+    alpha = len(re.findall(r"[A-Za-z]", s))
+    return len(s) > 160 and alpha < max(20, len(s) * 0.18)
+
+
+def _known_false_positive_context(ticker: str, txt: str) -> bool:
+    t = (ticker or "").strip().upper()
+    low = clean_display_text(txt or "").lower()
+    if not low:
+        return True
+    if t == "SHEL" and re.search(r"\bshel\s+framework\b|software\s+hardware\s+environment\s+liveware", low):
+        return True
+    if t == "JCI" and re.search(r"jakarta\s+composite|jakarta\s+stock|indonesia\s+stock|idx\s+composite", low):
+        return True
+    if t == "GBX" and re.search(r"\bgbx\b.*\b(currency|pence|sterling|acquisition\s+corp|spac)\b", low):
+        return True
+    if t == "ALL" and "allstate" not in low:
+        return True
+    if t == "CAT" and "caterpillar" not in low:
+        return True
+    return False
+
+
+def _strong_ticker_pattern(ticker: str) -> re.Pattern:
+    t = re.escape((ticker or "").strip().upper())
+    return re.compile(
+        rf"(?:\${t}\b|\({t}\)|\b(?:NYSE|NASDAQ|AMEX|NYSEARCA|OTC|OTCMKTS)\s*:\s*{t}\b|"
+        rf"\b(?:ticker|symbol)\s*:\s*{t}\b)",
+        re.IGNORECASE,
+    )
+
+
+def _has_company_or_alias(txt: str, alias_pats: List[re.Pattern]) -> bool:
+    return bool(alias_pats and any(ap.search(txt or "") for ap in alias_pats))
+
+
+def _substack_relevance_gate(
+    *,
+    ticker: str,
+    title: str,
+    body_text: str,
+    hit_paragraphs: List[str],
+    company_name: str = "",
+    aliases: Optional[List[str]] = None,
+) -> Tuple[str, str]:
+    """Classify Substack match quality before production PDF export."""
+    t = (ticker or "").strip().upper()
+    alias_list = _company_aliases_for_ticker(t, company_name, aliases)
+    alias_pats = [re.compile(rf"\b{re.escape(a)}\b", re.IGNORECASE) for a in alias_list if len(a) >= 2]
+    strong_ticker = _strong_ticker_pattern(t)
+    joined_hits = "\n\n".join([str(x) for x in (hit_paragraphs or []) if str(x).strip()])
+    blob = f"{title}\n\n{joined_hits or body_text}".strip()
+
+    if _is_unreadable_or_corrupted(blob):
+        return "False positive", "unreadable or corrupted text"
+    if _known_false_positive_context(t, blob):
+        return "False positive", "known acronym/ticker collision"
+
+    title_has_company = _has_company_or_alias(title, alias_pats)
+    body_has_company = _has_company_or_alias(blob, alias_pats)
+    has_strong_ticker = bool(strong_ticker.search(blob))
+    if not body_has_company and not has_strong_ticker:
+        return "False positive", "no company-name alias or strong stock-context ticker"
+
+    low = blob.lower()
+    weak_list_context = bool(
+        re.search(r"\b(etf|holdings?|watchlist|screen|ticker\s+list|portfolio\s+list)\b", low)
+        and not re.search(r"\b(thesis|earnings|guidance|revenue|margin|valuation|rating|price target|catalyst|risk)\b", low)
+    )
+    if weak_list_context:
+        return "Mention only", "company appears only in a list/holding/watchlist context"
+    if title_has_company or has_strong_ticker:
+        return "Direct", "company or stock-context ticker appears in title/anchor"
+    return "Indirect", "company appears in a meaningful body paragraph"
+
+
 def extract_ticker_paragraphs(
     *,
     body_text: str,
@@ -354,21 +522,18 @@ def extract_ticker_paragraphs(
         return []
 
     name = (company_name or "").strip()
-    alias_list = [a.strip() for a in (aliases or []) if a and a.strip()]
+    alias_list = _company_aliases_for_ticker(t, name, aliases)
     if not name and not alias_list:
         n2, a2 = _get_company_context(t)
         name = name or n2
-        alias_list = alias_list or a2
+        alias_list = _company_aliases_for_ticker(t, name, a2)
 
     # Patterns
-    strong_ticker = re.compile(
-        rf"(?:\${re.escape(t)}\b|\b(?:NYSE|NASDAQ|AMEX)\s*:\s*{re.escape(t)}\b|\b{re.escape(t)}\s*\([A-Z]{{2,6}}:\s*{re.escape(t)}\)\b)",
-        re.IGNORECASE,
-    )
+    strong_ticker = _strong_ticker_pattern(t)
     weak_ticker = re.compile(rf"\b{re.escape(t)}\b")
 
     name_pat = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE) if name else None
-    alias_pats = [re.compile(rf"\b{re.escape(a)}\b", re.IGNORECASE) for a in alias_list if len(a) >= 3]
+    alias_pats = [re.compile(rf"\b{re.escape(a)}\b", re.IGNORECASE) for a in alias_list if len(a) >= 2]
 
     # Finance-context: required for weak ticker-only hits to reduce acronym collisions.
     finance_ctx = re.compile(
@@ -474,6 +639,8 @@ def extract_ticker_paragraphs(
         """Apply acceptance rules to a paragraph or sentence unit."""
         if len(txt) < int(min_chars):
             return False
+        if _is_unreadable_or_corrupted(txt) or _known_false_positive_context(t, txt):
+            return False
 
         # Suppress clear generic meanings unless finance-anchored
         for sp in suppress_phrases:
@@ -501,13 +668,9 @@ def extract_ticker_paragraphs(
         if (_PROMO_NOISE.search(txt) or _EVENT_BULLET.search(txt)) and (not has_strong) and (not real_content.search(txt)):
             return False
 
-        if ambiguous:
-            # Ambiguous: must be finance-anchored OR (ticker + company context).
-            return has_strong or (has_weak and has_company)
-        else:
-            # Non-ambiguous: weak ticker alone is NOT enough.
-            # Require finance context or company context unless it’s a strong anchor.
-            return has_strong or (has_weak and (has_finance or has_company)) or (has_company and has_finance)
+        # Noisy Substack rule: require company-name/alias context, or a strong
+        # stock-context ticker such as $AMZN, (AMZN), NASDAQ:AMZN, or ticker: AMZN.
+        return has_strong or has_company
 
     for p in paras:
         if not _ok_text_unit(p):
@@ -809,13 +972,11 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
     filtered: List[Dict[str, Any]] = []
 
     company_name, aliases = _get_company_context(ticker)
+    aliases = _company_aliases_for_ticker(ticker, company_name, aliases)
     ambiguous = _is_ambiguous_ticker(ticker)
-    strong_list_pat = re.compile(
-        rf"(?:\${re.escape(ticker)}\b|\b(?:NYSE|NASDAQ|AMEX)\s*:\s*{re.escape(ticker)}\b)",
-        re.IGNORECASE,
-    )
+    strong_list_pat = _strong_ticker_pattern(ticker)
     name_pat = re.compile(rf"\b{re.escape(company_name)}\b", re.IGNORECASE) if company_name else None
-    alias_pats = [re.compile(rf"\b{re.escape(a)}\b", re.IGNORECASE) for a in (aliases or []) if len(str(a)) >= 3]
+    alias_pats = [re.compile(rf"\b{re.escape(a)}\b", re.IGNORECASE) for a in (aliases or []) if len(str(a)) >= 2]
 
     for row in candidates:
         pid = _candidate_post_id(row)
@@ -910,6 +1071,17 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
         if not hit_paras:
             continue
 
+        relevance_label, relevance_reason = _substack_relevance_gate(
+            ticker=ticker,
+            title=title,
+            body_text=body_clean,
+            hit_paragraphs=hit_paras,
+            company_name=company_name,
+            aliases=aliases,
+        )
+        if relevance_label in {"False positive", "Mention only"}:
+            continue
+
         # Minimum-context rule: drop single shallow mentions
         # Keep if we have >=2 hit units OR one substantial unit.
         if len(hit_paras) == 1 and len(hit_paras[0]) < 220:
@@ -938,6 +1110,8 @@ def fetch_posts_for_ticker(ticker: str, *, lookback_days: int = 2, max_posts: in
                 "excerpt": excerpt,
                 "body": body_clean,
                 "hit_paragraphs": hit_paras,
+                "relevance_label": relevance_label,
+                "relevance_reason": relevance_reason,
             }
         )
 

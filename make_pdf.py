@@ -218,8 +218,9 @@ def _clean_visible_source_name(value: str) -> str:
     stamped_marker = ".stamped" + tmp_marker
     s = re.sub(re.escape(stamped_marker) + r"(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
     s = re.sub(re.escape(tmp_marker) + r"(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t\f\v]+", " ", line).strip() for line in s.split("\n")]
+    return "\n".join(lines).strip()
 
 
 def _normalized_report_text_key(text: str) -> str:
@@ -367,43 +368,50 @@ def _render_structured_article_header(story: List[Any], raw_txt: str) -> None:
         "ArticleMetaTitle",
         parent=ArticleHeader,
         fontSize=9.5,
-        leading=14,
+        leading=16,
         textColor=colors.HexColor("#111827"),
-        spaceBefore=6,
-        spaceAfter=2,
-        keepWithNext=1,
+        spaceBefore=4,
+        spaceAfter=6,
+        splitLongWords=1,
+        wordWrap="CJK",
+        keepWithNext=0,
     )
     meta_style = ParagraphStyle(
         "ArticleMetaLine",
         parent=MetaX,
-        fontSize=8,
-        leading=12,
-        spaceAfter=2,
+        fontSize=8.4,
+        leading=15,
+        spaceAfter=6,
         splitLongWords=1,
         wordWrap="CJK",
     )
-    rows: List[List[Any]] = []
+    label_style = ParagraphStyle(
+        "ArticleMetaLabel",
+        parent=MetaX,
+        fontSize=8.4,
+        leading=13,
+        textColor=colors.HexColor("#4b2142"),
+        spaceBefore=4,
+        spaceAfter=2,
+        keepWithNext=0,
+    )
+    block: List[Any] = []
     for ln in lines:
-        safe = escape(ln)
-        if ln.lower().startswith("title:"):
-            rows.append([Paragraph(f"<b>{safe}</b>", title_style)])
+        if ":" in ln:
+            label, value = ln.split(":", 1)
+            label_text = f"{label.strip()}:"
+            value_text = value.strip()
         else:
-            rows.append([Paragraph(safe, meta_style)])
-    if rows:
-        table = Table(
-            rows,
-            colWidths=[None],
-            style=TableStyle(
-                [
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                ]
-            ),
-        )
-        story.append(table)
+            label_text = ""
+            value_text = ln
+        if label_text:
+            block.append(Paragraph(escape(label_text), label_style))
+        if value_text:
+            style = title_style if label_text.lower().startswith("title:") else meta_style
+            text = f"<b>{escape(value_text)}</b>" if style is title_style else escape(value_text)
+            block.append(Paragraph(text, style))
+    if block:
+        story.extend(block)
     story.append(Spacer(1, 8))
 
 
@@ -423,43 +431,33 @@ def _render_structured_body_block(story: List[Any], text: str, body_style: Parag
         fontSize=9.3,
         leading=11,
         textColor=colors.HexColor("#4b2142"),
+        backColor=colors.HexColor("#F2EAF3"),
         spaceBefore=7,
-        spaceAfter=3,
+        spaceAfter=4,
+        borderPadding=(3, 6, 3, 6),
         keepWithNext=1,
     )
-    rows: List[List[Any]] = [[Paragraph(escape(label), label_style)]]
+    story.append(Paragraph(escape(label), label_style))
     current: List[str] = []
+    bullet_re = re.compile(r"^(?:[-?]|\d+\.)\s+")
     for raw in lines[1:]:
         ln = raw.strip()
         if not ln:
             if current:
-                rows.append([Paragraph(escape(" ".join(current)), body_style)])
+                story.append(Paragraph(escape(" ".join(current)), body_style))
                 current = []
+            story.append(Spacer(1, 2))
             continue
-        if re.match(r"^(?:[-•]|\d+\.)\s+", ln):
+        if bullet_re.match(ln):
             if current:
-                rows.append([Paragraph(escape(" ".join(current)), body_style)])
+                story.append(Paragraph(escape(" ".join(current)), body_style))
                 current = []
-            rows.append([Paragraph(escape(ln), body_style)])
+            story.append(Paragraph(escape(ln), body_style))
         else:
             current.append(ln)
     if current:
-        rows.append([Paragraph(escape(" ".join(current)), body_style)])
-    table = Table(
-        rows,
-        colWidths=[None],
-        style=TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        ),
-    )
-    story.append(table)
-    story.append(Spacer(1, 4))
+        story.append(Paragraph(escape(" ".join(current)), body_style))
+    story.append(Spacer(1, 6))
 
 
 @dataclass

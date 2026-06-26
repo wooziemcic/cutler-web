@@ -783,7 +783,23 @@ def _substack_report_items_for_post(post: dict, ticker: str, idx: int = 1) -> li
     if _is_report_boilerplate(title) or _is_report_boilerplate(candidate_text[:500]):
         return []
 
-    relevance = _substack_relevance_label(candidate_text or title, ticker)
+    relevance = clean_display_text(post.get("relevance_label") or "").strip()
+    relevance_reason = clean_display_text(post.get("relevance_reason") or "").strip()
+    if not relevance:
+        try:
+            company_name, aliases = substack_excerpts._get_company_context(ticker)  # type: ignore[attr-defined]
+            relevance, relevance_reason = substack_excerpts._substack_relevance_gate(  # type: ignore[attr-defined]
+                ticker=ticker,
+                title=title,
+                body_text=body,
+                hit_paragraphs=[str(x) for x in hit_paras if str(x).strip()],
+                company_name=company_name,
+                aliases=aliases,
+            )
+        except Exception:
+            relevance = _substack_relevance_label(candidate_text or title, ticker)
+    if relevance not in {"Direct", "Indirect"}:
+        return []
     header_lines = [f"Title: {title or f'Post {idx}'}"]
     if author:
         header_lines.append(f"Author/Publication: {author}")
@@ -792,6 +808,8 @@ def _substack_report_items_for_post(post: dict, ticker: str, idx: int = 1) -> li
     if url:
         header_lines.append(f"Source: {url}")
     header_lines.append(f"Relevance: {relevance}")
+    if relevance_reason:
+        header_lines.append(f"Match Quality: {relevance_reason}")
 
     items = [{"text": "\n".join(header_lines), "pages": [], "is_header": True}]
     bullets = _summary_bullets_from_evidence(title, candidate_text, ticker=ticker, max_items=4)
@@ -3880,6 +3898,18 @@ def _substack_all_run_step(*, state: dict, batch_size: int = 3, time_budget_s: f
             if not pid or pid in seen_post_ids:
                 continue
             seen_post_ids.add(pid)
+
+            post_items = _substack_report_items_for_post(post, str(sym), idx=len(items) + 1)
+            body_added = 0
+            for it in post_items:
+                if it.get("is_header"):
+                    items.append(it)
+                    continue
+                if body_added >= max_paras_per_post:
+                    break
+                items.append(it)
+                body_added += 1
+            continue
 
             title = (post.get("title") or "").strip()
             author = (post.get("author") or "").strip()
