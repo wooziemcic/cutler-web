@@ -22,6 +22,29 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
+def clean_display_text(text):
+    """Normalize mojibake before text is displayed or written to reports."""
+    if text is None:
+        return ""
+    s = str(text)
+    replacements = {
+        "\u00e2\u20ac\u201d": "\u2014",
+        "\u00e2\u20ac\u201c": "\u2013",
+        "\u00e2\u20ac\u00a6": "\u2026",
+        "\u00e2\u20ac\u00a2": "\u2022",
+        "\u00e2\u2020\u2019": "\u2192",
+        "\u00e2\u2013\u00b6": "\u25b6",
+        "\u00e2\u2014\u20ac": "\u25c0",
+        "\u00e2\u009d\u00a4": "\u2764",
+        "\u00c2": "",
+        "\u00ef\u00bf\u00bd": "",
+        "\ufffd": "",
+    }
+    for bad, good in replacements.items():
+        s = s.replace(bad, good)
+    return s
+
+
 DEFAULT_BASE_URL = os.getenv("SUBSTACK_RAPIDAPI_BASE_URL", "https://substack-live.p.rapidapi.com")
 DEFAULT_TIMEOUT_S = float(os.getenv("SUBSTACK_HTTP_TIMEOUT", "15"))
 DEFAULT_RETRIES = int(os.getenv("SUBSTACK_HTTP_RETRIES", "2"))
@@ -181,7 +204,7 @@ def _is_ambiguous_ticker(ticker: str) -> bool:
 
 
 def _normalize_text(s: str) -> str:
-    s = (s or "").replace("\r", "\n")
+    s = clean_display_text(s).replace("\r", "\n")
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
 
@@ -210,7 +233,7 @@ def _split_sentences(text: str) -> List[str]:
     it won't be perfect, but it dramatically improves signal when a 'paragraph'
     contains multiple tickers (e.g., roundup posts).
     """
-    t = (text or '').strip()
+    t = clean_display_text(text).strip()
     if not t:
         return []
     t = re.sub(r'\s+', ' ', t).strip()
@@ -678,6 +701,7 @@ def _extract_body_from_post_details(payload: Any) -> Tuple[str, str, str, str]:
 
 def _strip_html(text: str) -> str:
     # very lightweight HTML stripping (keep it dependency-free)
+    text = clean_display_text(text)
     if "<" not in text:
         return text.strip()
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)

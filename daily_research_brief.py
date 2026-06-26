@@ -13,6 +13,29 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 
 
+def clean_display_text(text):
+    """Normalize mojibake before text is displayed or written to reports."""
+    if text is None:
+        return ""
+    s = str(text)
+    replacements = {
+        "\u00e2\u20ac\u201d": "\u2014",
+        "\u00e2\u20ac\u201c": "\u2013",
+        "\u00e2\u20ac\u00a6": "\u2026",
+        "\u00e2\u20ac\u00a2": "\u2022",
+        "\u00e2\u2020\u2019": "\u2192",
+        "\u00e2\u2013\u00b6": "\u25b6",
+        "\u00e2\u2014\u20ac": "\u25c0",
+        "\u00e2\u009d\u00a4": "\u2764",
+        "\u00c2": "",
+        "\u00ef\u00bf\u00bd": "",
+        "\ufffd": "",
+    }
+    for bad, good in replacements.items():
+        s = s.replace(bad, good)
+    return s
+
+
 CATEGORIES = ("Banks", "Companies", "Credit", "Green Street", "Research")
 SUPPORTED_TEXT_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".txt", ".md", ".csv"}
 JUNK_NAMES = {".ds_store", "thumbs.db", "desktop.ini"}
@@ -3800,6 +3823,8 @@ def cutler_daily_brief_topic(row: Dict[str, Any]) -> str:
     """Create a concise topic/entity label for the Cutler daily packet."""
     text = _normalize_metadata_text(_cutler_metadata_text(row))
     folded = text.casefold()
+    if "heardonthe beach alignment tax" in folded or "heard on the beach alignment tax" in folded:
+        return "Heard on the Beach: Alignment Tax"
     if "fear and greed" in folded or "fear & greed" in folded:
         return "Fear & Greed Index"
     if any(term in folded for term in ["jpm weekly", "jpm guide", "monday guide", "guide to the markets"]):
@@ -3808,9 +3833,9 @@ def cutler_daily_brief_topic(row: Dict[str, Any]) -> str:
         return "Insider Trading Screen"
     if "green street" in folded:
         if "vre" in folded and any(term in folded for term in ["dropping research coverage", "coverage dropped"]):
-            return "VRE / Coverage Dropped"
+            return "VRE: Coverage Dropped"
         if "qt" in folded and "fertitta" in folded and "caesars" in folded:
-            return "QT / Caesars-Fertitta Read-Through"
+            return "QT: Caesars-Fertitta Read-Through"
         if "mall sector" in folded:
             return "Mall Sector Update"
         if "residential" in folded:
@@ -3835,6 +3860,7 @@ def cutler_daily_brief_topic(row: Dict[str, Any]) -> str:
     )
     cleaned = re.sub(r"\b\d{1,2}\s+\d{1,2}\s+\d{2,4}\b|\b20\d{2}\b", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_/")
+    cleaned = re.sub(r"\bHeardonthe Beach\b", "Heard on the Beach:", cleaned, flags=re.IGNORECASE)
     return cleaned[:100] if cleaned else "Unclassified"
 
 
@@ -3957,7 +3983,7 @@ def extract_cutler_daily_brief_facts(item: Dict[str, Any], *, max_facts: int = 4
 
 def clean_cutler_daily_brief_text(text: str) -> str:
     """Remove common research-report boilerplate before selecting Daily Brief facts."""
-    cleaned = str(text or "").replace("\x00", " ")
+    cleaned = clean_display_text(text).replace("\x00", " ")
     cleaned = re.sub(r"\b(20)\s+(\d{2})\b", r"\1\2", cleaned)
     cleaned = re.sub(r"\b(page)\s+\d+\s+(?:of\s+\d+)?\b", " ", cleaned, flags=re.IGNORECASE)
     boilerplate_patterns = [
@@ -4287,6 +4313,29 @@ def build_cutler_style_daily_brief(
             return f"[Source: {unique[0]}]"
         return f"[Sources: {'; '.join(unique)}]"
 
+    def concise_supported_fact(value: str, max_chars: int = 190) -> str:
+        fact = clean_cutler_daily_brief_text(value)
+        fact = re.sub(
+            r"^(?:targeted deeper extraction identifies|limited extraction identifies|"
+            r"extracted evidence highlights|extracted evidence points to)\s+",
+            "",
+            fact,
+            flags=re.IGNORECASE,
+        )
+        fact = re.sub(r"\s+", " ", fact).strip(" .;:")
+        if len(fact) <= max_chars:
+            return fact
+        shortened = fact[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:")
+        return f"{shortened}..."
+
+    def evidence_lead(record: Dict[str, Any]) -> str:
+        document_type = str(record.get("cutler_document_type") or "").casefold()
+        if any(term in document_type for term in ["sector report", "industry report", "real estate report"]):
+            return "The report flags"
+        if any(term in document_type for term in ["analyst report", "credit report", "weekly guide"]):
+            return "The note discusses"
+        return "The file highlights"
+
     def evidence_summary(record: Dict[str, Any]) -> str:
         evidence = clean_cutler_daily_brief_text(str(record.get("evidence") or ""))
         document_type = str(record.get("cutler_document_type") or "Company / Research Update")
@@ -4298,21 +4347,18 @@ def build_cutler_style_daily_brief(
             if str(fact).strip()
         ]
         if facts:
-            fact_summary = "; ".join(facts[:2])
-            if len(fact_summary) > 420:
-                fact_summary = fact_summary[:417].rstrip() + "..."
-            return f"Extracted evidence highlights {fact_summary}."
-        sentences = [
-            sentence.strip()
-            for sentence in re.split(r"(?<=[.!?])\s+", evidence)
-            if sentence.strip()
-        ]
+            concise_facts = [concise_supported_fact(fact) for fact in facts[:2]]
+            concise_facts = [fact for fact in concise_facts if fact]
+            if concise_facts:
+                return f"{evidence_lead(record)} " + "; ".join(concise_facts) + "."
+        sentences = []
+        for sentence in re.split(r"(?<=[.!?])\s+", evidence):
+            concise_sentence = concise_supported_fact(sentence)
+            if concise_sentence:
+                sentences.append(concise_sentence)
         unique_sentences = list(dict.fromkeys(sentences))
-        excerpt = " ".join(unique_sentences[:2])[:360].strip()
-        if len(" ".join(unique_sentences[:2])) > 360:
-            excerpt += "..."
-        label = "Targeted deeper extraction identifies" if str(record.get("extraction_depth") or "") == "deeper" else "Limited extraction identifies"
-        return f"{label} {excerpt.rstrip('.')}."
+        excerpt = "; ".join(unique_sentences[:2]).strip()
+        return f"{evidence_lead(record)} {excerpt.rstrip('.')}."
 
     def section_bullet(record: Dict[str, Any]) -> str:
         file_name = str(record.get("source_file") or "source unavailable")
@@ -4360,10 +4406,16 @@ def build_cutler_style_daily_brief(
         topics = list(dict.fromkeys(str(item.get("cutler_topic") or "Unclassified") for item in ordered))
         sources = [str(item.get("source_file") or "") for item in ordered]
         lead = ordered[0]
-        summary = evidence_summary(lead)
-        if len(summary) > 210:
-            summary = summary[:207].rstrip() + "..."
-        return f"- **{label}:** {', '.join(topics[:5])}. {summary} {source_citation(sources[:6])}"
+        rationale = str(lead.get("cutler_why_it_matters") or "Supports source-document triage.")
+        evidence_note = (
+            "The lead item includes extracted evidence."
+            if evidence_rank(lead) < 2
+            else "The available items are metadata-only."
+        )
+        return (
+            f"- **{label}:** Today's coverage centers on {', '.join(topics[:5])}. "
+            f"{evidence_note} {rationale} {source_citation(sources[:6])}"
+        )
 
     action_groups = [
         ("REIT / Green Street", "Review NAV and sector implications.", lambda item: str(item.get("theme") or "") == "REITs / Real Estate"),
@@ -4502,11 +4554,11 @@ def build_cutler_style_daily_brief(
             ),
         ]
     )
-    return "\n".join(lines)
+    return clean_display_text("\n".join(lines))
 
 
 def _normalized_extracted_text(item: Dict[str, Any]) -> str:
-    return re.sub(r"\s+", " ", str(item.get("extracted_text") or "")).strip()
+    return re.sub(r"\s+", " ", clean_display_text(item.get("extracted_text") or "")).strip()
 
 
 def verified_extracted_text_items(selected_text: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

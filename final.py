@@ -1,5 +1,5 @@
 ﻿"""
-Cutler Capital â€” Hedge Fund Letter Scraper
+Cutler Capital — Hedge Fund Letter Scraper
 ------------------------------------------
 Internal Cutler Capital tool to scrape, excerpt, and compile hedge-fund letters
 by fund family and quarter. Uses an external hedge-fund letter database as the
@@ -30,6 +30,37 @@ import re as _re
 import html as html_lib
 import streamlit as st
 from openai_legacy import chat_completion_text
+
+
+def clean_display_text(text):
+    """Normalize mojibake before rendering UI text or downloadable report text."""
+    if text is None:
+        return ""
+    s = str(text)
+    replacements = {
+        "\u00e2\u20ac\u201d": "\u2014",
+        "\u00e2\u20ac\u201c": "\u2013",
+        "\u00e2\u20ac\u00a6": "\u2026",
+        "\u00e2\u20ac\u00a2": "\u2022",
+        "\u00e2\u2020\u2019": "\u2192",
+        "\u00e2\u2013\u00b6": "\u25b6",
+        "\u00e2\u2014\u20ac": "\u25c0",
+        "\u00e2\u009d\u00a4": "\u2764",
+        "\u00c2": "",
+        "\u00ef\u00bf\u00bd": "",
+        "\ufffd": "",
+    }
+    for bad, good in replacements.items():
+        s = s.replace(bad, good)
+    return s
+
+
+def _clean_report_visible_text(text: object) -> str:
+    """Sanitize user-visible report labels without changing underlying paths."""
+    s = clean_display_text(text)
+    s = re.sub(r"\.stamped\.tmp(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\.tmp(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 # --- Playwright sync API sometimes fails after asyncio.run() closes the default loop (Streamlit 'Run All').
@@ -243,9 +274,9 @@ def ensure_playwright_chromium_installed(show_messages: bool = True) -> bool:
     if found:
         return True  # Chromium already present
 
-    # Not found â€” try installing now
+    # Not found — try installing now
     if show_messages:
-        st.warning("Chromium not found. Installing Playwright browserâ€¦ (this may take ~20â€“40 seconds)")
+        st.warning("Chromium not found. Installing Playwright browser… (this may take ~20–40 seconds)")
 
     try:
         # Run: python -m playwright install chromium
@@ -280,7 +311,7 @@ def ensure_playwright_chromium_installed(show_messages: bool = True) -> bool:
 def _is_probable_ticker(s: str) -> bool:
     """
     Conservative check for equity tickers.
-    Allows 1â€“6 uppercase letters (e.g., AAPL, MSFT, ABBV).
+    Allows 1–6 uppercase letters (e.g., AAPL, MSFT, ABBV).
     """
     if not s:
         return False
@@ -408,7 +439,7 @@ def _clean_name(s: str) -> str:
     s = s.strip()
     s = re.sub(r"\[.*?\]", "", s)        # drop bracketed notes
     s = re.sub(r"\s+", " ", s)           # collapse spaces
-    return s.strip("-â€¢Â· ")
+    return s.strip("-•· ")
 
 def _parse_big_list(raw: str) -> List[str]:
     seen = set(); out: List[str] = []
@@ -430,7 +461,7 @@ ALL_FUND_NAMES = _parse_big_list(BIG_LIST_RAW)
 BATCH_COUNT = 7
 _batches = _chunk_round_robin(ALL_FUND_NAMES, BATCH_COUNT)
 RUNNABLE_BATCHES: Dict[str, List[str]] = {f"Batch {i+1}": b for i, b in enumerate(_batches)}
-BATCH8_NAME = "Batch 8 â€” Latest"  # dynamic weekly/latest mode
+BATCH8_NAME = "Batch 8 — Latest"  # dynamic weekly/latest mode
 
 
 # External data source URL (kept internal; not shown in UI)
@@ -570,6 +601,159 @@ def _extract_sa_details_fields(details: dict) -> tuple[str, str, str, str]:
     published = base.get("published_at") or base.get("published") or base.get("date") or ""
     return str(body or ""), str(author or ""), str(title or ""), str(published or "")
 
+
+_REPORT_BOILERPLATE_PATTERNS = [
+    "editor's note",
+    "click to enlarge",
+    "10 stocks we like better",
+    "disclosure:",
+    "additional disclosure",
+    "this article was written by",
+    "seeking alpha's disclosure",
+    "past performance",
+    "not investment advice",
+    "all rights reserved",
+    "subscribe",
+    "free stock analysis report",
+    "read original article",
+    "sign up",
+    "upgrade to premium",
+]
+
+
+def _is_report_boilerplate(text: str) -> bool:
+    low = clean_display_text(text).lower()
+    if not low.strip():
+        return True
+    if any(p in low for p in _REPORT_BOILERPLATE_PATTERNS):
+        return True
+    if re.search(r"\b(copyright|terms of use|privacy policy)\b", low):
+        return True
+    return False
+
+
+def _report_paragraphs(text: str) -> list[str]:
+    text = clean_display_text(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p and p.strip()]
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in paras:
+        p = re.sub(r"\s+", " ", p).strip()
+        if len(p) < 50 or _is_report_boilerplate(p):
+            continue
+        key = re.sub(r"[^a-z0-9]+", " ", p.lower()).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _sentence_limited(text: str, *, max_words: int = 220) -> str:
+    text = clean_display_text(text).strip()
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept: list[str] = []
+    n = 0
+    for s in sentences:
+        w = len(s.split())
+        if kept and n + w > max_words:
+            break
+        if not kept and w > max_words:
+            return " ".join(s.split()[:max_words]).rstrip(" ,;:") + "... [excerpt shortened]"
+        kept.append(s)
+        n += w
+    return (" ".join(kept).strip() or " ".join(words[:max_words]).rstrip(" ,;:")) + " [excerpt shortened]"
+
+
+def _score_report_paragraph(text: str, ticker: str = "") -> int:
+    low = clean_display_text(text).lower()
+    score = 0
+    if ticker and re.search(rf"\b{re.escape(ticker.lower())}\b", low):
+        score += 4
+    for kw in [
+        "valuation", "price target", "rating", "upgrade", "downgrade", "eps", "earnings",
+        "revenue", "guidance", "estimate", "margin", "free cash flow", "fcf", "dividend",
+        "capital allocation", "balance sheet", "leverage", "liquidity", "catalyst",
+        "risk", "upside", "downside", "thesis", "counterpoint", "competition",
+    ]:
+        if kw in low:
+            score += 2
+    if _is_report_boilerplate(text):
+        score -= 10
+    return score
+
+
+def _best_evidence_paragraphs(text: str, *, ticker: str = "", max_items: int = 3, max_words: int = 220) -> list[str]:
+    paras = _report_paragraphs(text)
+    ranked = sorted(paras, key=lambda p: (_score_report_paragraph(p, ticker), len(p)), reverse=True)
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in ranked:
+        if len(out) >= max_items:
+            break
+        key = re.sub(r"[^a-z0-9]+", " ", p.lower())[:220]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(_sentence_limited(p, max_words=max_words))
+    return out
+
+
+def _summary_bullets_from_evidence(title: str, body: str, *, ticker: str = "", max_items: int = 5) -> list[str]:
+    evidence = _best_evidence_paragraphs(body, ticker=ticker, max_items=max_items, max_words=70)
+    bullets: list[str] = []
+    title_clean = clean_display_text(title).strip()
+    if title_clean:
+        bullets.append(f"Article focus: {title_clean}.")
+    for p in evidence:
+        if len(bullets) >= max_items:
+            break
+        bullets.append(_sentence_limited(p, max_words=55))
+    if not bullets:
+        bullets = ["No concise, ticker-specific article summary was available after boilerplate filtering."]
+    return bullets[:max_items]
+
+
+def _sa_report_items_for_article(a: dict, ticker: str, metrics: dict | None = None, idx: int = 1) -> list[dict]:
+    title = clean_display_text(a.get("title") or f"Article {idx}").strip()
+    author = clean_display_text(a.get("author") or a.get("author_name") or a.get("authorName") or "").strip()
+    url = clean_display_text(a.get("url") or a.get("link") or "").strip()
+    published = clean_display_text(a.get("published_at") or a.get("published") or a.get("date") or "").strip()
+    body = clean_display_text(a.get("body_clean") or a.get("body") or "").strip()
+    if not body and not title:
+        return []
+
+    header_lines = [title or f"Article {idx}"]
+    if author:
+        header_lines[0] = f"{header_lines[0]} — {author}"
+    if published:
+        header_lines.append(f"Date: {published[:10]}")
+    if url:
+        header_lines.append(f"Source: {url}")
+    cred_parts: list[str] = []
+    metrics = metrics or {}
+    for key, label in (("followers", "followers"), ("rating", "rating"), ("articles", "articles")):
+        val = metrics.get(key)
+        if isinstance(val, (int, float)):
+            cred_parts.append(f"{int(val):,} {label}" if key != "rating" else f"{float(val):.1f} {label}")
+    if cred_parts:
+        header_lines.append("Credibility: " + " | ".join(cred_parts))
+
+    items: list[dict] = [{"text": "\n".join(header_lines), "pages": [], "is_header": True}]
+    bullets = _summary_bullets_from_evidence(title, body, ticker=ticker, max_items=5)
+    items.append({"text": "Brief summary:\n" + "\n".join(f"- {b}" for b in bullets), "pages": []})
+    evidence = _best_evidence_paragraphs(body, ticker=ticker, max_items=3, max_words=220)
+    if evidence:
+        items.append({"text": "Evidence excerpts:\n" + "\n\n".join(f"{i}. {p}" for i, p in enumerate(evidence, 1)), "pages": []})
+    risk = next((p for p in _report_paragraphs(body) if any(k in p.lower() for k in ("risk", "bear", "downside", "counterpoint", "concern"))), "")
+    if risk:
+        items.append({"text": "Risk / counterpoint:\n" + _sentence_limited(risk, max_words=120), "pages": []})
+    return items
+
 def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: int, model: str) -> Path:
     # Builds one compiled PDF across the full universe in 10-ticker batches (to reduce API bursts).
     import tempfile
@@ -592,7 +776,7 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
 
     for b in batches:
         for sym in b:
-            status.info(f"Run All: Seeking Alpha â€” fetching {sym} ({processed+1}/{total}) â€¦")
+            status.info(f"Run All: Seeking Alpha — fetching {sym} ({processed+1}/{total})…")
             try:
                 raw_list = sa_api.fetch_analysis_list(sym, size=max_articles) or []
                 # Enrich with author credibility signals (followers / rating / etc.)
@@ -676,7 +860,7 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
                     if title:
                         header_parts.append(title)
                     if author:
-                        header_parts.append(f"â€” {author}")
+                        header_parts.append(f"— {author}")
                     header = " ".join(header_parts).strip()
 
                     meta_lines = []
@@ -757,7 +941,7 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
         excerpts_path = td_path / "sa_excerpts.json"
         excerpts_path.write_text(_json.dumps(combined, indent=2), encoding="utf-8")
         out_pdf = td_path / "sa_compiled.pdf"
-        status.info("Run All: Seeking Alpha â€” rendering compiled PDFâ€¦")
+        status.info("Run All: Seeking Alpha — rendering compiled PDF…")
         make_pdf.build_pdf(
             excerpts_json_path=str(excerpts_path),
             output_pdf_path=str(out_pdf),
@@ -767,7 +951,7 @@ def _build_sa_compiled_pdf_for_universe(*, universe: list[str], max_articles: in
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index â€” Hit Tickers",
+            index_label="Index — Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -806,6 +990,12 @@ def _build_text_pdf(
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    title = clean_display_text(title)
+    subtitle = clean_display_text(subtitle) if subtitle else None
+    sections = [
+        (clean_display_text(h), clean_display_text(b))
+        for h, b in (sections or [])
+    ]
 
     base = getSampleStyleSheet()
     Title = ParagraphStyle(
@@ -969,7 +1159,7 @@ def _build_podcast_all_pdf(
     window_line = f"Lookback: last {days_back} days" if days_back else "Lookback: recent window"
     if group_label:
         window_line += f"\nPodcasts: {group_label}"
-    sections.append(("Podcast Intelligence â€” Overview", window_line))
+    sections.append(("Podcast Intelligence — Overview", window_line))
 
     # Summary table-ish block
     if mention_counts:
@@ -1036,7 +1226,7 @@ def _build_podcast_all_pdf(
                     prefix_parts.append(pname)
                 if ep_title:
                     prefix_parts.append(ep_title)
-                prefix = " â€” ".join(prefix_parts).strip()
+                prefix = " — ".join(prefix_parts).strip()
                 if prefix:
                     ev_lines.append(f"- {prefix}: {snip}")
                 else:
@@ -1044,12 +1234,12 @@ def _build_podcast_all_pdf(
                 shown += 1
 
         body_text = "\n".join(body_parts + ev_lines).strip() or "No summary available."
-        sections.append((f"{sym} â€” Podcast stance", body_text))
+        sections.append((f"{sym} — Podcast stance", body_text))
 
-    subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p ET} â€¢ {window_line.replace(chr(10),' â€¢ ')}"
+    subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p ET} — {window_line.replace(chr(10),' — ')}"
     return _build_text_pdf(
         output_path=output_path,
-        title="Cutler Capital â€” Podcast Intelligence (ALL)",
+        title="Cutler Capital — Podcast Intelligence (ALL)",
         subtitle=subtitle,
         sections=sections,
     )
@@ -1260,7 +1450,7 @@ def run_excerpt_and_build(
         make_pdf.build_pdf(
             excerpts_json_path=str(dst_json),
             output_pdf_path=str(out_pdf),
-            report_title=f"Cutler Capital Excerpts â€“ {pdf_path.stem}",
+            report_title=f"Cutler Capital Excerpts — {pdf_path.stem}",
             source_pdf_name=source_pdf_name or pdf_path.name,
             format_style="legacy",
             letter_date=letter_date,
@@ -1285,10 +1475,13 @@ def _overlay_single_page(w: float, h: float, left: str, mid: str, right: str) ->
     c.setFillColor(colors.HexColor("#4b2142"))  # Cutler purple
     L = R = 0.75 * 72
     T = 0.75 * 72
+    left = _clean_report_visible_text(left)
+    mid = _clean_report_visible_text(mid)
+    right = _clean_report_visible_text(right)
     if left:
         c.drawString(L, h - T + 0.35 * 72, left)
     if mid:
-        text = (mid[:95] + 'â€¦') if len(mid) > 96 else mid
+        text = (mid[:95] + '…') if len(mid) > 96 else mid
         c.drawCentredString(w / 2.0, h - T + 0.35 * 72, text)
     if right:
         c.drawRightString(w - R, h - T + 0.35 * 72, right)
@@ -1311,7 +1504,7 @@ def _stamp_pdf(src: Path, left: str, mid: str, right: str) -> Path:
         except Exception:
             pass
         w.add_page(pg)
-    tmp = src.with_suffix('.stamped.tmp.pdf')
+    tmp = src.with_name(f"{src.stem}.__cutler_stampwork.pdf")
     with open(tmp, 'wb') as f:
         w.write(f)
     return tmp
@@ -1417,35 +1610,51 @@ def compile_merged(batch: str, quarter: str, collected: List[Path], *, increment
     out_name = _build_compiled_filename(batch, incremental=incremental)
     out = CP_DIR / out_name
 
+    # Lightweight guardrail: avoid merging the same generated PDF twice if a
+    # resumed/incremental run hands us duplicate paths.
+    deduped: List[Path] = []
+    seen_paths: set[str] = set()
+    for p in collected:
+        try:
+            key = str(Path(p).resolve()).lower()
+        except Exception:
+            key = str(p).lower()
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        deduped.append(p)
+
     m = PdfMerger()
     added = 0
+    stamped_work_files: List[Path] = []
 
     # --- NEW: prepend a batch-level ticker index page (Fund Families) ---
     try:
-        tickers_in_doc = _batch_hit_tickers_in_order(collected)
+        tickers_in_doc = _batch_hit_tickers_in_order(deduped)
         if tickers_in_doc:
-            idx_pdf = CP_DIR / f"_{_safe(batch.replace('â€”', '-').replace('  ', ' ').strip())}_{quarter}_Index.pdf"
+            idx_pdf = CP_DIR / f"_{_safe(batch.replace('—', '-').replace('  ', ' ').strip())}_{quarter}_Index.pdf"
             built = _build_batch_index_pdf(
                 tickers_in_doc=tickers_in_doc,
                 out_pdf=idx_pdf,
-                label="Index â€” Hit Tickers",
+                label="Index — Hit Tickers",
             )
             if built and built.exists():
                 stamped_idx = _stamp_pdf(
                     built,
                     left=batch,
-                    mid="Index â€” Hit Tickers",
+                    mid="Index — Hit Tickers",
                     right=f"Run {_now_et():%Y-%m-%d %H:%M} ET",
                 )
                 m.append(str(stamped_idx))
+                stamped_work_files.append(stamped_idx)
                 added += 1
     except Exception:
         # Index is best-effort; compilation should still succeed without it.
         pass
 
-    for p in collected:
+    for p in deduped:
         try:
-            title = p.stem.replace("_", " ").replace("-", " ")
+            title = _clean_report_visible_text(p.stem.replace("_", " ").replace("-", " "))
             stamped = _stamp_pdf(
                 p,
                 left=batch,
@@ -1453,6 +1662,7 @@ def compile_merged(batch: str, quarter: str, collected: List[Path], *, increment
                 right=f"Run {_now_et():%Y-%m-%d %H:%M} ET",
             )
             m.append(str(stamped))
+            stamped_work_files.append(stamped)
             added += 1
         except Exception:
             continue
@@ -1465,6 +1675,12 @@ def compile_merged(batch: str, quarter: str, collected: List[Path], *, increment
         m.write(str(out))
     finally:
         m.close()
+        for tmp_pdf in stamped_work_files:
+            try:
+                if tmp_pdf.exists() and tmp_pdf.name.endswith(".__cutler_stampwork.pdf"):
+                    tmp_pdf.unlink()
+            except Exception:
+                pass
 
     return out
 
@@ -1478,7 +1694,7 @@ def _get_sa_rapidapi_key() -> str:
     key = os.getenv("SA_RAPIDAPI_KEY")
     if not key:
         raise RuntimeError(
-            "SA_RAPIDAPI_KEY env var is not set â€“ add it to your .env for Seeking Alpha Analysis."
+            "SA_RAPIDAPI_KEY env var is not set — add it to your .env for Seeking Alpha Analysis."
         )
     return key
 
@@ -1648,7 +1864,7 @@ def fetch_sa_analysis_list(symbol: str, size: int = 10) -> list[dict]:
         publish_on = attrs.get("publishOn")
         title = attrs.get("title", "").strip()
 
-        # primary tickers come through as tag ids â€“ we just keep them for debugging;
+        # primary tickers come through as tag ids — we just keep them for debugging;
         # you already know which symbol you asked for.
         pt_data = ((rel.get("primaryTickers") or {}).get("data")) or []
         primary_ids = [
@@ -1703,7 +1919,7 @@ def clean_sa_html(html: str, max_len: Optional[int] = None) -> str:
     """
     Convert Seeking Alpha article HTML into clean, readable plain text.
 
-    - Turns block tags (p/div/br/li/h1â€“h6) into paragraph breaks.
+    - Turns block tags (p/div/br/li/h1?h6) into paragraph breaks.
     - Strips all other tags.
     - Normalises whitespace but *keeps* paragraph breaks.
     - Inserts spaces between digits and letters to fix things like
@@ -1773,7 +1989,7 @@ def build_sa_analysis_digest(
             date_str = art.published.split("T", 1)[0] if art.published else ""
             title = art.title or ""
             url = art.url or ""
-            lines.append(f"- {date_str} â€” {title} ({url})")
+            lines.append(f"- {date_str} — {title} ({url})")
         except Exception:
             continue
 
@@ -1782,7 +1998,7 @@ def build_sa_analysis_digest(
     system_msg = (
         "You are helping a fundamental portfolio manager at a small buy-side shop.\n"
         "You will receive a list of recent Seeking Alpha ANALYSIS articles for one ticker.\n"
-        "Write a concise bullet-point digest (4â€“7 bullets max) capturing:\n"
+        "Write a concise bullet-point digest (4–7 bullets max) capturing:\n"
         "- Overall stance (bullish / bearish / mixed) across authors\n"
         "- Key fundamental drivers mentioned (earnings, pipeline, margins, cash flow, etc.)\n"
         "- Any repeated risks or points of disagreement\n"
@@ -1868,7 +2084,7 @@ def clean_sa_html_to_markdown(raw_html: str) -> str:
 
 def draw_seeking_alpha_news_section() -> None:
     """
-    Seeking Alpha â€“ Analysis articles by ticker (RapidAPI).
+    Seeking Alpha — Analysis articles by ticker (RapidAPI).
 
     - Supports Batch mode (10 tickers per batch) and Manual mode (pick up to 10 tickers)
     - Caches fetched results in-session to avoid repeated API calls
@@ -2077,7 +2293,7 @@ def draw_seeking_alpha_news_section() -> None:
             st.rerun()
 
     ticker_name = _pretty_company_name(CUTLER_TICKERS.get(ticker))
-    st.markdown(f"**Currently viewing:** `{ticker}`" + (f" â€” {ticker_name}" if ticker_name else ""))
+    st.markdown(f"**Currently viewing:** `{ticker}`" + (f" — {ticker_name}" if ticker_name else ""))
 
     # ---------------- Controls ----------------
     max_articles = st.slider(
@@ -2241,13 +2457,13 @@ def draw_seeking_alpha_news_section() -> None:
         return score >= 2
 
     for i, a in enumerate(articles, start=1):
-        title = a.get("title") or f"Article {i}"
-        url = a.get("url") or a.get("link") or ""
-        body = (a.get("body_clean") or a.get("body") or "").strip()
+        title = clean_display_text(a.get("title") or f"Article {i}")
+        url = clean_display_text(a.get("url") or a.get("link") or "")
+        body = clean_display_text(a.get("body_clean") or a.get("body") or "").strip()
         # Normalize/choose author field defensively
-        author = (a.get("author") or a.get("author_name") or a.get("authorName") or "").strip()
+        author = clean_display_text(a.get("author") or a.get("author_name") or a.get("authorName") or "").strip()
 
-        exp_label = f"{i}. {title}" + (f" â€” {author}" if author else "")
+        exp_label = f"{i}. {title}" + (f" — {author}" if author else "")
         with st.expander(exp_label, expanded=False):
             if url:
                 st.markdown(f"Source: {url}")
@@ -2256,12 +2472,12 @@ def draw_seeking_alpha_news_section() -> None:
                 for p in paras:
                     if _must_read_para(p):
                         st.markdown(
-                            f"""<div style="background:#d9f7e5;padding:8px;border-radius:8px;margin:6px 0;">{p}</div>""",
+                            f"""<div style="background:#d9f7e5;padding:8px;border-radius:8px;margin:6px 0;">{clean_display_text(p)}</div>""",
                             unsafe_allow_html=True,
                         )
                     else:
                         st.markdown(
-                            f"""<div style="padding:6px 2px;margin:2px 0;">{p}</div>""",
+                            f"""<div style="padding:6px 2px;margin:2px 0;">{clean_display_text(p)}</div>""",
                             unsafe_allow_html=True,
                         )
             else:
@@ -2299,24 +2515,24 @@ def draw_seeking_alpha_news_section() -> None:
         )
 
         story = []
-        story.append(Paragraph("Cutler Capital â€“ Seeking Alpha Export", styles["Title"]))
+        story.append(Paragraph("Cutler Capital — Seeking Alpha Export", styles["Title"]))
         ts = datetime.now(ZoneInfo("America/New_York")).strftime("%m.%d.%y %I:%M %p ET")
-        story.append(Paragraph(f"Generated {escape(ts)} â€¢ Ticker: {escape(sym)}", styles["Normal"]))
+        story.append(Paragraph(f"Generated {escape(clean_display_text(ts))} • Ticker: {escape(clean_display_text(sym))}", styles["Normal"]))
         story.append(Spacer(1, 0.2 * inch))
 
         if digest_text:
             story.append(Paragraph("AI Digest", styles["Heading2"]))
-            story.append(Paragraph(escape(digest_text).replace("\n", "<br/>"), base))
+            story.append(Paragraph(escape(clean_display_text(digest_text)).replace("\n", "<br/>"), base))
             story.append(Spacer(1, 0.15 * inch))
 
         story.append(Paragraph("Articles", styles["Heading2"]))
         for idx, a in enumerate(articles, start=1):
-            title = a.get("title") or f"Article {idx}"
-            author = a.get("author") or a.get("author_name") or ""
-            url = a.get("url") or a.get("link") or ""
-            body = (a.get("body_clean") or a.get("body") or "").strip()
+            title = clean_display_text(a.get("title") or f"Article {idx}")
+            author = clean_display_text(a.get("author") or a.get("author_name") or "")
+            url = clean_display_text(a.get("url") or a.get("link") or "")
+            body = clean_display_text(a.get("body_clean") or a.get("body") or "").strip()
 
-            story.append(Paragraph(f"{idx}. {escape(title)}" + (f" â€” {escape(author)}" if author else ""), styles["Heading3"]))
+            story.append(Paragraph(f"{idx}. {escape(title)}" + (f" — {escape(author)}" if author else ""), styles["Heading3"]))
             if url:
                 story.append(Paragraph(f"Source: {escape(url)}", styles["Normal"]))
                 story.append(Spacer(1, 0.08 * inch))
@@ -2324,7 +2540,7 @@ def draw_seeking_alpha_news_section() -> None:
             if body:
                 paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
                 for p in paras:
-                    p_esc = escape(p)
+                    p_esc = escape(clean_display_text(p))
                     story.append(Paragraph(p_esc, must_style if _must_read_para(p) else base))
             else:
                 story.append(Paragraph("No body returned for this article.", base))
@@ -2374,7 +2590,7 @@ def draw_seeking_alpha_news_section() -> None:
 
                 # Ensure we have cached results for each ticker, even if user didn't click through Next/Prev
                 for i_sym, sym in enumerate(tickers_for_pdf):
-                    status.info(f"Preparing {sym} ({i_sym+1}/{len(tickers_for_pdf)}) for PDFâ€¦")
+                    status.info(f"Preparing {sym} ({i_sym+1}/{len(tickers_for_pdf)}) for PDF…")
                     progress.progress((i_sym)/max(1,len(tickers_for_pdf)))
                     ck_sym = _cache_key(sym, max_articles, model, include_ai_digest)
                     if ck_sym not in cache:
@@ -2458,7 +2674,7 @@ def draw_seeking_alpha_news_section() -> None:
                         if title:
                             header_bits.append(title)
                         if author:
-                            header_bits.append(f"â€” {author}")
+                            header_bits.append(f"— {author}")
                         header = " ".join(header_bits).strip()
                         if url:
                             header = f"{header}\nSource: {url}" if header else f"Source: {url}"
@@ -2562,7 +2778,7 @@ def draw_seeking_alpha_news_section() -> None:
 
                     out_pdf = td_path / "sa_compiled.pdf"
                     progress.progress(0.92)
-                    status.info("Rendering compiled PDF (Fund Families style)â€¦")
+                    status.info("Rendering compiled PDF (Fund Families style)…")
                     make_pdf.build_pdf(
                         excerpts_json_path=str(excerpts_path),
                         output_pdf_path=str(out_pdf),
@@ -2572,7 +2788,7 @@ def draw_seeking_alpha_news_section() -> None:
                         ai_score=True,
                         ai_model="heuristic",
                         include_index=True,
-                        index_label="Index â€” Hit Tickers",
+                        index_label="Index — Hit Tickers",
                     )
                     st.session_state["sa_pdf_bytes"] = out_pdf.read_bytes()
                     st.session_state["sa_pdf_name"] = pdf_name
@@ -2620,7 +2836,7 @@ def draw_substack_section():
       - per-ticker caps to control cost
       - compiled PDF export (skimmable, investment-grade) via make_pdf.py
     """
-    st.markdown("### Substack â€” recent posts (RapidAPI)")
+    st.markdown("### Substack — recent posts (RapidAPI)")
     st.caption(
         "We query Substack for recent, ticker-relevant posts and export a skimmable compiled PDF. "
         "Cost controls: strict lookback + per-ticker caps + we only fetch full post bodies for candidates "
@@ -2664,7 +2880,7 @@ def draw_substack_section():
 
     cached = st.session_state[cache_key].get(selected_ticker)
 
-    # Fetch button â€” only call API here
+    # Fetch button — only call API here
     run_clicked = st.button(
         f"Fetch Substack posts for {selected_ticker}",
         use_container_width=True,
@@ -2672,7 +2888,7 @@ def draw_substack_section():
     )
 
     if run_clicked:
-        with st.spinner("Querying Substackâ€¦"):
+        with st.spinner("Querying Substack…"):
             try:
                 cached = substack_excerpts.fetch_posts_for_ticker(
                     selected_ticker,
@@ -2703,8 +2919,8 @@ def draw_substack_section():
                 meta.append(author)
             if published:
                 meta.append(published[:19])
-            meta_s = " Â· ".join(meta)
-            header = f"{title}" + (f" â€” {meta_s}" if meta_s else "")
+            meta_s = " · ".join(meta)
+            header = f"{title}" + (f" — {meta_s}" if meta_s else "")
 
             with st.expander(header, expanded=False):
                 if url:
@@ -2712,8 +2928,8 @@ def draw_substack_section():
                 if excerpt:
                     max_chars = 4500
                     if len(excerpt) > max_chars:
-                        st.write(excerpt[:max_chars] + " â€¦")
-                        st.caption("Truncated â€” open on Substack to read the full post.")
+                        st.write(excerpt[:max_chars] + " …")
+                        st.caption("Truncated — open on Substack to read the full post.")
                     else:
                         st.write(excerpt)
                 else:
@@ -2786,12 +3002,12 @@ def draw_substack_section():
     if state and state.get("running") and (not state.get("done")):
         prog = st.progress(min(1.0, float(state.get("idx", 0)) / max(1, float(state.get("total", 1)))))
         status = st.empty()
-        status.info(f"Substack ALL â€” {state.get('idx', 0)}/{state.get('total', 0)} tickers processedâ€¦")
+        status.info(f"Substack ALL — {state.get('idx', 0)}/{state.get('total', 0)} tickers processed…")
 
         if state.get("error"):
             st.warning(state.get("error"))
 
-        with st.spinner("Continuing Substack buildâ€¦"):
+        with st.spinner("Continuing Substack build…"):
             _substack_all_run_step(state=state, batch_size=int(st.session_state.get("substack_all_batch_size", 3)), time_budget_s=float(st.session_state.get("substack_all_time_budget_s", 12.0)))
 
         st.session_state[run_key] = state
@@ -2833,7 +3049,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
     global_seen_post_ids: set[str] = set()
 
     for sym in universe:
-        status.info(f"Substack â€” fetching {sym} ({processed+1}/{total}) â€¦")
+        status.info(f"Substack — fetching {sym} ({processed+1}/{total})…")
         try:
             posts = substack_excerpts.fetch_posts_for_ticker(
                 sym,
@@ -2862,7 +3078,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
                 if title:
                     header_parts.append(title)
                 if author:
-                    header_parts.append(f"â€” {author}")
+                    header_parts.append(f"— {author}")
                 header = " ".join(header_parts).strip()
 
                 meta_lines = []
@@ -2932,7 +3148,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
                     ):
                         continue
 
-                    if ("this week" in _low and "events" in _low) or (_t.count("â– ") + _t.count("â¤") >= 4):
+                    if ("this week" in _low and "events" in _low) or (_t.count("â– ") + _t.count("…") >= 4):
                         continue
                     if len(_re.findall(r"(?:mon|tue|wed|thu|fri|sat|sun)", _low)) >= 3 and "feb" in _low:
                         continue
@@ -2986,7 +3202,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
     prog.empty()
     status.empty()
     if not combined:
-        combined = {"â€”": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
+        combined = {"…": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
 
     now_et = datetime.now(ZoneInfo("America/New_York"))
     pdf_name = f"{now_et.strftime('%m.%d.%y')} Substack ALL.pdf"
@@ -3008,7 +3224,7 @@ def _build_substack_compiled_pdf_for_universe(*, universe: list[str], lookback_d
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index â€” Hit Tickers",
+            index_label="Index — Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -3105,7 +3321,7 @@ def _sa_build_items_for_symbol(sym: str, *, max_articles: int, model: str) -> li
         if title:
             header_parts.append(title)
         if author:
-            header_parts.append(f"â€” {author}")
+            header_parts.append(f"— {author}")
         header = " ".join(header_parts).strip()
 
         meta_lines = []
@@ -3199,7 +3415,7 @@ def _runall_sa_step_incremental(*, universe: list[str], max_articles: int, model
     idx = max(0, min(idx, len(universe)))
 
     st.progress(float(idx) / float(total))
-    st.caption(f"Run All: Seeking Alpha progress â€” {idx}/{total} tickers")
+    st.caption(f"Run All: Seeking Alpha progress — {idx}/{total} tickers")
 
     if idx < len(universe):
         sym = universe[idx]
@@ -3237,7 +3453,7 @@ def _runall_sa_step_incremental(*, universe: list[str], max_articles: int, model
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index â€” Hit Tickers",
+            index_label="Index — Hit Tickers",
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(out_pdf.read_bytes())
@@ -3276,7 +3492,7 @@ def _substack_build_items_for_symbol(sym: str, *, lookback_days: int, max_posts:
         if title:
             header_parts.append(title)
         if author:
-            header_parts.append(f"â€” {author}")
+            header_parts.append(f"— {author}")
         header = " ".join(header_parts).strip()
 
         meta_lines = []
@@ -3338,7 +3554,7 @@ def _substack_build_items_for_symbol(sym: str, *, lookback_days: int, max_posts:
             ):
                 continue
 
-            if ("this week" in _low and "events" in _low) or (_t.count("â– ") + _t.count("â¤") >= 4):
+            if ("this week" in _low and "events" in _low) or (_t.count("â– ") + _t.count("…") >= 4):
                 continue
             if len(_re.findall(r"\b(?:mon|tue|wed|thu|fri|sat|sun)\b", _low)) >= 3 and "feb" in _low:
                 continue
@@ -3411,7 +3627,7 @@ def _runall_substack_step_incremental(*, universe: list[str], lookback_days: int
     idx = max(0, min(idx, len(universe)))
 
     st.progress(float(idx) / float(total))
-    st.caption(f"Run All: Substack progress â€” {idx}/{total} tickers")
+    st.caption(f"Run All: Substack progress — {idx}/{total} tickers")
 
     if idx < len(universe):
         sym = universe[idx]
@@ -3434,7 +3650,7 @@ def _runall_substack_step_incremental(*, universe: list[str], lookback_days: int
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not combined:
-        combined = {"â€”": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
+        combined = {"…": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
@@ -3450,7 +3666,7 @@ def _runall_substack_step_incremental(*, universe: list[str], lookback_days: int
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index â€” Hit Tickers",
+            index_label="Index — Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -3479,7 +3695,7 @@ def _render_substack_compiled_pdf_from_combined(*, combined: dict[str, list[dict
     # If filters are very strict, it's possible to have zero qualifying hits.
     # We still generate a small PDF so the UI shows a download button (and Run All can proceed).
     if not combined or not any((v or []) for v in combined.values()):
-        combined = {"â€”": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
+        combined = {"…": [{"text": "No qualifying Substack excerpts found for the selected lookback window and filters.\nTry a longer lookback or higher cap if you want broader coverage.", "pages": []}]}
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
@@ -3496,7 +3712,7 @@ def _render_substack_compiled_pdf_from_combined(*, combined: dict[str, list[dict
             ai_score=True,
             ai_model="heuristic",
             include_index=True,
-            index_label="Index â€” Hit Tickers",
+            index_label="Index — Hit Tickers",
         )
         out_path.write_bytes(out_pdf.read_bytes())
 
@@ -3890,7 +4106,7 @@ def _podcast_run_all_group_ids(n_groups: int = 9) -> list[list[str]]:
 
 
 def draw_podcast_intelligence_section():
-    st.subheader("Podcast Intelligence â€“ Company mentions across finance podcasts")
+    st.subheader("Podcast Intelligence — Company mentions across finance podcasts")
 
     # -------------------------
     # 0) Session cache init
@@ -3947,7 +4163,7 @@ def draw_podcast_intelligence_section():
     days_back = max(1, (date_to - date_from).days + 1)
     st.caption(
         f"{days_back} day lookback window "
-        f"({date_from.isoformat()} â€“ {date_to.isoformat()})."
+        f"({date_from.isoformat()} — {date_to.isoformat()})."
     )
 
     # -------------------------
@@ -4171,7 +4387,7 @@ def draw_podcast_intelligence_section():
 
                 # Build sections: stance summary + up to 25 evidence snippets
                 sections: list[tuple[str, str]] = []
-                sections.append((f"{tkr} â€“ AI Podcast Stance", f"{stance_label}\n\n{stance_summary}"))
+                sections.append((f"{tkr} — AI Podcast Stance", f"{stance_label}\n\n{stance_summary}"))
 
                 # Snippet evidence
                 ev_lines: list[str] = []
@@ -4180,16 +4396,16 @@ def draw_podcast_intelligence_section():
                     ep_title = sn.get("episode_title") or sn.get("episode") or sn.get("title") or ""
                     ep_date = sn.get("published_date") or sn.get("date") or sn.get("published") or ""
                     txt = sn.get("text") or sn.get("snippet") or ""
-                    header = f"{pod_name} â€” {ep_title}".strip(" â€”")
+                    header = f"{pod_name} — {ep_title}".strip(" …")
                     line = f"{i}. {header} ({ep_date}){txt}"
                     ev_lines.append(line.strip())
                 sections.append(("Episode snippets (evidence)", "\n\n".join(ev_lines) if ev_lines else "No snippets available in this window."))
 
-                subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} â€¢ Podcasts: {selected_group_label} â€¢ Window: {date_from} â†’ {date_to}"
+                subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} — Podcasts: {selected_group_label} — Window: {date_from} — {date_to}"
                 try:
                     pdf_path = _build_text_pdf(
                         output_path=out_path,
-                        title="Cutler Capital â€“ Podcast Intelligence",
+                        title="Cutler Capital — Podcast Intelligence",
                         subtitle=subtitle,
                         sections=sections,
                     )
@@ -4225,7 +4441,7 @@ def draw_podcast_intelligence_section():
                 title = s.get("title", "Untitled episode")
                 pod_name = s.get("podcast_name", s.get("podcast_id", ""))
                 pub = s.get("published", "")
-                header = f"{pod_name} â€“ {title} ({pub[:10]})"
+                header = f"{pod_name} — {title} ({pub[:10]})"
 
                 with st.expander(header):
                     st.write(s.get("snippet", ""))
@@ -4276,7 +4492,7 @@ def draw_podcast_intelligence_section():
         pod_id = ep.get("podcast_id", "Unknown podcast")
         title = ep.get("title", "Untitled episode")
         pub = (ep.get("published") or "")[:10]
-        header = f"{pod_id} â€“ {title} ({pub})"
+        header = f"{pod_id} — {title} ({pub})"
 
         with st.expander(header):
             summary = ep.get("summary") or ep.get(
@@ -4431,7 +4647,7 @@ def build_delta_pdf(old_manifest: Dict[str, Any], new_manifest: Dict[str, Any]) 
                     continue  # already existed in the older run
 
                 pages = item.get("pages") or []
-                decorated = f"[{meta.get('fund_family', 'Unknown')} â€“ {meta.get('source_pdf_name', '')}] {txt}"
+                decorated = f"[{meta.get('fund_family', 'Unknown')} — {meta.get('source_pdf_name', '')}] {txt}"
                 aggregated.setdefault(str(ticker), []).append(
                     {"text": decorated, "pages": pages}
                 )
@@ -4553,10 +4769,10 @@ def _last_completed_us_quarter(today: Optional[datetime] = None) -> Tuple[int, i
     """
     Given today's date, return (year, quarter) for the **last completed US quarter**.
     US quarters:
-      Q1: Janâ€“Mar
-      Q2: Aprâ€“Jun
-      Q3: Julâ€“Sep
-      Q4: Octâ€“Dec
+      Q1: Jan–Mar
+      Q2: Apr–Jun
+      Q3: Jul–Sep
+      Q4: Oct–Dec
     """
     if today is None:
         today = datetime.now()
@@ -4678,7 +4894,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                                 item.get("fund_name") or "",
                                 item.get("letter_date") or "",
                             ]
-                            label_text = " â€“ ".join([b for b in label_bits if b])
+                            label_text = " — ".join([b for b in label_bits if b])
 
                             if pdf_path.exists():
                                 try:
@@ -4700,7 +4916,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 
     # Ensure Chromium exists in this container (auto-install if needed)
     if not ensure_playwright_chromium_installed():
-        st.error("Cannot proceed â€” Chromium is not available.")
+        st.error("Cannot proceed — Chromium is not available.")
         return
 
     brands = RUNNABLE_BATCHES.get(batch_name, [])
@@ -4740,7 +4956,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
             page.goto(BSD_URL)
 
             for q in quarters:
-                st.write(f"Searching quarter {q} across {len(tokens)} fund familiesâ€¦")
+                st.write(f"Searching quarter {q} across {len(tokens)} fund families…")
 
                 if not _set_quarter(page, q):
                     st.warning(
@@ -4774,7 +4990,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                         st.info(f"[{q}] Skipping {brand} (already completed in this container).")
                         continue
 
-                    st.write(f"[{q}] {i}/{len(tokens)} â€” {brand} (search: {token})")
+                    st.write(f"[{q}] {i}/{len(tokens)} — {brand} (search: {token})")
 
                     try:
                         _search_by_fund(page, token)
@@ -4840,7 +5056,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 
                     except Exception as e:
                         st.error(f"Error on fund family {brand}: {e}")
-                        # do NOT mark this brand as done â€“ we want to retry on next run
+                        # do NOT mark this brand as done — we want to retry on next run
                         continue
 
                     # If we reach here, the search for this brand+quarter finished without error,
@@ -4891,7 +5107,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
                                     item.get("fund_name") or "",
                                     item.get("letter_date") or "",
                                 ]
-                                label_text = " â€“ ".join([b for b in label_bits if b])
+                                label_text = " — ".join([b for b in label_bits if b])
 
                                 if pdf_path.exists():
                                     try:
@@ -4940,7 +5156,7 @@ def run_batch(batch_name: str, quarters: List[str], use_first_word: bool, subset
 
 def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_word: bool, *, ensure_compiled_index: bool = False):
     """
-    Batch 8 â€” Latest direct flow:
+    Batch 8 — Latest direct flow:
     Chromium -> BSD login -> latest-table date match -> View letter page
     -> DOWNLOAD LETTER -> excerption / AI scoring -> compiled PDF.
 
@@ -5094,7 +5310,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         return
 
     if not _ensure_chromium_ready():
-        st.error("Cannot proceed â€” Chromium is not available.")
+        st.error("Cannot proceed — Chromium is not available.")
         return
 
     exact_lookup, norm_lookup = _build_fund_to_batch_lookup()
@@ -5133,10 +5349,10 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
         page.set_default_timeout(30000)
 
         try:
-            st.write("Opening BSD databaseâ€¦")
+            st.write("Opening BSD database…")
             page.goto(BSD_URL, wait_until="domcontentloaded", timeout=45000)
 
-            st.write("Checking BSD login/sessionâ€¦")
+            st.write("Checking BSD login/session…")
             _ensure_bsd_logged_in(ctx, page)
             st.success("BSD login/session ready.")
 
@@ -5154,7 +5370,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
             except Exception:
                 pass
 
-            st.write(f"Matching latest table dates for window {start_date.isoformat()} â†’ {today.isoformat()} â€¦")
+            st.write(f"Matching latest table dates for window {start_date.isoformat()} — {today.isoformat()} …")
 
             rows = page.locator(TABLE_ROW)
             row_count = rows.count()
@@ -5164,7 +5380,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
 
             for i in range(row_count):
                 try:
-                    scan_status.info(f"Matching date row {i + 1}/{row_count}â€¦")
+                    scan_status.info(f"Matching date row {i + 1}/{row_count}…")
                     scan_prog.progress((i + 1) / max(1, row_count))
 
                     row = rows.nth(i)
@@ -5191,7 +5407,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     if not fund_name:
                         continue
 
-                    st.caption(f"[MATCH] {q_row} â€” {fund_name} ({letter_date_str})")
+                    st.caption(f"[MATCH] {q_row} — {fund_name} ({letter_date_str})")
 
                     hits_by_quarter.setdefault(q_row, []).append(
                         Hit(
@@ -5237,7 +5453,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     process_status.info(f"Processing letter {processed_count}/{total_hits}: {brand}")
                     process_prog.progress(processed_count / max(1, total_hits))
 
-                    st.write(f"[{q}] Latest â€” {brand} ({h.letter_date})")
+                    st.write(f"[{q}] Latest — {brand} ({h.letter_date})")
 
                     if _already_completed(brand, q):
                         st.info(f"[{q}] Already completed; recovering existing excerpt PDFs from disk.")
@@ -5378,7 +5594,7 @@ def run_batch8_latest(quarter_options: List[str], lookback_days: int, use_first_
                     seen_paths.add(rp)
                     deduped_excerpt_pdfs.append(Path(p))
 
-                st.write(f"[{q}] Compiling {len(deduped_excerpt_pdfs)} excerpt PDF(s)â€¦")
+                st.write(f"[{q}] Compiling {len(deduped_excerpt_pdfs)} excerpt PDF(s)…")
                 compiled = compile_merged(BATCH8_NAME, q, deduped_excerpt_pdfs, incremental=False)
 
                 if compiled and Path(compiled).exists():
@@ -5435,7 +5651,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
       - If table_rows unchanged => nothing to do.
       - If some rows are new/changed => downloads and processes only those.
     """
-    st.markdown(f"### Incremental update â€“ {batch_name} / {quarter}")
+    st.markdown(f"### Incremental update — {batch_name} / {quarter}")
 
     manifests = _load_manifests(batch_name, quarter)
     if not manifests:
@@ -5484,7 +5700,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
         page.set_default_timeout(30000)
         page.goto(BSD_URL)
 
-        st.write(f"Scanning BSD table for {batch_name} / {quarter} (no downloads yet)â€¦")
+        st.write(f"Scanning BSD table for {batch_name} / {quarter} (no downloads yet)…")
 
         if not _set_quarter(page, quarter):
             st.warning(
@@ -5496,7 +5712,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
 
         # scan table rows for all brands
         for i, (brand, token) in enumerate(tokens, 1):
-            st.write(f"[{quarter}] {i}/{len(tokens)} â€” {brand} (search: {token})")
+            st.write(f"[{quarter}] {i}/{len(tokens)} — {brand} (search: {token})")
             try:
                 _search_by_fund(page, token)
                 hits = _parse_rows(page, quarter)
@@ -5530,7 +5746,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
             browser.close()
             return
 
-        st.write(f"Found {len(new_keys)} new or changed table rows. Downloading only thoseâ€¦")
+        st.write(f"Found {len(new_keys)} new or changed table rows. Downloading only those…")
 
         outs: List[Path] = []
         manifest_items: List[Dict[str, Any]] = []
@@ -5552,7 +5768,7 @@ def run_incremental_update(batch_name: str, quarter: str, use_first_word: bool):
             processed_hrefs.add(href)
 
             try:
-                st.write(f"Downloading new/updated letter for {brand} â€“ {fund_name} ({letter_date})")
+                st.write(f"Downloading new/updated letter for {brand} — {fund_name} ({letter_date})")
                 page.goto(href)
                 page.wait_for_load_state("domcontentloaded")
 
@@ -7031,7 +7247,7 @@ def draw_daily_research_brief_section() -> None:
             st.info("Process a daily research ZIP to generate a ticker-level memo.")
 
     with daily_cross_tab:
-        st.markdown("#### Cross-Day Comparison / What Changed?")
+        st.markdown("#### Cross-Day Comparison / What Changed…")
         st.caption(
             "Compare two daily research ZIPs using filename, ticker, source, document-type, priority, "
             "size, and modified-date metadata."
@@ -7318,13 +7534,13 @@ def draw_daily_research_brief_section() -> None:
             })
             search_query = st.text_input(
                 "Ask a research question",
-                placeholder="What did brokers say about AMZN?",
+                placeholder="What did brokers say about AMZN…",
                 key="daily_research_search_query",
             )
             st.caption(
                 "Try: What did brokers say about AMZN? / Find reports mentioning capex / "
                 "Show credit reports mentioning liquidity / Which tickers had new broker coverage? / "
-                "Show Green Street recommendation-change reports / What evidence mentions margin expansion?"
+                "Show Green Street recommendation-change reports / What evidence mentions margin expansion…"
             )
             filter_one, filter_two, filter_three = st.columns(3)
             with filter_one:
@@ -7573,6 +7789,7 @@ def draw_daily_research_brief_section() -> None:
                     mode=brief_mode,
                     watchlist=brief_watchlist,
                 )
+                brief = clean_display_text(brief)
             st.session_state["daily_brief_deep_selected_df"] = deep_selected_df
             st.session_state["daily_brief_selected_text"] = brief_selected_text
             st.session_state["daily_brief_text"] = brief
@@ -7580,7 +7797,7 @@ def draw_daily_research_brief_section() -> None:
             st.session_state["daily_brief_warning"] = brief_warning
             st.success("Daily brief generated.")
 
-        brief_text = st.session_state.get("daily_brief_text") or ""
+        brief_text = clean_display_text(st.session_state.get("daily_brief_text") or "")
         if brief_text:
             method = st.session_state.get("daily_brief_method") or "deterministic_source_grounded"
             st.caption(f"Generation method: {method}")
@@ -7902,20 +8119,16 @@ def main():
         value=True,
     )
 
-    # Optional: AI relevance scoring inside excerpt PDFs (adds 1â€“5 rating + highlight per paragraph)
+    # Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
     ai_score_enabled = st.sidebar.checkbox(
-        "AI relevance scoring (1â€“5 highlights)",
-        value=False,
+        "AI relevance scoring (1–5 highlights)",
+        value=True,
         help="Uses OpenAI to rate how directly a paragraph discusses the company. "
              "Adds a rating tag and background highlight for faster skimming.",
         key="ai_score_enabled",
     )
-    ai_score_model = st.sidebar.text_input(
-        "AI model (for relevance scoring)",
-        value="gpt-4o-mini",
-        help="Used only if AI relevance scoring is enabled.",
-        key="ai_score_model",
-    )
+    ai_score_model = "gpt-4o-mini"
+    st.session_state["ai_score_model"] = ai_score_model
 
     batch_names = list(RUNNABLE_BATCHES.keys())
 
@@ -8165,7 +8378,7 @@ def main():
             if step == "fund_families":
                 days = int(cfg.get("mf_lookback_days", 7))
                 # NOTE: Do not wrap Fund Families in st.status(expanded=True) because Fund Families uses expanders internally.
-                st.info(f"Run All: Fund Families â€” Batch 8 Latest (last {days} days)")
+                st.info(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
                 quarter_options = get_available_quarters()
                 run_batch8_latest(quarter_options, days, use_first_word, ensure_compiled_index=True)
                 cache_all = st.session_state.get("batch_cache", {}) or {}
@@ -8196,7 +8409,7 @@ def main():
             if step == "seeking_alpha":
                 max_articles = int(cfg.get("sa_max_articles", 5))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
-                with st.status("Run All: Seeking Alpha â€” building compiled PDF for ALL tickers", expanded=True):
+                with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
                     universe = []
                     try:
                         from tickers import tickers as _T  # type: ignore
@@ -8218,7 +8431,7 @@ def main():
             if step == "substack":
                 days_back = int(cfg.get("substack_lookback_days", 2))
                 max_posts = int(cfg.get("substack_max_posts", 3))
-                with st.status(f"Run All: Substack â€” building compiled PDF (last {days_back} days)", expanded=True):
+                with st.status(f"Run All: Substack — building compiled PDF (last {days_back} days)", expanded=True):
                     try:
                         from tickers import tickers as _T  # type: ignore
                         universe = []
@@ -8302,7 +8515,7 @@ def main():
                 _prog_den = max(1, int(total_groups))
                 _prog_num = min(_prog_den, int(_completed_groups_n))
                 st.progress(float(_prog_num) / float(_prog_den))
-                st.caption(f"Run All: Podcasts progress â€” {_prog_num}/{_prog_den} groups complete")
+                st.caption(f"Run All: Podcasts progress — {_prog_num}/{_prog_den} groups complete")
 
 
 
@@ -8313,7 +8526,7 @@ def main():
                     # Process one group per rerun for stability
                     if group_index < total_groups:
                         with st.status(
-                            f"Run All: Podcasts â€” processing group {group_index + 1}/{total_groups} (last {days_back} days)",
+                            f"Run All: Podcasts — processing group {group_index + 1}/{total_groups} (last {days_back} days)",
                             expanded=True,
                         ):
                             podcast_ids = groups[group_index] or []
@@ -8359,7 +8572,7 @@ def main():
 
                     # All groups done -> merge and build final PDF once
                     with st.status(
-                        f"Run All: Podcasts â€” merging groups and building compiled PDF (last {days_back} days)",
+                        f"Run All: Podcasts — merging groups and building compiled PDF (last {days_back} days)",
                         expanded=True,
                     ):
                         merged_excerpts: dict = {}
@@ -8436,7 +8649,7 @@ def main():
             )
             st.rerun()
 
-        # Main controls in a card â€“ full run
+        # Main controls in a card — full run
         with st.container():
             st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
             st.markdown("#### Run scope", unsafe_allow_html=True)
@@ -8444,7 +8657,7 @@ def main():
 
             run_mode = st.radio(
                 "Run mode",
-                ["Run all 7 batches", "Run a specific batch", "Run Batch 8 â€” Latest"],
+                ["Run all 7 batches", "Run a specific batch", "Run Batch 8 — Latest"],
                 index=1,
             )
 
@@ -8458,7 +8671,7 @@ def main():
                         run_batch(bn, quarters, use_first_word, subset=None)
                     st.markdown("</div>", unsafe_allow_html=True)
                     st.stop()
-            elif run_mode == "Run Batch 8 â€” Latest":
+            elif run_mode == "Run Batch 8 — Latest":
                 lookback_days = st.selectbox(
                     "Lookback window (days)",
                     options=[7, 14, 30],
@@ -8466,9 +8679,9 @@ def main():
                 )
                 st.info(
                     "Batch 8 scans the BSD database for anything published within the lookback window. "
-                    "If a fund matches one of Batch 1â€“7 names, it is labeled with that batch for traceability."
+                    "If a fund matches one of Batch 1–7 names, it is labeled with that batch for traceability."
                 )
-                if st.button("Run Batch 8 â€” Latest", use_container_width=True):
+                if st.button("Run Batch 8 — Latest", use_container_width=True):
                     run_batch8_latest(quarter_options, int(lookback_days), use_first_word)
                     st.markdown("</div>", unsafe_allow_html=True)
             else:
@@ -8573,7 +8786,7 @@ def main():
             )
         else:
             labels = [
-                f"{i+1}. {m.get('created_at', '')} â€“ {Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
+                f"{i+1}. {m.get('created_at', '')} — {Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
                 for i, m in enumerate(manifests)
             ]
             idx_new = 0
@@ -8625,7 +8838,7 @@ def main():
 
             # ---------- AI Insights: Buy / Hold / Sell ----------
         st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-        st.markdown("#### AI Insights â€“ Buy / Hold / Sell by company", unsafe_allow_html=True)
+        st.markdown("#### AI Insights — Buy / Hold / Sell by company", unsafe_allow_html=True)
         st.write(
             "Use OpenAI to classify each ticker in a compiled run as **buy**, **hold**, "
             "**sell**, or **unclear**, with reasoning grounded in the excerpted letters."
@@ -8652,12 +8865,12 @@ def main():
             )
         else:
             labels = [
-                f"{i+1}. {m.get('created_at', '')} â€“ "
+                f"{i+1}. {m.get('created_at', '')} — "
                 f"{Path(m.get('compiled_pdf', '')).name or '[no compiled PDF]'}"
                 for i, m in enumerate(ai_manifests)
             ]
             ai_manifest_idx = st.selectbox(
-                "Which run should the AI analyse?",
+                "Which run should the AI analyse…",
                 options=list(range(len(ai_manifests))),
                 format_func=lambda i: labels[i],
                 index=0,
@@ -8679,7 +8892,7 @@ def main():
             results: List[Dict[str, Any]] = []
             if st.button("Run AI analysis for this run", key="ai_run_btn"):
                 manifest = ai_manifests[ai_manifest_idx]
-                with st.spinner("Calling OpenAI for ticker-level stancesâ€¦"):
+                with st.spinner("Calling OpenAI for ticker-level stances…"):
                     try:
                         results = ai_insights.generate_ticker_stances(
                             manifest=manifest,
@@ -8717,7 +8930,7 @@ def main():
                 ticker_options = [row["Ticker"] for row in summary_rows]
                 if ticker_options:
                     focus_ticker = st.selectbox(
-                        "Detailed view â€“ choose a ticker",
+                        "Detailed view — choose a ticker",
                         options=ticker_options,
                         key="ai_focus_ticker",
                     )
@@ -8727,7 +8940,7 @@ def main():
                         stance = (detail.get("stance") or "").lower()
                         conf = float(detail.get("confidence") or 0.0)
 
-                        # Map stance + confidence to a 0â€“1 position for the gauge
+                        # Map stance + confidence to a 0–1 position for the gauge
                         if stance == "buy":
                             pos = 0.5 + 0.5 * conf
                         elif stance == "sell":
@@ -8797,13 +9010,13 @@ def main():
         if selected_tickers and len(selected_tickers) > 1:
             col_prev, col_spacer, col_next = st.columns([1, 3, 1])
             with col_next:
-                if st.button("Next ticker â–¶", key="sa_next_ticker"):
+                if st.button("Next ticker …", key="sa_next_ticker"):
                     current_idx = st.session_state.get("sa_current_index", 0)
                     next_idx = (current_idx + 1) % len(selected_tickers)
                     st.session_state["sa_current_index"] = next_idx
                     st.rerun()
             with col_prev:
-                if st.button("â—€ Previous", key="sa_prev_ticker"):
+                if st.button("◀ Previous", key="sa_prev_ticker"):
                     current_idx = st.session_state.get("sa_current_index", 0)
                     prev_idx = (current_idx - 1) % len(selected_tickers)
                     st.session_state["sa_current_index"] = prev_idx

@@ -3,6 +3,29 @@
 # Usage:    python excerpt_check.py ".\baron-funds-quarterly-report-6.30.2025.pdf"
 
 import json
+
+
+def clean_display_text(text):
+    """Normalize mojibake before text is displayed or written to reports."""
+    if text is None:
+        return ""
+    s = str(text)
+    replacements = {
+        "\u00e2\u20ac\u201d": "\u2014",
+        "\u00e2\u20ac\u201c": "\u2013",
+        "\u00e2\u20ac\u00a6": "\u2026",
+        "\u00e2\u20ac\u00a2": "\u2022",
+        "\u00e2\u2020\u2019": "\u2192",
+        "\u00e2\u2013\u00b6": "\u25b6",
+        "\u00e2\u2014\u20ac": "\u25c0",
+        "\u00e2\u009d\u00a4": "\u2764",
+        "\u00c2": "",
+        "\u00ef\u00bf\u00bd": "",
+        "\ufffd": "",
+    }
+    for bad, good in replacements.items():
+        s = s.replace(bad, good)
+    return s
 import re
 import sys
 from pathlib import Path
@@ -23,7 +46,7 @@ except ImportError as e:
 SENTENCE_END_RE = re.compile(r'[.!?…]["”’\)\]]*\s*$')
 
 def normalize_block_text(text: str) -> str:
-    t = text.replace('\r\n', '\n').replace('\r', '\n')
+    t = clean_display_text(text).replace('\r\n', '\n').replace('\r', '\n')
     # Fix soft wraps: "exam-\nple" -> "example"
     t = re.sub(r'-\n(?=\w)', '', t)
     # Temporarily mark blank-line breaks

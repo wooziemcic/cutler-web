@@ -24,7 +24,32 @@ from reportlab.platypus import (
     Table,
     TableStyle,
     PageBreak,
+    KeepTogether,
 )
+
+
+def clean_display_text(text):
+    """Normalize mojibake before rendering UI text or downloadable report text."""
+    if text is None:
+        return ""
+    s = str(text)
+    replacements = {
+        "\u00e2\u20ac\u201d": "\u2014",
+        "\u00e2\u20ac\u201c": "\u2013",
+        "\u00e2\u20ac\u00a6": "\u2026",
+        "\u00e2\u20ac\u00a2": "\u2022",
+        "\u00e2\u2020\u2019": "\u2192",
+        "\u00e2\u2013\u00b6": "\u25b6",
+        "\u00e2\u2014\u20ac": "\u25c0",
+        "\u00e2\u009d\u00a4": "\u2764",
+        "\u00c2": "",
+        "\u00ef\u00bf\u00bd": "",
+        "\ufffd": "",
+    }
+    for bad, good in replacements.items():
+        s = s.replace(bad, good)
+    return s
+
 
 # ---------- Styles ----------
 
@@ -171,13 +196,53 @@ def _pages_text(pages: List[int]) -> str:
     return ", ".join(str(p) for p in pages) if pages else "—"
 
 
+def _clean_visible_source_name(value: str) -> str:
+    """Remove internal/temp file markers from visible report text."""
+    s = clean_display_text(value)
+    s = re.sub(r"\.stamped\.tmp(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\.tmp(?=\.pdf|\b)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _normalized_report_text_key(text: str) -> str:
+    s = clean_display_text(text)
+    s = _clean_visible_source_name(s)
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
+
+
+def _shorten_at_sentence_boundary(text: str, max_words: int) -> str:
+    """Shorten long text without cutting mid-sentence whenever possible."""
+    text = clean_display_text(text).strip()
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept: List[str] = []
+    n = 0
+    for sentence in sentences:
+        w = len(sentence.split())
+        if kept and n + w > max_words:
+            break
+        if not kept and w > max_words:
+            return " ".join(sentence.split()[:max_words]).rstrip(" ,;:") + "... [excerpt shortened]"
+        kept.append(sentence)
+        n += w
+    shortened = " ".join(kept).strip()
+    if not shortened:
+        shortened = " ".join(words[:max_words]).rstrip(" ,;:")
+    return shortened.rstrip() + " [excerpt shortened]"
+
+
 def _chunk_text(txt: str, max_words: int = 140) -> List[str]:
     """
     Split long text into reasonably sized paragraphs.
     """
-    txt = txt.strip()
+    txt = clean_display_text(txt).strip()
     if not txt:
         return []
+    txt = _shorten_at_sentence_boundary(txt, max_words=max(max_words * 3, max_words))
     parts = re.split(r"(?<=[.!?])\s+", txt)
     out: List[str] = []
     cur: List[str] = []
@@ -193,7 +258,7 @@ def _chunk_text(txt: str, max_words: int = 140) -> List[str]:
             n += w
     if cur:
         out.append(" ".join(cur))
-    return out
+    return [_shorten_at_sentence_boundary(x, max_words=max_words) for x in out if x.strip()]
 
 
 def _humanize_source_name(source_pdf_name: str) -> str:
@@ -201,7 +266,7 @@ def _humanize_source_name(source_pdf_name: str) -> str:
     Turn a raw filename like 'Q325-abrdn-Emerging-Markets-Fund-Commentary-1.pdf'
     into 'ABRDN Emerging Markets Fund Commentary'.
     """
-    stem = Path(source_pdf_name).stem
+    stem = Path(_clean_visible_source_name(source_pdf_name)).stem
     tokens = re.split(r"[_\-]+", stem)
     cleaned: List[str] = []
     for tok in tokens:
@@ -242,7 +307,7 @@ def _format_article_header_html(raw_txt: str) -> str:
       - bold Line 1
       - smaller Line(s) after
     """
-    s = (raw_txt or "").strip()
+    s = clean_display_text(raw_txt).strip()
     if not s:
         return ""
     lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
@@ -282,9 +347,9 @@ def _flatten_raw_items(data: Dict[str, Any]) -> List[RawItem]:
 
     if "companies" in data and isinstance(data["companies"], list):
         for c in data["companies"]:
-            tkr = str(c.get("ticker") or c.get("name") or "").strip() or "—"
+            tkr = clean_display_text(c.get("ticker") or c.get("name") or "").strip() or "—"
             for it in (c.get("items") or []):
-                txt = (it.get("text") or "").strip()
+                txt = clean_display_text(it.get("text") or "").strip()
                 if not txt:
                     continue
                 pages = _normalize_pages(it.get("pages"))
@@ -305,9 +370,9 @@ def _flatten_raw_items(data: Dict[str, Any]) -> List[RawItem]:
     for tkr, lst in data.items():
         if not isinstance(lst, list):
             continue
-        tkr_s = str(tkr).strip() or "—"
+        tkr_s = clean_display_text(tkr).strip() or "—"
         for it in lst:
-            txt = (it.get("text") or "").strip()
+            txt = clean_display_text(it.get("text") or "").strip()
             if not txt:
                 continue
             pages = _normalize_pages(it.get("pages"))
@@ -345,18 +410,25 @@ class Group:
 
 def _aggregate_paragraphs(raw_items: List[RawItem]) -> Dict[str, ParagraphAgg]:
     """
-    Aggregate duplicates by exact text, unioning tickers and pages.
-    Headers are NOT de-duped.
+    Aggregate duplicates by normalized text, unioning tickers and pages.
+    Header rows are lightly de-duped per ticker so repeated compiled sections
+    do not create repeated article/fund blocks.
     """
     agg: Dict[str, ParagraphAgg] = {}
+    seen_headers: Set[str] = set()
     for it in raw_items:
-        txt = it.text.strip()
+        txt = _clean_visible_source_name(it.text).strip()
         if not txt:
             continue
 
-        # headers must not be de-duplicated or merged across tickers
         if it.is_header:
-            k = f"__hdr__{it.ticker}__{it.order_hint[1]}"
+            hdr_key = hashlib.sha1(
+                f"{it.ticker}|{_normalized_report_text_key(txt)}".encode("utf-8", errors="ignore")
+            ).hexdigest()
+            if hdr_key in seen_headers:
+                continue
+            seen_headers.add(hdr_key)
+            k = f"__hdr__{hdr_key}"
             agg[k] = ParagraphAgg(
                 text=txt,
                 pages=set(it.pages),
@@ -366,8 +438,12 @@ def _aggregate_paragraphs(raw_items: List[RawItem]) -> Dict[str, ParagraphAgg]:
             )
             continue
 
-        if txt not in agg:
-            agg[txt] = ParagraphAgg(
+        norm_key = _normalized_report_text_key(txt)
+        if not norm_key:
+            continue
+        k = hashlib.sha1(norm_key.encode("utf-8", errors="ignore")).hexdigest()
+        if k not in agg:
+            agg[k] = ParagraphAgg(
                 text=txt,
                 pages=set(it.pages),
                 tickers={it.ticker},
@@ -375,7 +451,7 @@ def _aggregate_paragraphs(raw_items: List[RawItem]) -> Dict[str, ParagraphAgg]:
                 is_header=False,
             )
         else:
-            a = agg[txt]
+            a = agg[k]
             a.pages.update(it.pages)
             a.tickers.add(it.ticker)
             if it.order_hint < a.order_hint:
@@ -402,6 +478,8 @@ def _groups_from_agg(agg: Dict[str, ParagraphAgg]) -> List[Group]:
     groups: List[Group] = []
     for tickerset, items in by_tickerset.items():
         items.sort(key=lambda x: x["order_hint"])
+        if not any(not it.get("is_header") and str(it.get("text") or "").strip() for it in items):
+            continue
         pages_union = sorted({p for it in items for p in it["pages"]})
         first_order = min(it["order_hint"] for it in items)
         groups.append(
@@ -558,9 +636,9 @@ def _render_group_block_table(
     Left: combined company name(s) + tickers.
     Right: Pages + paragraphs.
     """
-    display_names = [name_map.get(t, t) for t in group.tickers]
-    left_title = ", ".join(display_names)
-    left_tickers = ", ".join(group.tickers)
+    display_names = [clean_display_text(name_map.get(t, t)) for t in group.tickers]
+    left_title = clean_display_text(", ".join(display_names))
+    left_tickers = clean_display_text(", ".join(group.tickers))
 
     left_html = f"{left_title}<br/><font size='9' color='#D1D5DB'>({left_tickers})</font>"
     header_pages_text = _pages_text(group.pages)
@@ -574,7 +652,7 @@ def _render_group_block_table(
     )
 
     for it in group.items:
-        txt = (it.get("text") or "").strip()
+        txt = clean_display_text(it.get("text") or "").strip()
         if not txt:
             continue
 
@@ -644,6 +722,7 @@ def _render_group_block_compact(
         spaceBefore=6,
         spaceAfter=6,
         borderPadding=((8, 10, 8, 10) if has_article_headers else (6, 8, 6, 8)),
+        keepWithNext=1,
     )
 
     meta_style = ParagraphStyle(
@@ -653,6 +732,7 @@ def _render_group_block_compact(
         leading=11,
         textColor=colors.HexColor("#6b4f7a"),
         spaceAfter=4,
+        keepWithNext=1,
     )
 
     body_style = ParagraphStyle(
@@ -663,6 +743,7 @@ def _render_group_block_compact(
         spaceAfter=5,
         splitLongWords=1,
         wordWrap="CJK",
+        keepWithNext=0,
     )
 
     # Fund Families numbering/hanging-indent style (unchanged)
@@ -703,9 +784,9 @@ def _render_group_block_compact(
                 spaceAfter=6,
             )
 
-    display_names = [name_map.get(t, t) for t in group.tickers]
-    title = ", ".join(display_names)
-    tickers = ", ".join(group.tickers)
+    display_names = [clean_display_text(name_map.get(t, t)) for t in group.tickers]
+    title = clean_display_text(", ".join(display_names))
+    tickers = clean_display_text(", ".join(group.tickers))
     pages = _pages_text(group.pages)
 
     def _emit_ticker_header() -> None:
@@ -727,7 +808,7 @@ def _render_group_block_compact(
     n = 1
 
     for it in group.items:
-        txt = (it.get("text") or "").strip()
+        txt = clean_display_text(it.get("text") or "").strip()
         if not txt:
             continue
 
@@ -868,6 +949,7 @@ def _render_index_page(
     if not tickers_in_doc:
         return
 
+    label = clean_display_text(label)
     story.append(Paragraph(f"{escape(label)}", IndexTitle))
     story.append(Paragraph(f"Hit tickers in this document: {len(tickers_in_doc)}", IndexNote))
 
@@ -883,8 +965,8 @@ def _render_index_page(
     for t in tickers_in_doc:
         rows.append(
             [
-                Paragraph(escape(t), IndexCell),
-                Paragraph(escape(name_map.get(t, t)), IndexCell),
+                Paragraph(escape(clean_display_text(t)), IndexCell),
+                Paragraph(escape(clean_display_text(name_map.get(t, t))), IndexCell),
             ]
         )
 
@@ -928,6 +1010,11 @@ def build_pdf(
 ) -> Optional[str]:
 
     here = Path(".").resolve()
+    report_title = clean_display_text(report_title)
+    source_pdf_name = clean_display_text(source_pdf_name) if source_pdf_name else source_pdf_name
+    letter_date = clean_display_text(letter_date) if letter_date else letter_date
+    source_url = clean_display_text(source_url) if source_url else source_url
+    index_label = clean_display_text(index_label)
     data = _read_excerpts(Path(excerpts_json_path))
     raw_items = _flatten_raw_items(data)
     if not raw_items:
@@ -966,20 +1053,20 @@ def build_pdf(
     story.append(Spacer(1, 0.1 * 72))
     story.append(Paragraph(f"for {now:%B %d, %Y}", CoverSub))
     story.append(Spacer(1, 0.2 * 72))
-    safe_title = escape(commentary_title)
+    safe_title = escape(clean_display_text(commentary_title))
     if source_url:
-        safe_url = escape(str(source_url))
+        safe_url = escape(clean_display_text(str(source_url)))
         story.append(Paragraph(f'<a href="{safe_url}">{safe_title}</a>', CoverDocTitle))
     else:
         story.append(Paragraph(safe_title, CoverDocTitle))
     story.append(Spacer(1, 0.15 * 72))
     story.append(Paragraph(f"Run: {now:%Y-%m-%d %H:%M:%S}", MetaX))
-    story.append(Paragraph(f"Source: {source_pdf_name}", MetaX))
+    story.append(Paragraph(f"Source: {escape(clean_display_text(source_pdf_name))}", MetaX))
     if source_url:
-        safe_url = escape(str(source_url))
+        safe_url = escape(clean_display_text(str(source_url)))
         story.append(Paragraph(f'Source link: <a href="{safe_url}">{safe_url}</a>', MetaX))
     if letter_date:
-        story.append(Paragraph(f"Letter Date: {letter_date}", MetaX))
+        story.append(Paragraph(f"Letter Date: {escape(clean_display_text(letter_date))}", MetaX))
     story.append(Spacer(1, 0.25 * 72))
 
     # Optional index page (lists tickers that have at least one excerpt)

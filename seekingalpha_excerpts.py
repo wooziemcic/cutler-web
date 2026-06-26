@@ -39,6 +39,29 @@ from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime, timedelta
 
 
+def clean_display_text(text):
+    """Normalize mojibake before text is displayed or written to reports."""
+    if text is None:
+        return ""
+    s = str(text)
+    replacements = {
+        "\u00e2\u20ac\u201d": "\u2014",
+        "\u00e2\u20ac\u201c": "\u2013",
+        "\u00e2\u20ac\u00a6": "\u2026",
+        "\u00e2\u20ac\u00a2": "\u2022",
+        "\u00e2\u2020\u2019": "\u2192",
+        "\u00e2\u2013\u00b6": "\u25b6",
+        "\u00e2\u2014\u20ac": "\u25c0",
+        "\u00e2\u009d\u00a4": "\u2764",
+        "\u00c2": "",
+        "\u00ef\u00bf\u00bd": "",
+        "\ufffd": "",
+    }
+    for bad, good in replacements.items():
+        s = s.replace(bad, good)
+    return s
+
+
 # ---------------------------------------------------------------------
 # Paths & logging
 # ---------------------------------------------------------------------
@@ -305,8 +328,8 @@ def _parse_sa_news(html: str, ticker: str, max_items: int = 40) -> List[Dict[str
         full_url = urljoin(base_url, href)
 
         item = {
-            "headline": title,
-            "url": full_url,
+            "headline": clean_display_text(title),
+            "url": clean_display_text(full_url),
             "date": published,
             "source": "Seeking Alpha",
             "ticker": ticker.upper(),
