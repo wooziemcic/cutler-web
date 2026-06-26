@@ -167,7 +167,7 @@ def _request_json(path: str, params: Dict[str, Any]) -> Any:
 
 
 def _get_company_context(ticker: str) -> Tuple[str, List[str]]:
-    """Best-effort company name/aliases from tickers.py (if available).
+    """Best-effort company name/aliases from live Google Sheet with local fallback.
 
     This stays optional so the module remains portable.
     """
@@ -175,8 +175,9 @@ def _get_company_context(ticker: str) -> Tuple[str, List[str]]:
     if not t:
         return "", []
     try:
-        from tickers import tickers as _T  # type: ignore
+        from live_tickers import get_ticker_universe  # type: ignore
 
+        _T = get_ticker_universe()
         row = (_T or {}).get(t) if isinstance(_T, dict) else None
         if isinstance(row, dict):
             name = str(row.get("name") or row.get("company") or row.get("long_name") or "").strip()
@@ -185,6 +186,9 @@ def _get_company_context(ticker: str) -> Tuple[str, List[str]]:
                 aliases = [aliases]
             aliases = [str(a).strip() for a in (aliases or []) if str(a).strip()]
             return name, aliases
+        if isinstance(row, list):
+            names = [str(a).strip() for a in row if str(a).strip()]
+            return (names[0] if names else ""), names[1:]
     except Exception:
         pass
     return "", []

@@ -218,11 +218,15 @@ def compile_keyword_regexes(tickers_dict: dict) -> dict:
 def load_tickers():
     sys.path.insert(0, str(Path(__file__).parent.resolve()))
     try:
-        from tickers import tickers  # type: ignore
+        from live_tickers import get_ticker_universe  # type: ignore
+        tickers = get_ticker_universe()
     except Exception as e:
-        raise SystemExit(f"Failed to import tickers from tickers.py: {e}")
+        try:
+            from tickers import tickers  # type: ignore
+        except Exception:
+            raise SystemExit(f"Failed to load live tickers or fallback tickers.py: {e}")
     if not isinstance(tickers, dict):
-        raise SystemExit("tickers.py must define a dict named `tickers`.")
+        raise SystemExit("Ticker source must provide a dict-like ticker mapping.")
     return tickers
 
 # --------------------------

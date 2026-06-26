@@ -31,7 +31,9 @@ import json
 import re
 from pathlib import Path
 
-from tickers import tickers  # full universe
+from live_tickers import get_ticker_universe
+
+tickers = get_ticker_universe()  # Google Sheet universe with local fallback
 
 
 def clean_display_text(text):
@@ -88,6 +90,55 @@ def normalize_text(t: str) -> str:
 
     # collapse whitespace
     return " ".join(t.split())
+
+
+_AD_OR_SPONSOR_TERMS = [
+    "sponsored by",
+    "brought to you by",
+    "this episode is sponsored",
+    "use code",
+    "promo code",
+    "visit",
+    "restrictions apply",
+    "offers may vary",
+    "subscribe",
+    "download the app",
+    "welcome to",
+    "commercial break",
+    "ad break",
+    "our sponsor",
+]
+
+_BUSINESS_CONTEXT_TERMS = [
+    "revenue", "earnings", "eps", "margin", "guidance", "valuation", "stock",
+    "shares", "market", "product", "operations", "regulatory", "strategy",
+    "capital allocation", "cash flow", "free cash flow", "balance sheet",
+    "debt", "credit", "pricing", "demand", "competition", "customer",
+    "management", "sales", "growth", "investment", "risk", "lawsuit",
+]
+
+
+def _is_ad_or_sponsor_text(text: str) -> bool:
+    low = normalize_text(text).lower()
+    return any(term in low for term in _AD_OR_SPONSOR_TERMS)
+
+
+def _has_business_context(text: str) -> bool:
+    low = normalize_text(text).lower()
+    return any(term in low for term in _BUSINESS_CONTEXT_TERMS)
+
+
+def score_podcast_relevance(snippet: str, ticker: str = "", company_names=None) -> tuple[int, str]:
+    if _is_ad_or_sponsor_text(snippet):
+        return 0, "filtered: ad read or sponsorship language"
+    if not _has_business_context(snippet):
+        return 20, "low: passing mention without business context"
+    low = normalize_text(snippet).lower()
+    if any(k in low for k in ("earnings", "revenue", "guidance", "stock", "valuation", "market", "cash flow")):
+        return 90, "high: market/stock/earnings discussion"
+    if any(k in low for k in ("product", "operations", "regulatory", "strategy", "capital allocation")):
+        return 75, "medium/high: business discussion"
+    return 60, "medium: business context"
 
 
 # -------------------------------
@@ -219,6 +270,8 @@ def extract_snippets(transcript: str, company_names, ticker=None, window=2):
             start = max(0, i - window)
             end = min(len(sentences), i + window + 1)
             block = " ".join(sentences[start:end]).strip()
+            if _is_ad_or_sponsor_text(block):
+                continue
             hits.append(block)
 
     return hits
@@ -274,11 +327,11 @@ def main():
     out_path = Path(args.out)
 
     if args.tickers:
-        universe = args.tickers
+        universe = [str(t).strip().upper() for t in args.tickers if str(t).strip()]
         print(f"[INFO] Using explicit tickers: {universe}")
     else:
         universe = list(tickers.keys())
-        print("[INFO] No tickers provided; using full Cutler universe from tickers.py")
+        print("[INFO] No tickers provided; using live Cutler ticker universe")
 
     # Output structure
     output_data = {t: [] for t in universe}
@@ -309,6 +362,8 @@ def main():
             title = meta.get("title", "")
             published = meta.get("published", "")
             episode_url = meta.get("episode_url", "")
+            podcast_name = meta.get("podcast_name", podcast_id)
+            transcript_source = meta.get("transcript_source", "unknown")
 
             transcript = load_transcript(txt_file)
             if not transcript.strip():
@@ -322,6 +377,7 @@ def main():
                 "title": title,
                 "published": published,
                 "episode_url": episode_url,
+                "transcript_source": transcript_source,
                 "transcript": transcript,
             }
 
@@ -343,16 +399,24 @@ def main():
                     # ----------------------------------------------------
                     if not _snippet_has_specific_alias(sn, names):
                         continue
+                    relevance_score, relevance_reason = score_podcast_relevance(sn, ticker=t, company_names=names)
+                    if relevance_score < 50:
+                        continue
 
                     output_data[t].append({
                         "ticker": t,
                         "company_names": names,
                         "snippet": sn,
                         "podcast_id": podcast_id,
+                        "podcast_name": podcast_name,
                         "episode_id": ep_id,
                         "title": title,
                         "published": published,
                         "episode_url": episode_url,
+                        "transcript_source": transcript_source,
+                        "evidence_confidence": "low" if transcript_source == "rss_summary" else "medium/high",
+                        "relevance_score": relevance_score,
+                        "relevance_reason": relevance_reason,
                     })
 
     non_empty = sum(len(v) for k, v in output_data.items() if k != "_episodes")

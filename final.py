@@ -235,7 +235,8 @@ except BaseException:
     AnalysisArticle = None
 from fund_families_biglist import BIG_LIST_RAW
 from podcasts_config import PODCASTS
-from tickers import tickers
+from live_tickers import get_ticker_load_status, get_ticker_universe, load_live_tickers
+tickers = get_ticker_universe()
 import math
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -1136,6 +1137,13 @@ def _podcast_company_context_ok(ticker: str, text: str) -> bool:
 def _classify_podcast_snippet(ticker: str, hit: dict | str) -> tuple[bool, str]:
     text = _podcast_snippet_text(hit)
     low = text.lower()
+    if isinstance(hit, dict):
+        try:
+            score = int(hit.get("relevance_score") or 0)
+            if score and score < 50:
+                return False, str(hit.get("relevance_reason") or "low relevance score")
+        except Exception:
+            pass
     if not text.strip():
         return False, "empty evidence"
     if any(term in low for term in _PODCAST_AD_TERMS):
@@ -1245,11 +1253,19 @@ def _build_podcast_all_pdf(
             continue
         conf = d.get("stance_confidence", 0.0)
         overall = d.get("overall_summary", "") or ""
+        valid_hits_for_sym = valid_excerpts_by_ticker.get(sym, []) if isinstance(valid_excerpts_by_ticker, dict) else []
+        episode_count = len({
+            str(h.get("episode_id") or h.get("title") or h.get("episode_url") or "")
+            for h in valid_hits_for_sym
+            if isinstance(h, dict)
+        })
         # Supporting points and risks (keep short)
         sp = d.get("supporting_points") or []
         rk = d.get("risks_or_headwinds") or []
 
         body_parts: list[str] = []
+        body_parts.append(f"Mention count: {len(valid_hits_for_sym)}")
+        body_parts.append(f"Podcast episode count: {episode_count}")
         body_parts.append(f"Stance: {stance} (confidence: {conf})")
         if overall:
             body_parts.append("")
@@ -1258,14 +1274,14 @@ def _build_podcast_all_pdf(
         if isinstance(sp, list) and sp:
             body_parts.append("")
             body_parts.append("Supporting points:")
-            for x in sp[:5]:
+            for x in sp[:3]:
                 if isinstance(x, str) and x.strip():
                     body_parts.append(f"- {x.strip()}")
 
         if isinstance(rk, list) and rk:
             body_parts.append("")
             body_parts.append("Risks / headwinds:")
-            for x in rk[:5]:
+            for x in rk[:3]:
                 if isinstance(x, str) and x.strip():
                     body_parts.append(f"- {x.strip()}")
 
@@ -1290,11 +1306,17 @@ def _build_podcast_all_pdf(
                 ep_title = str(h.get("title") or "").strip()
                 pid = str(h.get("podcast_id") or "").strip()
                 pname = _podcast_name_for_id(pid)
+                published = str(h.get("published") or h.get("published_date") or h.get("date") or "").strip()
+                transcript_source = str(h.get("transcript_source") or h.get("evidence_source") or "").strip()
                 prefix_parts = []
                 if pname:
                     prefix_parts.append(pname)
                 if ep_title:
                     prefix_parts.append(ep_title)
+                if published:
+                    prefix_parts.append(published[:10])
+                if transcript_source:
+                    prefix_parts.append(f"source: {transcript_source}")
                 prefix = " — ".join(prefix_parts).strip()
                 if prefix:
                     ev_lines.append(f"- {prefix}: {snip}")
@@ -2316,17 +2338,11 @@ def draw_seeking_alpha_news_section() -> None:
     def _cache_key(sym: str, max_articles: int, model: str, include_digest: bool) -> str:
         return f"sa|{sym.upper()}|{max_articles}|{model}|{int(include_digest)}"
 
-    # ---------------- Universe (from tickers.py if available) ----------------
-    CUTLER_TICKERS = {}
-    universe: list[str] = []
-    try:
-        from tickers import tickers as CUTLER_TICKERS  # type: ignore
-        if isinstance(CUTLER_TICKERS, dict):
-            universe = [t for t in CUTLER_TICKERS.keys() if _is_probable_ticker(t)]
-    except Exception:
-        CUTLER_TICKERS = {}
+    # ---------------- Universe (Google Sheet with local fallback) ----------------
+    CUTLER_TICKERS = get_ticker_universe()
+    universe: list[str] = [t for t in CUTLER_TICKERS.keys() if _is_probable_ticker(t)]
 
-    # fallback: allow manual input universe if tickers.py missing
+    # final emergency fallback if live and local ticker sources are unavailable
     if not universe:
         universe = sorted(list({t for t in ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]}))
 
@@ -2909,16 +2925,10 @@ def draw_seeking_alpha_news_section() -> None:
 
 def _get_available_tickers_for_substack() -> list[str]:
     """
-    Return available tickers from tickers.py for the Substack segment.
+    Return available tickers from the live Google Sheet with local fallback.
     Mirrors the prior segment behavior: use the same Cutler universe without hardcoding.
     """
-    try:
-        from tickers import tickers  # { "AAPL": {...}, ... }
-        if isinstance(tickers, dict):
-            return sorted(tickers.keys())
-    except Exception:
-        pass
-    return []
+    return sorted(t for t in get_ticker_universe().keys() if _is_probable_ticker(t))
 
 
 def draw_substack_section():
@@ -4030,7 +4040,7 @@ def run_podcast_pipeline_from_ui(
         "--root", str(podcasts_root),
         "--out", str(excerpts_path),
         "--window", "2",  # sentence window around mentions
-        # no --tickers: script will use full Cutler universe from tickers.py
+        # no --tickers: script will use the live Cutler universe with local fallback
     ]
 
     excerpts_proc = subprocess.run(
@@ -4472,9 +4482,11 @@ def draw_podcast_intelligence_section():
                     pod_name = sn.get("podcast_name") or sn.get("podcast") or sn.get("podcast_id") or ""
                     ep_title = sn.get("episode_title") or sn.get("episode") or sn.get("title") or ""
                     ep_date = sn.get("published_date") or sn.get("date") or sn.get("published") or ""
+                    transcript_source = sn.get("transcript_source") or sn.get("evidence_source") or ""
                     txt = _podcast_snippet_text(sn)
                     header = f"{pod_name} — {ep_title}".strip(" …")
-                    line = f"{i}. {header} ({ep_date}){txt}"
+                    source_note = f"; source: {transcript_source}" if transcript_source else ""
+                    line = f"{i}. {header} ({ep_date}{source_note}) {txt}"
                     ev_lines.append(line.strip())
                 sections.append(("Episode snippets (evidence)", "\n\n".join(ev_lines) if ev_lines else "No snippets available in this window."))
 
@@ -8169,6 +8181,20 @@ def main():
 
     # Sidebar: run settings
     st.sidebar.header("Run settings")
+    try:
+        _ticker_status = get_ticker_load_status()
+        if _ticker_status.source == "google_sheet":
+            st.sidebar.success(
+                f"Tickers loaded from Google Sheet ({_ticker_status.count})\n\n"
+                f"Last loaded: {_ticker_status.loaded_at}"
+            )
+        else:
+            st.sidebar.warning(
+                f"Using fallback local ticker list ({_ticker_status.count})\n\n"
+                f"Last checked: {_ticker_status.loaded_at}"
+            )
+    except Exception:
+        st.sidebar.warning("Using fallback local ticker list")
 
     quarter_options = get_available_quarters()
     default_q = choose_default_quarter(quarter_options)
@@ -8487,13 +8513,7 @@ def main():
                 max_articles = int(cfg.get("sa_max_articles", 5))
                 model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
                 with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
-                    universe = []
-                    try:
-                        from tickers import tickers as _T  # type: ignore
-                        if isinstance(_T, dict):
-                            universe = [t for t in _T.keys() if _is_probable_ticker(t)]
-                    except Exception:
-                        universe = []
+                    universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
                     if not universe:
                         universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
 
@@ -8509,13 +8529,7 @@ def main():
                 days_back = int(cfg.get("substack_lookback_days", 2))
                 max_posts = int(cfg.get("substack_max_posts", 3))
                 with st.status(f"Run All: Substack — building compiled PDF (last {days_back} days)", expanded=True):
-                    try:
-                        from tickers import tickers as _T  # type: ignore
-                        universe = []
-                        if isinstance(_T, dict):
-                            universe = [t for t in _T.keys() if _is_probable_ticker(t)]
-                    except Exception:
-                        universe = []
+                    universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
                     if not universe:
                         universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
 

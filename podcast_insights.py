@@ -8,14 +8,18 @@ from typing import Any, Dict, List, Tuple
 import re
 
 from openai_legacy import chat_completion_text
+from live_tickers import get_ticker_universe
 
 STANCE_NOT_MENTIONED = "not" + "_mentioned"
 
 # Try to pull full Cutler universe for nicer company labels (optional)
 try:
-    from tickers import tickers as CUTLER_TICKERS
+    CUTLER_TICKERS = get_ticker_universe()
 except Exception:
-    CUTLER_TICKERS = {}
+    try:
+        from tickers import tickers as CUTLER_TICKERS
+    except Exception:
+        CUTLER_TICKERS = {}
 
 @dataclass
 class PodcastSnippet:
@@ -28,6 +32,10 @@ class PodcastSnippet:
     snippet: str
     episode_url: str | None = None
     company_names: List[str] | None = None
+    transcript_source: str | None = None
+    relevance_score: int = 0
+    relevance_reason: str = ""
+    evidence_confidence: str = ""
 
 
 @dataclass
@@ -140,6 +148,10 @@ def build_company_user_message(
         lines.append(f"Published: {sn.published}")
         if sn.episode_url:
             lines.append(f"URL: {sn.episode_url}")
+        if sn.transcript_source:
+            lines.append(f"Evidence source: {sn.transcript_source}")
+        if sn.relevance_reason:
+            lines.append(f"Deterministic relevance: {sn.relevance_reason}")
         lines.append("Text:")
         lines.append(sn.snippet.strip())
         lines.append("")
@@ -329,9 +341,17 @@ def load_excerpts_and_episodes(path: Path) -> Tuple[Dict[str, List[PodcastSnippe
                     snippet=s.get("snippet", ""),
                     episode_url=s.get("episode_url"),
                     company_names=s.get("company_names") or [],
+                    transcript_source=s.get("transcript_source"),
+                    relevance_score=int(s.get("relevance_score") or 0),
+                    relevance_reason=s.get("relevance_reason") or "",
+                    evidence_confidence=s.get("evidence_confidence") or "",
                 )
             )
-        excerpts_by_ticker[ticker] = snippets
+        excerpts_by_ticker[ticker] = [
+            sn for sn in snippets
+            if int(getattr(sn, "relevance_score", 0) or 0) >= 50
+            or not getattr(sn, "relevance_score", 0)
+        ]
 
     return excerpts_by_ticker, episodes
 
