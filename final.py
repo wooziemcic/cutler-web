@@ -4779,6 +4779,44 @@ def build_delta_pdf(old_manifest: Dict[str, Any], new_manifest: Dict[str, Any]) 
 
 # ---------- Quarter helpers ----------
 
+def current_quarter_label(today=None) -> str:
+    from datetime import date
+
+    today = today or date.today()
+    quarter = ((today.month - 1) // 3) + 1
+    return f"{today.year} Q{quarter}"
+
+
+def _recent_quarter_labels(today=None, count: int = 8) -> List[str]:
+    from datetime import date
+
+    today = today or date.today()
+    year = today.year
+    quarter = ((today.month - 1) // 3) + 1
+    out: List[str] = []
+    for _ in range(max(1, count)):
+        out.append(f"{year} Q{quarter}")
+        quarter -= 1
+        if quarter == 0:
+            quarter = 4
+            year -= 1
+    return out
+
+
+def _ensure_recent_quarter_options(options: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for q in _recent_quarter_labels():
+        if q not in seen:
+            out.append(q)
+            seen.add(q)
+    for q in options or []:
+        if q not in seen:
+            out.append(q)
+            seen.add(q)
+    return out
+
+
 @st.cache_data(show_spinner=False)
 def get_available_quarters() -> List[str]:
     """
@@ -4825,29 +4863,9 @@ def get_available_quarters() -> List[str]:
             out.append(v)
 
     if not out:
-        # Dynamic fallback: include current quarter and a few previous quarters
-        now = datetime.now(ZoneInfo("America/New_York"))
-        y = now.year
-        m = now.month
-        if 1 <= m <= 3:
-            cur_q = 1
-        elif 4 <= m <= 6:
-            cur_q = 2
-        elif 7 <= m <= 9:
-            cur_q = 3
-        else:
-            cur_q = 4
+        out = _recent_quarter_labels()
 
-        out = []
-        yy, qq = y, cur_q
-        for _ in range(8):
-            out.append(f"{yy} Q{qq}")
-            qq -= 1
-            if qq == 0:
-                qq = 4
-                yy -= 1
-
-    return out
+    return _ensure_recent_quarter_options(out)
 
 def _parse_quarter_label(label: str) -> Optional[Tuple[int, int]]:
     """
@@ -4889,7 +4907,11 @@ def choose_default_quarter(available: List[str]) -> Optional[str]:
     3) Else choose the most recent available.
     """
     if not available:
-        return None
+        return current_quarter_label()
+
+    current = current_quarter_label()
+    if current in available:
+        return current
 
     parsed: List[Tuple[str, int, int]] = []
     for lab in available:
@@ -8189,12 +8211,13 @@ def main():
         _ticker_status = get_ticker_load_status()
         if _ticker_status.source == "google_sheet":
             st.sidebar.success(
-                f"Tickers loaded from Google Sheet ({_ticker_status.count})\n\n"
+                f"Tickers loaded from Google Sheet: {_ticker_status.count}\n\n"
+                f"Pattern: {_ticker_status.url_pattern or 'csv'}\n\n"
                 f"Last loaded: {_ticker_status.loaded_at}"
             )
         else:
             st.sidebar.warning(
-                f"Using fallback local ticker list ({_ticker_status.count})\n\n"
+                f"{_ticker_status.message}\n\n"
                 f"Last checked: {_ticker_status.loaded_at}"
             )
     except Exception:

@@ -19,6 +19,19 @@ GOOGLE_SHEET_CSV_URL = (
     f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export"
     f"?format=csv&gid={GOOGLE_SHEET_GID}"
 )
+GOOGLE_SHEET_GVIZ_CSV_URL = (
+    f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/gviz/tq"
+    f"?tqx=out:csv&gid={GOOGLE_SHEET_GID}"
+)
+GOOGLE_SHEET_PUBLISHED_CSV_URL = (
+    f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/pub"
+    f"?gid={GOOGLE_SHEET_GID}&single=true&output=csv"
+)
+GOOGLE_SHEET_CSV_PATTERNS = [
+    ("export", GOOGLE_SHEET_CSV_URL),
+    ("gviz", GOOGLE_SHEET_GVIZ_CSV_URL),
+    ("published", GOOGLE_SHEET_PUBLISHED_CSV_URL),
+]
 DEFAULT_TTL_SECONDS = 30 * 60
 
 _CACHE: dict[str, Any] = {
@@ -35,6 +48,7 @@ class TickerLoadStatus:
     count: int
     loaded_at: str
     message: str = ""
+    url_pattern: str = ""
 
 
 def _load_local_tickers() -> Dict[str, List[str]]:
@@ -77,38 +91,114 @@ def _find_column(headers: list[str], candidates: set[str]) -> str | None:
     return None
 
 
-def _parse_sheet_csv(text: str) -> Dict[str, List[str]]:
-    reader = csv.DictReader(io.StringIO(text))
-    headers = reader.fieldnames or []
-    ticker_col = _find_column(headers, {"ticker", "symbol", "ticker symbol", "stock ticker"})
-    if not ticker_col:
-        raise ValueError("No ticker-like column found in Google Sheet Tickers tab.")
-    company_col = _find_column(headers, {"company", "company name", "name", "issuer", "security name"})
+def _split_ticker_cell(value: str) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    parts = [p.strip() for p in re_split_ticker_delimiters(raw)]
+    out: list[str] = []
+    for part in parts:
+        symbol = part.replace("$", "").strip().upper()
+        symbol = "".join(symbol.split())
+        if not symbol:
+            continue
+        if symbol not in out:
+            out.append(symbol)
+    return out
 
+
+def re_split_ticker_delimiters(value: str) -> list[str]:
+    import re
+
+    return re.split(r"\s*(?:/|,|;|\bor\b)\s*", value, flags=re.IGNORECASE)
+
+
+def _looks_like_ticker_cell(value: str) -> bool:
+    symbols = _split_ticker_cell(value)
+    return bool(symbols) and all(1 <= len(sym) <= 12 and any(ch.isalpha() for ch in sym) for sym in symbols)
+
+
+def _parse_sheet_csv(text: str) -> Dict[str, List[str]]:
+    rows = list(csv.reader(io.StringIO(text)))
+    rows = [[str(cell or "").strip() for cell in row] for row in rows if any(str(cell or "").strip() for cell in row)]
+    if not rows:
+        raise ValueError("Google Sheet CSV export returned no rows.")
+
+    # Many internal Sheets are a plain one-column ticker tab with no header.
+    if rows and len(rows[0]) == 1 and _looks_like_ticker_cell(rows[0][0]):
+        out: Dict[str, List[str]] = {}
+        for row in rows:
+            for ticker in _split_ticker_cell(row[0] if row else ""):
+                out.setdefault(ticker, [])
+        return dict(sorted(out.items()))
+
+    # Headered sheet path. Scan the first few rows because Sheets sometimes
+    # include notes or blank title rows above the real column names.
+    header_idx = None
+    ticker_col_idx = None
+    company_col_idx = None
+    for idx, row in enumerate(rows[:10]):
+        headers = row
+        ticker_col = _find_column(headers, {"ticker", "symbol", "ticker symbol", "stock ticker"})
+        if ticker_col:
+            header_idx = idx
+            ticker_col_idx = headers.index(ticker_col)
+            company_col = _find_column(headers, {"company", "company name", "name", "issuer", "security name"})
+            company_col_idx = headers.index(company_col) if company_col in headers else None
+            break
+
+    if header_idx is None or ticker_col_idx is None:
+        # Last-resort: if the first column is ticker-like across the rows, treat it as a ticker list.
+        if rows and sum(1 for row in rows if row and _looks_like_ticker_cell(row[0])) >= max(1, len(rows) // 2):
+            out: Dict[str, List[str]] = {}
+            for row in rows:
+                for ticker in _split_ticker_cell(row[0] if row else ""):
+                    out.setdefault(ticker, [])
+            return dict(sorted(out.items()))
+        raise ValueError("No ticker-like column found in Google Sheet Tickers tab.")
+
+    ticker_col = _find_column(headers, {"ticker", "symbol", "ticker symbol", "stock ticker"})
     out: Dict[str, List[str]] = {}
-    for row in reader:
-        ticker = str(row.get(ticker_col) or "").strip().upper()
-        if not ticker:
-            continue
-        ticker = ticker.replace("$", "").strip()
-        if not ticker:
-            continue
-        company = str(row.get(company_col) or "").strip() if company_col else ""
-        out.setdefault(ticker, [])
-        if company and company not in out[ticker]:
-            out[ticker].append(company)
+    for row in rows[header_idx + 1:]:
+        ticker_value = row[ticker_col_idx] if ticker_col_idx < len(row) else ""
+        company = row[company_col_idx].strip() if company_col_idx is not None and company_col_idx < len(row) else ""
+        for ticker in _split_ticker_cell(ticker_value):
+            out.setdefault(ticker, [])
+            if company and company not in out[ticker]:
+                out[ticker].append(company)
     return dict(sorted(out.items()))
 
 
-def load_tickers_from_google_sheet(timeout: int = 12) -> Dict[str, List[str]]:
+def _http_error_summary(resp: requests.Response) -> str:
+    reason = (resp.reason or "").strip()
+    if reason:
+        return f"{resp.status_code} {reason}"
+    return f"HTTP {resp.status_code}"
+
+
+def load_tickers_from_google_sheet(timeout: int = 12) -> tuple[Dict[str, List[str]], str]:
     # Keep CSV export as the actual read path; GOOGLE_SHEET_SHARED_URL is the
     # human-facing reference URL for the same workbook.
-    resp = requests.get(GOOGLE_SHEET_CSV_URL, timeout=timeout)
-    resp.raise_for_status()
-    text = resp.text or ""
-    if not text.strip():
-        raise ValueError("Google Sheet CSV export returned empty content.")
-    return _parse_sheet_csv(text)
+    errors: list[str] = []
+    headers = {"User-Agent": "Mozilla/5.0 CutlerPlatformBuild"}
+    for pattern_name, url in GOOGLE_SHEET_CSV_PATTERNS:
+        try:
+            resp = requests.get(url, timeout=timeout, headers=headers)
+            if resp.status_code >= 400:
+                errors.append(f"{pattern_name}: {_http_error_summary(resp)}")
+                continue
+            text = resp.text or ""
+            if not text.strip():
+                errors.append(f"{pattern_name}: empty CSV response")
+                continue
+            parsed = _parse_sheet_csv(text)
+            if not parsed:
+                errors.append(f"{pattern_name}: CSV parsed but no tickers found")
+                continue
+            return parsed, pattern_name
+        except Exception as exc:
+            errors.append(f"{pattern_name}: {type(exc).__name__}: {exc}")
+    raise RuntimeError("; ".join(errors) if errors else "Google Sheet CSV fetch failed.")
 
 
 def load_live_tickers(
@@ -129,7 +219,7 @@ def load_live_tickers(
 
     loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        live = load_tickers_from_google_sheet()
+        live, url_pattern = load_tickers_from_google_sheet()
         if not live:
             raise ValueError("Google Sheet did not contain any valid tickers.")
         status = TickerLoadStatus(
@@ -137,7 +227,8 @@ def load_live_tickers(
             ok=True,
             count=len(live),
             loaded_at=loaded_at,
-            message="Tickers loaded from Google Sheet",
+            message=f"Tickers loaded from Google Sheet: {len(live)}",
+            url_pattern=url_pattern,
         )
         _CACHE.update({"loaded_at_monotonic": now, "tickers": live, "status": status})
         return live, status
@@ -148,7 +239,8 @@ def load_live_tickers(
             ok=False,
             count=len(fallback),
             loaded_at=loaded_at,
-            message=f"Using fallback local ticker list ({type(exc).__name__}: {exc})",
+            message=f"Using fallback local ticker list: {len(fallback)} — Google Sheet returned {exc}",
+            url_pattern="local_fallback",
         )
         _CACHE.update({"loaded_at_monotonic": now, "tickers": fallback, "status": status})
         return fallback, status
