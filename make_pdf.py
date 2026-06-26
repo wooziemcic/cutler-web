@@ -315,6 +315,15 @@ def _format_article_header_html(raw_txt: str) -> str:
     lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
     if not lines:
         return ""
+    if any(ln.lower().startswith(("title:", "author:", "date:", "source:", "credibility:")) for ln in lines):
+        rendered = []
+        for ln in lines:
+            safe = escape(ln)
+            if ln.lower().startswith("title:"):
+                rendered.append(f"<b>{safe}</b>")
+            else:
+                rendered.append(f"<font size='8' color='#4b5563'>{safe}</font>")
+        return "<br/>".join(rendered)
     first = escape(lines[0])
     rest = []
     for ln in lines[1:]:

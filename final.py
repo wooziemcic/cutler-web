@@ -732,9 +732,9 @@ def _sa_report_items_for_article(a: dict, ticker: str, metrics: dict | None = No
     if not body and not title:
         return []
 
-    header_lines = [title or f"Article {idx}"]
+    header_lines = [f"Title: {title or f'Article {idx}'}"]
     if author:
-        header_lines[0] = f"{header_lines[0]} — {author}"
+        header_lines.append(f"Author: {author}")
     if published:
         header_lines.append(f"Date: {published[:10]}")
     if url:
@@ -747,16 +747,17 @@ def _sa_report_items_for_article(a: dict, ticker: str, metrics: dict | None = No
             cred_parts.append(f"{int(val):,} {label}" if key != "rating" else f"{float(val):.1f} {label}")
     if cred_parts:
         header_lines.append("Credibility: " + " | ".join(cred_parts))
+    header_lines.append("")
 
     items: list[dict] = [{"text": "\n".join(header_lines), "pages": [], "is_header": True}]
     bullets = _summary_bullets_from_evidence(title, body, ticker=ticker, max_items=5)
-    items.append({"text": "Brief summary:\n" + "\n".join(f"- {b}" for b in bullets), "pages": []})
+    items.append({"text": "Brief Summary:\n" + "\n".join(f"- {b}" for b in bullets), "pages": []})
     evidence = _best_evidence_paragraphs(body, ticker=ticker, max_items=3, max_words=220)
     if evidence:
-        items.append({"text": "Evidence excerpts:\n" + "\n\n".join(f"{i}. {p}" for i, p in enumerate(evidence, 1)), "pages": []})
+        items.append({"text": "Evidence Excerpts:\n" + "\n\n".join(f"{i}. {p}" for i, p in enumerate(evidence, 1)), "pages": []})
     risk = next((p for p in _report_paragraphs(body) if any(k in p.lower() for k in ("risk", "bear", "downside", "counterpoint", "concern"))), "")
     if risk:
-        items.append({"text": "Risk / counterpoint:\n" + _sentence_limited(risk, max_words=120), "pages": []})
+        items.append({"text": "Risk / Counterpoint:\n" + _sentence_limited(risk, max_words=120), "pages": []})
     return items
 
 
@@ -2630,26 +2631,29 @@ def draw_seeking_alpha_news_section() -> None:
             published = clean_display_text(a.get("published_at") or a.get("published") or a.get("date") or "")
             body = clean_display_text(a.get("body_clean") or a.get("body") or "").strip()
 
-            story.append(Paragraph(f"{idx}. {escape(title)}" + (f" — {escape(author)}" if author else ""), styles["Heading3"]))
+            story.append(Paragraph(f"Article {idx}", styles["Heading3"]))
+            story.append(Paragraph(f"<b>Title:</b> {escape(title)}", styles["Normal"]))
+            if author:
+                story.append(Paragraph(f"<b>Author:</b> {escape(author)}", styles["Normal"]))
             if published:
-                story.append(Paragraph(f"Date: {escape(published[:10])}", styles["Normal"]))
+                story.append(Paragraph(f"<b>Date:</b> {escape(published[:10])}", styles["Normal"]))
             if url:
-                story.append(Paragraph(f"Source: {escape(url)}", styles["Normal"]))
-            story.append(Spacer(1, 0.08 * inch))
+                story.append(Paragraph(f"<b>Source:</b> {escape(url)}", styles["Normal"]))
+            story.append(Spacer(1, 0.14 * inch))
 
             if body:
                 bullets = _summary_bullets_from_evidence(title, body, ticker=sym, max_items=5)
-                story.append(Paragraph("Brief summary", styles["Heading4"]))
+                story.append(Paragraph("Brief Summary:", styles["Heading4"]))
                 for b in bullets[:5]:
                     story.append(Paragraph("• " + escape(clean_display_text(b)), base))
                 evidence = _best_evidence_paragraphs(body, ticker=sym, max_items=3, max_words=220)
                 if evidence:
-                    story.append(Paragraph("Evidence excerpts", styles["Heading4"]))
+                    story.append(Paragraph("Evidence Excerpts:", styles["Heading4"]))
                     for p in evidence:
                         story.append(Paragraph(escape(clean_display_text(p)), must_style if _must_read_para(p) else base))
                 risk = next((p for p in _report_paragraphs(body) if any(k in p.lower() for k in ("risk", "bear", "downside", "counterpoint", "concern"))), "")
                 if risk:
-                    story.append(Paragraph("Risk / counterpoint", styles["Heading4"]))
+                    story.append(Paragraph("Risk / Counterpoint:", styles["Heading4"]))
                     story.append(Paragraph(escape(_sentence_limited(risk, max_words=120)), base))
             else:
                 story.append(Paragraph("No body returned for this article.", base))

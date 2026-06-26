@@ -12,6 +12,9 @@ import requests
 
 GOOGLE_SHEET_ID = "14LWRzd5QeAOQKc4VlwU84gQBWGIuKX68tikxyzwN1_8"
 GOOGLE_SHEET_GID = "940406158"
+GOOGLE_SHEET_SHARED_URL = (
+    f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit?usp=sharing"
+)
 GOOGLE_SHEET_CSV_URL = (
     f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export"
     f"?format=csv&gid={GOOGLE_SHEET_GID}"
@@ -98,6 +101,8 @@ def _parse_sheet_csv(text: str) -> Dict[str, List[str]]:
 
 
 def load_tickers_from_google_sheet(timeout: int = 12) -> Dict[str, List[str]]:
+    # Keep CSV export as the actual read path; GOOGLE_SHEET_SHARED_URL is the
+    # human-facing reference URL for the same workbook.
     resp = requests.get(GOOGLE_SHEET_CSV_URL, timeout=timeout)
     resp.raise_for_status()
     text = resp.text or ""
