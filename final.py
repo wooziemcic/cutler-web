@@ -7984,124 +7984,304 @@ def main():
     st.markdown(
         """
         <style>
-        /* Center all images (logo) */
-        .stImage img {
-            display: block;
-            margin-left: calc(100% - 20px);  /* pushes it ~20px to the right */
-            transform: translateX(-50%);
+        /* ============================================================
+           Cutler Capital - design tokens
+           ============================================================ */
+        :root {
+            --cc-plum:      #4b2142;
+            --cc-plum-600:  #5d2a53;
+            --cc-plum-700:  #3a1834;
+            --cc-plum-050:  #f8f4fb;
+            --cc-plum-100:  #efe6f5;
+            --cc-ink:       #241a2b;
+            --cc-muted:     #6f6178;
+            --cc-surface:   #ffffff;
+            --cc-canvas:    #faf8fc;
+            --cc-line:      rgba(75, 33, 66, 0.10);
+            --cc-line-2:    rgba(75, 33, 66, 0.18);
+            --cc-ring:      rgba(75, 33, 66, 0.16);
+            --cc-radius:    16px;
+            --cc-radius-lg: 22px;
+            --cc-shadow:    0 1px 2px rgba(36, 26, 43, 0.04),
+                            0 8px 24px rgba(36, 26, 43, 0.06);
+            --cc-shadow-lg: 0 2px 4px rgba(36, 26, 43, 0.05),
+                            0 18px 48px rgba(36, 26, 43, 0.09);
         }
-        /* Overall background and font tweaks */
+
+        /* ---------- Canvas ---------- */
         .stApp {
-            background: radial-gradient(circle at top left, #f5f0fb 0, #ffffff 40%, #f7f3fb 100%);
+            background:
+                radial-gradient(1200px 520px at 12% -8%, #f3ebfa 0%, rgba(243,235,250,0) 62%),
+                radial-gradient(1000px 460px at 92% 0%, #f6f0fb 0%, rgba(246,240,251,0) 58%),
+                var(--cc-canvas);
+            color: var(--cc-ink);
         }
         .block-container {
-            padding-top: 4rem;
-            max-width: 1100px;
+            padding-top: 2.6rem;
+            padding-bottom: 4rem;
+            max-width: 1180px;
         }
+        html, body, [class*="css"] {
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* ---------- Typography ---------- */
+        h1, h2, h3, h4, h5 {
+            color: var(--cc-plum-700);
+            letter-spacing: -0.014em;
+            font-weight: 700;
+        }
+        h1 { font-size: 1.65rem; }
+        h2 { font-size: 1.32rem; }
+        h3 { font-size: 1.10rem; }
+        h4 { font-size: 0.98rem; }
+        p, li, label, .stMarkdown { color: var(--cc-ink); }
+
+        /* ---------- App header ---------- */
+        .stImage, [data-testid="stImage"] {
+            display: flex;
+            justify-content: center;
+        }
+        .stImage img { display: block; margin: 0 auto; }
+
+        .app-header { text-align: center; margin: 0.2rem 0 1.6rem; }
         .app-title {
             text-align: center;
-            color: #4b2142;
-            font-size: 1.9rem;
-            font-weight: 700;
-            margin-bottom: 0.3rem;
+            color: var(--cc-plum);
+            font-size: 2.05rem;
+            font-weight: 750;
+            letter-spacing: -0.028em;
+            line-height: 1.15;
+            margin-bottom: 0.35rem;
         }
         .app-subtitle {
             text-align: center;
-            color: #6b4f7a;
+            color: var(--cc-muted);
             font-size: 0.95rem;
-            margin-top: 0.1rem;
-            margin-bottom: 1.4rem;
+            font-weight: 450;
+            margin: 0 auto;
+            max-width: 46rem;
+        }
+        .app-header::after {
+            content: "";
+            display: block;
+            width: 54px;
+            height: 3px;
+            margin: 1.05rem auto 0;
+            border-radius: 999px;
+            background: linear-gradient(90deg, var(--cc-plum), #9a6fa0);
+            opacity: 0.85;
         }
 
-        /* Sidebar */
-        [data-testid="stSidebar"] > div {
-            background: #fbf8ff;
-        }
-        [data-testid="stSidebar"] h2, [data-testid="stSidebar"] label {
-            color: #4b2142;
-        }
-        
+        /* ---------- Chrome ---------- */
         header[data-testid="stHeader"] {
-            background: radial-gradient(circle at top left, #f5f0fb 0, #ffffff 40%, #f7f3fb 100%) !important;
+            background: transparent !important;
             box-shadow: none !important;
             border-bottom: none !important;
         }
-        [data-testid="stToolbar"] {
-            background: transparent !important;
-        }
-        header[data-testid="stHeader"] * {
-            color: #4b2142 !important;
-        }
+        [data-testid="stToolbar"] { background: transparent !important; }
+        header[data-testid="stHeader"] * { color: var(--cc-plum) !important; }
 
-        /* Buttons: long, pill-shaped, purple */
-        .stButton>button {
+        /* ---------- Sidebar ---------- */
+        [data-testid="stSidebar"] > div {
+            background: linear-gradient(180deg, #fdfbff 0%, #f7f1fb 100%);
+            border-right: 1px solid var(--cc-line);
+        }
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] label {
+            color: var(--cc-plum) !important;
+            font-weight: 620;
+        }
+        [data-testid="stSidebar"] hr { border-color: var(--cc-line); }
+
+        /* ---------- Buttons ---------- */
+        .stButton > button, .stDownloadButton > button {
             width: 100%;
             border-radius: 999px;
-            background: #4b2142;
+            background: var(--cc-plum);
             color: #ffffff;
-            border: 1px solid #4b2142;
-            padding: 0.6rem 1.5rem;
-            font-weight: 600;
-            font-size: 0.95rem;
+            border: 1px solid var(--cc-plum);
+            padding: 0.62rem 1.5rem;
+            font-weight: 620;
+            font-size: 0.94rem;
+            box-shadow: 0 1px 2px rgba(75, 33, 66, 0.16);
+            transition: background 140ms ease, transform 90ms ease,
+                        box-shadow 140ms ease, border-color 140ms ease;
         }
-        .stButton>button:hover {
-            background: #612a58;
-            border-color: #612a58;
+        .stButton > button:hover, .stDownloadButton > button:hover {
+            background: var(--cc-plum-600);
+            border-color: var(--cc-plum-600);
+            box-shadow: 0 6px 18px rgba(75, 33, 66, 0.20);
+            transform: translateY(-1px);
+        }
+        .stButton > button:active, .stDownloadButton > button:active {
+            transform: translateY(0);
+            box-shadow: 0 1px 2px rgba(75, 33, 66, 0.18);
+        }
+        .stButton > button:focus-visible, .stDownloadButton > button:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px var(--cc-ring);
+        }
+        /* NOTE: this app never passes type="primary", so every button is
+           kind="secondary". They stay plum, matching the previous theme. */
+        .stButton > button:disabled { opacity: 0.45; box-shadow: none; transform: none; }
+
+        /* ---------- Inputs ---------- */
+        .stTextInput input,
+        .stNumberInput input,
+        .stDateInput input,
+        .stTextArea textarea,
+        div[data-baseweb="select"] > div {
+            border-radius: 12px !important;
+            border-color: var(--cc-line-2) !important;
+            background: var(--cc-surface) !important;
+            transition: border-color 140ms ease, box-shadow 140ms ease;
+        }
+        .stTextInput input:focus,
+        .stNumberInput input:focus,
+        .stTextArea textarea:focus,
+        div[data-baseweb="select"] > div:focus-within {
+            border-color: var(--cc-plum) !important;
+            box-shadow: 0 0 0 3px var(--cc-ring) !important;
+        }
+        div[data-baseweb="tag"] {
+            background: var(--cc-plum) !important;
+            border-radius: 999px !important;
         }
 
-        /* Radio group as pill toggle */
+        /* ---------- Radio pill toggle ---------- */
         div[role="radiogroup"] {
             display: flex;
             flex-wrap: nowrap;
             gap: 0.4rem;
+            background: var(--cc-plum-050);
+            padding: 0.28rem;
+            border-radius: 999px;
+            border: 1px solid var(--cc-line);
         }
         div[role="radiogroup"] > label {
             flex: 1 1 0;
             justify-content: center;
             border-radius: 999px !important;
-            padding: 0.35rem 0.95rem !important;
-            border: 1px solid #d7c4f3 !important;
-            background: #f7f3fb !important;
-            color: #4b2142 !important;
-            font-weight: 500 !important;
+            padding: 0.4rem 0.95rem !important;
+            border: 1px solid transparent !important;
+            background: transparent !important;
+            color: var(--cc-plum) !important;
+            font-weight: 550 !important;
             white-space: nowrap;
+            transition: background 130ms ease, border-color 130ms ease,
+                        box-shadow 130ms ease;
         }
         div[role="radiogroup"] > label:hover {
-            border-color: #4b2142 !important;
+            background: #ffffff !important;
+            border-color: var(--cc-line-2) !important;
+        }
+        div[role="radiogroup"] > label:has(input:checked) {
+            background: #ffffff !important;
+            border-color: var(--cc-line-2) !important;
+            box-shadow: 0 2px 8px rgba(75, 33, 66, 0.10);
         }
         div[role="radiogroup"] > label[data-baseweb="radio"] > div:first-child > div[aria-checked="true"] + div {
-            background: #4b2142 !important;
+            background: var(--cc-plum) !important;
         }
 
-        /* Card-style containers */
+        /* ---------- Cards ---------- */
         .cc-card {
-            background: #ffffffdd;
-            border-radius: 20px;
-            padding: 1.3rem 1.4rem;
-            border: 1px solid rgba(75,33,66,0.08);
-            box-shadow: 0 10px 30px rgba(75,33,66,0.04);
+            background: var(--cc-surface);
+            border-radius: var(--cc-radius-lg);
+            padding: 1.4rem 1.5rem;
+            border: 1px solid var(--cc-line);
+            box-shadow: var(--cc-shadow);
             margin-bottom: 1.1rem;
+            transition: box-shadow 180ms ease, transform 180ms ease;
+        }
+        .cc-card:hover {
+            box-shadow: var(--cc-shadow-lg);
+            transform: translateY(-1px);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: var(--cc-radius-lg) !important;
+            border-color: var(--cc-line) !important;
+            background: var(--cc-surface);
+            box-shadow: var(--cc-shadow);
         }
 
-        /* Fund chips */
-        .fund-chip{
-            display:inline-block;
-            margin:6px 6px 0 0;
-            padding:6px 12px;
-            border-radius:14px;
-            background:#f5effc;
-            color:#4b2142;
-            font-size:12px;
-            font-weight:600;
-            border:1px solid rgba(75,33,66,0.35);
-            white-space:nowrap;
+        /* ---------- Fund chips ---------- */
+        .fund-chip {
+            display: inline-block;
+            margin: 6px 6px 0 0;
+            padding: 6px 13px;
+            border-radius: 999px;
+            background: var(--cc-plum-050);
+            color: var(--cc-plum);
+            font-size: 12px;
+            font-weight: 600;
+            border: 1px solid var(--cc-line-2);
+            white-space: nowrap;
+            transition: background 130ms ease, border-color 130ms ease;
+        }
+        .fund-chip:hover {
+            background: var(--cc-plum-100);
+            border-color: var(--cc-plum);
         }
 
-        /* Gauge (needle) */
-        .gauge-wrapper {
-            margin-top: 0.5rem;
-            margin-bottom: 0.75rem;
+        /* ---------- Metrics ---------- */
+        div[data-testid="stMetric"] {
+            background: var(--cc-surface);
+            border: 1px solid var(--cc-line);
+            border-radius: var(--cc-radius);
+            padding: 0.9rem 1.05rem;
+            box-shadow: var(--cc-shadow);
         }
+        div[data-testid="stMetricLabel"] {
+            color: var(--cc-muted) !important;
+            font-weight: 560;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            font-size: 0.72rem !important;
+        }
+        div[data-testid="stMetricValue"] {
+            color: var(--cc-plum-700) !important;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        /* ---------- Expanders ---------- */
+        div[data-testid="stExpander"] {
+            border: 1px solid var(--cc-line);
+            border-radius: var(--cc-radius);
+            background: var(--cc-surface);
+            box-shadow: var(--cc-shadow);
+            overflow: hidden;
+        }
+        div[data-testid="stExpander"] summary {
+            font-weight: 600;
+            color: var(--cc-plum);
+            padding: 0.7rem 0.95rem;
+        }
+        div[data-testid="stExpander"] summary:hover { background: var(--cc-plum-050); }
+
+        /* ---------- Tables ---------- */
+        div[data-testid="stDataFrame"], div[data-testid="stTable"] {
+            border: 1px solid var(--cc-line);
+            border-radius: var(--cc-radius);
+            overflow: hidden;
+            box-shadow: var(--cc-shadow);
+        }
+
+        /* ---------- Alerts / progress ---------- */
+        div[data-testid="stAlert"] {
+            border-radius: 14px;
+            border: 1px solid var(--cc-line-2);
+            box-shadow: none;
+        }
+        .stProgress > div > div > div > div { background: var(--cc-plum); }
+
+        /* ---------- Gauge (needle) ---------- */
+        .gauge-wrapper { margin-top: 0.5rem; margin-bottom: 0.75rem; }
         .gauge {
             width: 220px;
             height: 120px;
@@ -8112,8 +8292,8 @@ def main():
             width: 100%;
             height: 100%;
             border-radius: 220px 220px 0 0;
-            background: #f5effc;
-            border: 1px solid rgba(75,33,66,0.25);
+            background: linear-gradient(180deg, var(--cc-plum-100) 0%, var(--cc-plum-050) 100%);
+            border: 1px solid var(--cc-line-2);
             position: relative;
             overflow: hidden;
         }
@@ -8123,14 +8303,14 @@ def main():
             height: 85%;
             top: 15%;
             left: 50%;
-            background: #4b2142;
+            background: var(--cc-plum);
             transform-origin: bottom center;
             transition: transform 0.25s ease-out;
         }
         .gauge-cover {
             width: 68%;
             height: 68%;
-            background: #ffffff;
+            background: var(--cc-surface);
             border-radius: 50%;
             position: absolute;
             bottom: -10%;
@@ -8141,91 +8321,76 @@ def main():
             justify-content: center;
             font-weight: 700;
             font-size: 0.9rem;
-            color: #4b2142;
+            color: var(--cc-plum);
+            box-shadow: 0 -2px 10px rgba(75, 33, 66, 0.07);
         }
 
-        /* --- Website-style FULL-WIDTH tabs --- */
-
-        /* Tabs container spacing */
+        /* ---------- Full-width tabs ---------- */
         div[data-testid="stTabs"] {
             width: 100%;
             margin-top: 0.75rem;
             margin-bottom: 1.25rem;
         }
-
-        /* The tabs row */
         div[data-testid="stTabs"] [role="tablist"] {
             width: 100%;
             display: flex;
             justify-content: space-between;
-            gap: 0.75rem;
-            padding: 0.35rem 0.45rem;
-            border-bottom: 1px solid rgba(75,33,66,0.12);
+            gap: 0.4rem;
+            padding: 0.32rem;
+            background: var(--cc-plum-050);
+            border: 1px solid var(--cc-line);
+            border-radius: 999px;
         }
-
-        /* Each tab button (equal width) */
         div[data-testid="stTabs"] [role="tab"] {
             flex: 1 1 0;
             width: 100%;
             text-align: center;
             justify-content: center;
-
             background: transparent;
-            border: 1px solid rgba(75,33,66,0.18);
-            border-bottom: 0;
-            border-radius: 14px 14px 0 0;
-            padding: 0.65rem 0.95rem;
-
-            color: #4b2142;
-            font-weight: 650;
-            font-size: 0.95rem;
-            transition: all 120ms ease-in-out;
-        }
-
-        /* Hover state */
-        div[data-testid="stTabs"] [role="tab"]:hover {
-            background: rgba(75,33,66,0.06);
-            border-color: rgba(75,33,66,0.28);
-        }
-
-        /* Selected tab */
-        div[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
-            background: #ffffff;
-            border-color: rgba(75,33,66,0.35);
-            box-shadow: 0 10px 20px rgba(75,33,66,0.05);
-            position: relative;
-        }
-
-        /* Selected underline accent */
-        div[data-testid="stTabs"] [role="tab"][aria-selected="true"]::after {
-            content: "";
-            position: absolute;
-            left: 12%;
-            right: 12%;
-            bottom: -2px;
-            height: 3px;
+            border: 1px solid transparent;
             border-radius: 999px;
-            background: #4b2142;
+            padding: 0.6rem 0.9rem;
+            color: var(--cc-muted);
+            font-weight: 600;
+            font-size: 0.93rem;
+            transition: background 140ms ease, color 140ms ease,
+                        box-shadow 140ms ease, border-color 140ms ease;
         }
-
-        /* Remove Streamlit's default focus outline and replace with subtle ring */
+        div[data-testid="stTabs"] [role="tab"]:hover {
+            background: rgba(255, 255, 255, 0.75);
+            color: var(--cc-plum);
+        }
+        div[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+            background: var(--cc-surface);
+            color: var(--cc-plum);
+            border-color: var(--cc-line-2);
+            box-shadow: 0 2px 10px rgba(75, 33, 66, 0.10);
+        }
         div[data-testid="stTabs"] [role="tab"]:focus-visible {
             outline: none;
-            box-shadow: 0 0 0 3px rgba(75,33,66,0.18);
+            box-shadow: 0 0 0 3px var(--cc-ring);
         }
-
-        /* Content panel spacing */
-        div[data-testid="stTabs"] [data-testid="stTabContent"] {
-            padding-top: 0.75rem;
+        div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+        div[data-testid="stTabs"] [data-baseweb="tab-border"] {
+            display: none !important;
         }
+        div[data-testid="stTabs"] [data-testid="stTabContent"] { padding-top: 1rem; }
 
+        /* ---------- Misc ---------- */
+        hr { border-color: var(--cc-line); }
+        code {
+            background: var(--cc-plum-050);
+            color: var(--cc-plum-700);
+            border-radius: 6px;
+            padding: 0.1rem 0.35rem;
+        }
+        ::selection { background: var(--cc-plum-100); color: var(--cc-plum-700); }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # Header: centered logo and text
-        # Header: logo + title in a centered column
+    # Header: logo, title and subtitle in a centered column
     logo_path = HERE / "cutler.png"
     col_left, col_center, col_right = st.columns([1, 2, 1])
 
@@ -8233,7 +8398,14 @@ def main():
         if logo_path.exists():
             st.image(str(logo_path), width=260)
 
-        st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='app-header'>"
+            "<div class='app-title'>Cutler Capital Letter Scraper</div>"
+            "<div class='app-subtitle'>Fund letters, Seeking Alpha, Substack and podcasts,"
+            " excerpted and indexed by ticker</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
     # Sidebar: run settings
     st.sidebar.header("Run settings")
