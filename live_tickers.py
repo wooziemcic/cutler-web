@@ -209,6 +209,38 @@ def _parse_sheet_csv(text: str) -> Dict[str, List[str]]:
     raise ValueError("No ticker-like column found in Google Sheet Tickers tab.")
 
 
+def _apply_local_company_names(mapping: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    """Fill in company names for tickers the sheet only knows by symbol.
+
+    The Tickers tab has no company column - column A is the symbol and
+    columns B+ are broker coverage flags that echo the symbol back - so the
+    parser has no name to attach and falls back to the symbol itself.
+
+    That fallback is not only cosmetic. These names are compiled into the
+    keyword regexes used to find mentions in fund letters, Substack posts and
+    podcast transcripts, so a symbol-only name makes the scraper search for
+    "AMZN" instead of "Amazon" and miss the prose mentions that make up most
+    real hits. Prefer a real name whenever tickers.py knows one.
+
+    A symbol with no known name keeps the symbol as its keyword: an empty
+    keyword list would compile to a regex that matches every paragraph.
+    """
+    local = _load_local_tickers()
+    out: Dict[str, List[str]] = {}
+    for symbol, names in (mapping or {}).items():
+        # A sheet value equal to the symbol means "no name", not a real name.
+        from_sheet = [
+            str(n).strip()
+            for n in (names or [])
+            if str(n).strip() and str(n).strip().upper() != symbol
+        ]
+        if from_sheet:
+            out[symbol] = from_sheet
+            continue
+        out[symbol] = list(local.get(symbol) or []) or [symbol]
+    return out
+
+
 def _http_error_summary(resp: requests.Response) -> str:
     reason = (resp.reason or "").strip()
     if reason:
@@ -235,7 +267,7 @@ def load_tickers_from_google_sheet(timeout: int = 12) -> tuple[Dict[str, List[st
             if not parsed:
                 errors.append(f"{pattern_name}: CSV parsed but no tickers found")
                 continue
-            return parsed, pattern_name
+            return _apply_local_company_names(parsed), pattern_name
         except Exception as exc:
             errors.append(f"{pattern_name}: {type(exc).__name__}: {exc}")
     raise RuntimeError("; ".join(errors) if errors else "Google Sheet CSV fetch failed.")
