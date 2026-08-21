@@ -154,40 +154,92 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "file"
 
 
-def _load_ticker_display_names(here: Path) -> Dict[str, str]:
+def _load_local_display_names(here: Path) -> Dict[str, str]:
     """
-    Return {ticker: preferred_display_name}, preferring the live Google Sheet
-    ticker helper and falling back to local tickers.py.
+    Return {TICKER: company_name} from the local tickers.py name dictionary.
+
+    Resolved next to this module first so it works no matter which working
+    directory a run was launched from, then relative to `here` as a fallback.
     """
     mapping: Dict[str, str] = {}
+    candidates = [Path(__file__).resolve().parent / "tickers.py", here / "tickers.py"]
+    for tp in candidates:
+        try:
+            if not tp.exists():
+                continue
+        except Exception:
+            continue
+
+        try:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location("tickers", str(tp))
+            if not spec or not spec.loader:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["tickers"] = mod
+            spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+            tickers = getattr(mod, "tickers", {}) or {}
+        except Exception:
+            continue
+
+        for tkr, names in tickers.items():
+            symbol = str(tkr or "").strip().upper()
+            if not symbol:
+                continue
+            name = ""
+            if isinstance(names, list) and names:
+                name = str(names[0]).strip()
+            elif names and not isinstance(names, list):
+                name = str(names).strip()
+            # Every local entry is a curated name, so keep it even when the
+            # name matches the symbol (IBM, SLB, Etsy).
+            if name and symbol not in mapping:
+                mapping[symbol] = name
+        if mapping:
+            break
+    return mapping
+
+
+def _load_ticker_display_names(here: Path) -> Dict[str, str]:
+    """
+    Return {ticker: preferred_display_name}.
+
+    Names are resolved per ticker, best source first:
+      1. the live Google Sheet, when its Tickers tab carries a company column
+      2. the local tickers.py name dictionary
+      3. the ticker itself
+
+    The sheet echoes the ticker back when it has no company column, so a sheet
+    value equal to the ticker counts as "no name" and falls through to step 2.
+    """
+    local = _load_local_display_names(here)
+    mapping: Dict[str, str] = {}
+
     try:
         from live_tickers import get_ticker_universe  # type: ignore
 
         live = get_ticker_universe()
-        if isinstance(live, dict) and live:
-            for tkr, names in live.items():
-                mapping[str(tkr).strip().upper()] = (
-                    str(names[0]).strip() if isinstance(names, list) and names and str(names[0]).strip() else str(tkr).strip().upper()
-                )
-            if mapping:
-                return mapping
     except Exception:
-        pass
+        live = None
 
-    tp = here / "tickers.py"
-    if not tp.exists():
-        return mapping
+    if isinstance(live, dict):
+        for tkr, names in live.items():
+            symbol = str(tkr).strip().upper()
+            if not symbol:
+                continue
+            sheet_name = ""
+            if isinstance(names, list) and names and str(names[0]).strip():
+                sheet_name = str(names[0]).strip()
+            if sheet_name and sheet_name.upper() != symbol:
+                mapping[symbol] = sheet_name
+            else:
+                mapping[symbol] = local.get(symbol, symbol)
 
-    import importlib.util
+    # Keep names for tickers that exist locally but not in the sheet.
+    for symbol, name in local.items():
+        mapping.setdefault(symbol, name)
 
-    spec = importlib.util.spec_from_file_location("tickers", str(tp))
-    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    assert spec and spec.loader
-    sys.modules["tickers"] = mod
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
-    tickers = getattr(mod, "tickers", {})
-    for tkr, names in (tickers or {}).items():
-        mapping[tkr] = (names[0] if isinstance(names, list) and names else str(tkr))
     return mapping
 
 

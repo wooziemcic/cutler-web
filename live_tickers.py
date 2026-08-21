@@ -80,11 +80,13 @@ def _normalize_ticker_mapping(raw: dict) -> Dict[str, List[str]]:
     return dict(sorted(out.items()))
 
 
-def _find_column(headers: list[str], candidates: set[str]) -> str | None:
+def _find_column(headers: list[str], candidates: set[str], allow_substring: bool = True) -> str | None:
     normalized = {h: str(h or "").strip().lower().replace("_", " ") for h in headers}
     for original, cleaned in normalized.items():
         if cleaned in candidates:
             return original
+    if not allow_substring:
+        return None
     for original, cleaned in normalized.items():
         if any(c in cleaned for c in candidates):
             return original
@@ -99,7 +101,11 @@ def _split_ticker_cell(value: str) -> list[str]:
     out: list[str] = []
     for part in parts:
         symbol = part.replace("$", "").strip().upper()
-        symbol = "".join(symbol.split())
+        if len(symbol.split()) > 1:
+            # Section dividers such as "CREDIT ONLY" are labels, not tickers.
+            # Real symbols never contain an internal space; dual listings like
+            # "IAUX / IAU" have already been split on the delimiter above.
+            continue
         if not symbol:
             continue
         if symbol not in out:
@@ -118,66 +124,89 @@ def _looks_like_ticker_cell(value: str) -> bool:
     return bool(symbols) and all(1 <= len(sym) <= 12 and any(ch.isalpha() for ch in sym) for sym in symbols)
 
 
-def _parse_sheet_csv(text: str) -> Dict[str, List[str]]:
-    rows = list(csv.reader(io.StringIO(text)))
-    rows = [[str(cell or "").strip() for cell in row] for row in rows if any(str(cell or "").strip() for cell in row)]
-    if not rows:
-        raise ValueError("Google Sheet CSV export returned no rows.")
+TICKER_HEADER_NAMES = {"ticker", "tickers", "symbol", "ticker symbol", "stock ticker"}
+COMPANY_HEADER_NAMES = {
+    "company",
+    "company name",
+    "name",
+    "issuer",
+    "security name",
+    "security",
+    "entity",
+    "entity name",
+}
 
-    # Headerless ticker tab: Column A ticker, optional Column B company name.
-    if rows and _looks_like_ticker_cell(rows[0][0]) and not _find_column(rows[0], {"ticker", "symbol", "ticker symbol", "stock ticker"}):
-        out: Dict[str, List[str]] = {}
-        for row in rows:
-            ticker_cell = row[0] if row else ""
-            company = row[1].strip() if len(row) > 1 else ""
-            for ticker in _split_ticker_cell(ticker_cell):
-                out.setdefault(ticker, [])
-                display_name = company or ticker
-                if display_name and display_name not in out[ticker]:
-                    out[ticker].append(display_name)
-        return dict(sorted(out.items()))
 
-    # Headered sheet path. Scan the first few rows because Sheets sometimes
-    # include notes or blank title rows above the real column names.
-    header_idx = None
-    ticker_col_idx = None
-    company_col_idx = None
+def _find_header_row(rows: list[list[str]]) -> tuple[int | None, int | None, int | None]:
+    """
+    Locate the header row and the ticker/company column positions.
+
+    Returns (header_idx, ticker_col_idx, company_col_idx). company_col_idx is
+    None when the sheet carries no company-name column at all.
+    """
     for idx, row in enumerate(rows[:10]):
-        headers = row
-        ticker_col = _find_column(headers, {"ticker", "symbol", "ticker symbol", "stock ticker"})
-        if ticker_col:
-            header_idx = idx
-            ticker_col_idx = headers.index(ticker_col)
-            company_col = _find_column(headers, {"company", "company name", "name", "issuer", "security name"})
-            company_col_idx = headers.index(company_col) if company_col in headers else None
-            break
+        ticker_col = _find_column(row, TICKER_HEADER_NAMES)
+        if not ticker_col:
+            continue
+        ticker_col_idx = row.index(ticker_col)
+        # Exact matching only: a coverage column such as "Goldman Sachs" must
+        # never be mistaken for a company-name column.
+        company_col = _find_column(row, COMPANY_HEADER_NAMES, allow_substring=False)
+        company_col_idx = row.index(company_col) if company_col in row else None
+        return idx, ticker_col_idx, company_col_idx
+    return None, None, None
 
-    if header_idx is None or ticker_col_idx is None:
-        # Last-resort: if the first column is ticker-like across the rows, treat it as a ticker list.
-        if rows and sum(1 for row in rows if row and _looks_like_ticker_cell(row[0])) >= max(1, len(rows) // 2):
-            out: Dict[str, List[str]] = {}
-            for row in rows:
-                ticker_cell = row[0] if row else ""
-                company = row[1].strip() if len(row) > 1 else ""
-                for ticker in _split_ticker_cell(ticker_cell):
-                    out.setdefault(ticker, [])
-                    display_name = company or ticker
-                    if display_name and display_name not in out[ticker]:
-                        out[ticker].append(display_name)
-            return dict(sorted(out.items()))
-        raise ValueError("No ticker-like column found in Google Sheet Tickers tab.")
 
-    ticker_col = _find_column(headers, {"ticker", "symbol", "ticker symbol", "stock ticker"})
+def _rows_to_ticker_map(
+    rows: list[list[str]],
+    *,
+    ticker_col_idx: int = 0,
+    company_col_idx: int | None = None,
+    start: int = 0,
+) -> Dict[str, List[str]]:
+    """Build {TICKER: [display_name]} from data rows, skipping banners/headers."""
     out: Dict[str, List[str]] = {}
-    for row in rows[header_idx + 1:]:
+    for row in rows[start:]:
         ticker_value = row[ticker_col_idx] if ticker_col_idx < len(row) else ""
-        company = row[company_col_idx].strip() if company_col_idx is not None and company_col_idx < len(row) else ""
+        company = (
+            row[company_col_idx].strip()
+            if company_col_idx is not None and company_col_idx < len(row)
+            else ""
+        )
         for ticker in _split_ticker_cell(ticker_value):
             out.setdefault(ticker, [])
             display_name = company or ticker
             if display_name and display_name not in out[ticker]:
                 out[ticker].append(display_name)
     return dict(sorted(out.items()))
+
+
+def _parse_sheet_csv(text: str) -> Dict[str, List[str]]:
+    rows = list(csv.reader(io.StringIO(text)))
+    rows = [[str(cell or "").strip() for cell in row] for row in rows if any(str(cell or "").strip() for cell in row)]
+    if not rows:
+        raise ValueError("Google Sheet CSV export returned no rows.")
+
+    # Find the real header row first. Google Sheets tabs often carry banner or
+    # note rows above the column names, and those rows must never be read as data.
+    header_idx, ticker_col_idx, company_col_idx = _find_header_row(rows)
+    if header_idx is not None and ticker_col_idx is not None:
+        return _rows_to_ticker_map(
+            rows,
+            ticker_col_idx=ticker_col_idx,
+            company_col_idx=company_col_idx,
+            start=header_idx + 1,
+        )
+
+    # Headerless ticker tab: Column A ticker, optional Column B company name.
+    if _looks_like_ticker_cell(rows[0][0] if rows[0] else ""):
+        return _rows_to_ticker_map(rows, ticker_col_idx=0, company_col_idx=1, start=0)
+
+    # Last-resort: first column is ticker-like across most rows, so treat it as a ticker list.
+    if sum(1 for row in rows if row and _looks_like_ticker_cell(row[0])) >= max(1, len(rows) // 2):
+        return _rows_to_ticker_map(rows, ticker_col_idx=0, company_col_idx=1, start=0)
+
+    raise ValueError("No ticker-like column found in Google Sheet Tickers tab.")
 
 
 def _http_error_summary(resp: requests.Response) -> str:
