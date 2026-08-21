@@ -8439,10 +8439,12 @@ def main():
             st.session_state["quarters"] = [default_q]
             st.session_state["auto_default_quarter"] = default_q
 
+    # Value comes from session_state via key="quarters", which the block above
+    # always initialises. Passing default= as well is what made Streamlit warn
+    # about a widget both created with a default and set via the Session State API.
     quarters = st.sidebar.multiselect(
         "Quarters",
         quarter_options,
-        default=st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]),
         key="quarters",
     )
 
