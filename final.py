@@ -4360,7 +4360,7 @@ def draw_podcast_intelligence_section():
         active_key = chosen_prev_key
     else:
         # Nothing selected and not run in this rerun -> show clean slate
-        st.info("Run the analysis first, or load a previous run to see results.")
+        st.caption("Run the analysis first, or load a previous run to see results.")
         return
 
     active_entry = podcast_cache.get(active_key)
@@ -4372,7 +4372,7 @@ def draw_podcast_intelligence_section():
     insights_path = Path(active_entry["insights_path"])
 
     if not insights_path.exists() or not excerpts_path.exists():
-        st.info("Run the analysis first to see podcast intelligence.")
+        st.caption("Run the analysis first to see podcast intelligence.")
         return
 
     # --- 4) Display results from the chosen JSON ---
@@ -6451,7 +6451,7 @@ def draw_dashboard_section() -> None:
         change_inventory = pd.DataFrame()
 
     if relevance_df.empty and dashboard_index.empty:
-        st.info("Process a Daily Research ZIP first to populate the Dashboard.")
+        st.caption("Process a Daily Research ZIP first to populate the Dashboard.")
         return
 
     document_types = relevance_df.get("document_type", pd.Series(dtype=str)).astype(str)
@@ -7120,7 +7120,7 @@ def draw_daily_research_brief_section() -> None:
                     for warning in warnings[:100]:
                         st.text(warning)
         else:
-            st.info("Process a daily research ZIP to build the inventory.")
+            st.caption("Process a daily research ZIP to build the inventory.")
 
         st.markdown("#### 4. Relevance Scoring / Selected Files")
         if isinstance(relevance_df, pd.DataFrame):
@@ -7286,7 +7286,7 @@ def draw_daily_research_brief_section() -> None:
                 st.info("No tickers currently have two or more recognized broker/source reports.")
 
         else:
-            st.info("Process a daily research ZIP to use the Broker Consensus Comparator.")
+            st.caption("Process a daily research ZIP to use the Broker Consensus Comparator.")
 
     with daily_ticker_tab:
         if isinstance(relevance_df, pd.DataFrame):
@@ -7389,7 +7389,7 @@ def draw_daily_research_brief_section() -> None:
                 st.info("No ticker/entity was identified conservatively from the uploaded research set.")
 
         else:
-            st.info("Process a daily research ZIP to generate a ticker-level memo.")
+            st.caption("Process a daily research ZIP to generate a ticker-level memo.")
 
     with daily_cross_tab:
         st.markdown("#### Cross-Day Comparison / What Changed…")
@@ -7650,7 +7650,7 @@ def draw_daily_research_brief_section() -> None:
         indexed_sources_df = daily_research_brief.build_indexed_sources_summary(research_index_df)
         st.session_state["indexed_sources"] = indexed_sources_df.to_dict(orient="records")
         if indexed_sources_df.empty:
-            st.info("Add a processed daily ZIP or processed cross-day ZIPs to begin searching.")
+            st.caption("Add a processed daily ZIP or processed cross-day ZIPs to begin searching.")
         else:
             st.markdown("**Indexed Dates / Folders**")
             st.dataframe(indexed_sources_df, use_container_width=True, hide_index=True)
@@ -7963,7 +7963,7 @@ def draw_daily_research_brief_section() -> None:
                     )
             st.markdown(brief_text)
         else:
-            st.info("After processing, click Generate Cutler-Style Daily Brief to create the packet.")
+            st.caption("After processing, click Generate Cutler-Style Daily Brief to create the packet.")
 
         st.download_button(
             "Download Cutler-style daily brief Markdown",
@@ -8116,7 +8116,7 @@ def draw_fund_families_section(
 
         manifests = _load_manifests(checker_batch, checker_quarter)
         if not manifests:
-            st.info(
+            st.caption(
                 "No history found yet for this batch and quarter. "
                 "Run the scraper at least twice to compare documents."
             )
@@ -8201,7 +8201,7 @@ def draw_fund_families_section(
 
         ai_manifests = _load_manifests(ai_batch, ai_quarter)
         if not ai_manifests:
-            st.info(
+            st.caption(
                 "No manifests found yet for this batch and quarter. "
                 "Run this batch at least once (full or incremental) before using AI insights."
             )
