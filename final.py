@@ -4360,7 +4360,7 @@ def draw_podcast_intelligence_section():
         active_key = chosen_prev_key
     else:
         # Nothing selected and not run in this rerun -> show clean slate
-        st.info("Run the analysis first, or load a previous run to see results.")
+        st.caption("Run the analysis first, or load a previous run to see results.")
         return
 
     active_entry = podcast_cache.get(active_key)
@@ -4372,7 +4372,7 @@ def draw_podcast_intelligence_section():
     insights_path = Path(active_entry["insights_path"])
 
     if not insights_path.exists() or not excerpts_path.exists():
-        st.info("Run the analysis first to see podcast intelligence.")
+        st.caption("Run the analysis first to see podcast intelligence.")
         return
 
     # --- 4) Display results from the chosen JSON ---
@@ -6451,7 +6451,7 @@ def draw_dashboard_section() -> None:
         change_inventory = pd.DataFrame()
 
     if relevance_df.empty and dashboard_index.empty:
-        st.info("Process a Daily Research ZIP first to populate the Dashboard.")
+        st.caption("Process a Daily Research ZIP first to populate the Dashboard.")
         return
 
     document_types = relevance_df.get("document_type", pd.Series(dtype=str)).astype(str)
@@ -7120,7 +7120,7 @@ def draw_daily_research_brief_section() -> None:
                     for warning in warnings[:100]:
                         st.text(warning)
         else:
-            st.info("Process a daily research ZIP to build the inventory.")
+            st.caption("Process a daily research ZIP to build the inventory.")
 
         st.markdown("#### 4. Relevance Scoring / Selected Files")
         if isinstance(relevance_df, pd.DataFrame):
@@ -7286,7 +7286,7 @@ def draw_daily_research_brief_section() -> None:
                 st.info("No tickers currently have two or more recognized broker/source reports.")
 
         else:
-            st.info("Process a daily research ZIP to use the Broker Consensus Comparator.")
+            st.caption("Process a daily research ZIP to use the Broker Consensus Comparator.")
 
     with daily_ticker_tab:
         if isinstance(relevance_df, pd.DataFrame):
@@ -7389,7 +7389,7 @@ def draw_daily_research_brief_section() -> None:
                 st.info("No ticker/entity was identified conservatively from the uploaded research set.")
 
         else:
-            st.info("Process a daily research ZIP to generate a ticker-level memo.")
+            st.caption("Process a daily research ZIP to generate a ticker-level memo.")
 
     with daily_cross_tab:
         st.markdown("#### Cross-Day Comparison / What Changed…")
@@ -7650,7 +7650,7 @@ def draw_daily_research_brief_section() -> None:
         indexed_sources_df = daily_research_brief.build_indexed_sources_summary(research_index_df)
         st.session_state["indexed_sources"] = indexed_sources_df.to_dict(orient="records")
         if indexed_sources_df.empty:
-            st.info("Add a processed daily ZIP or processed cross-day ZIPs to begin searching.")
+            st.caption("Add a processed daily ZIP or processed cross-day ZIPs to begin searching.")
         else:
             st.markdown("**Indexed Dates / Folders**")
             st.dataframe(indexed_sources_df, use_container_width=True, hide_index=True)
@@ -7963,7 +7963,7 @@ def draw_daily_research_brief_section() -> None:
                     )
             st.markdown(brief_text)
         else:
-            st.info("After processing, click Generate Cutler-Style Daily Brief to create the packet.")
+            st.caption("After processing, click Generate Cutler-Style Daily Brief to create the packet.")
 
         st.download_button(
             "Download Cutler-style daily brief Markdown",
@@ -7977,902 +7977,98 @@ def draw_daily_research_brief_section() -> None:
 
 # ---------- UI ----------
 
-def main():
-    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
+def draw_fund_families_section(
+    *,
+    batch_names: List[str],
+    quarter_options: List[str],
+    quarters: List[str],
+    default_q: Optional[str],
+    use_first_word: bool,
+) -> None:
+    """Fund Families tab: full run, incremental update, Document Checker, AI Insights.
 
-    # Global styling: Cutler purple theme and modernized controls
-    st.markdown(
-        """
-        <style>
-        /* Center all images (logo) */
-        .stImage img {
-            display: block;
-            margin-left: calc(100% - 20px);  /* pushes it ~20px to the right */
-            transform: translateX(-50%);
-        }
-        /* Overall background and font tweaks */
-        .stApp {
-            background: radial-gradient(circle at top left, #f5f0fb 0, #ffffff 40%, #f7f3fb 100%);
-        }
-        .block-container {
-            padding-top: 4rem;
-            max-width: 1100px;
-        }
-        .app-title {
-            text-align: center;
-            color: #4b2142;
-            font-size: 1.9rem;
-            font-weight: 700;
-            margin-bottom: 0.3rem;
-        }
-        .app-subtitle {
-            text-align: center;
-            color: #6b4f7a;
-            font-size: 0.95rem;
-            margin-top: 0.1rem;
-            margin-bottom: 1.4rem;
-        }
-
-        /* Sidebar */
-        [data-testid="stSidebar"] > div {
-            background: #fbf8ff;
-        }
-        [data-testid="stSidebar"] h2, [data-testid="stSidebar"] label {
-            color: #4b2142;
-        }
-        
-        header[data-testid="stHeader"] {
-            background: radial-gradient(circle at top left, #f5f0fb 0, #ffffff 40%, #f7f3fb 100%) !important;
-            box-shadow: none !important;
-            border-bottom: none !important;
-        }
-        [data-testid="stToolbar"] {
-            background: transparent !important;
-        }
-        header[data-testid="stHeader"] * {
-            color: #4b2142 !important;
-        }
-
-        /* Buttons: long, pill-shaped, purple */
-        .stButton>button {
-            width: 100%;
-            border-radius: 999px;
-            background: #4b2142;
-            color: #ffffff;
-            border: 1px solid #4b2142;
-            padding: 0.6rem 1.5rem;
-            font-weight: 600;
-            font-size: 0.95rem;
-        }
-        .stButton>button:hover {
-            background: #612a58;
-            border-color: #612a58;
-        }
-
-        /* Radio group as pill toggle */
-        div[role="radiogroup"] {
-            display: flex;
-            flex-wrap: nowrap;
-            gap: 0.4rem;
-        }
-        div[role="radiogroup"] > label {
-            flex: 1 1 0;
-            justify-content: center;
-            border-radius: 999px !important;
-            padding: 0.35rem 0.95rem !important;
-            border: 1px solid #d7c4f3 !important;
-            background: #f7f3fb !important;
-            color: #4b2142 !important;
-            font-weight: 500 !important;
-            white-space: nowrap;
-        }
-        div[role="radiogroup"] > label:hover {
-            border-color: #4b2142 !important;
-        }
-        div[role="radiogroup"] > label[data-baseweb="radio"] > div:first-child > div[aria-checked="true"] + div {
-            background: #4b2142 !important;
-        }
-
-        /* Card-style containers */
-        .cc-card {
-            background: #ffffffdd;
-            border-radius: 20px;
-            padding: 1.3rem 1.4rem;
-            border: 1px solid rgba(75,33,66,0.08);
-            box-shadow: 0 10px 30px rgba(75,33,66,0.04);
-            margin-bottom: 1.1rem;
-        }
-
-        /* Fund chips */
-        .fund-chip{
-            display:inline-block;
-            margin:6px 6px 0 0;
-            padding:6px 12px;
-            border-radius:14px;
-            background:#f5effc;
-            color:#4b2142;
-            font-size:12px;
-            font-weight:600;
-            border:1px solid rgba(75,33,66,0.35);
-            white-space:nowrap;
-        }
-
-        /* Gauge (needle) */
-        .gauge-wrapper {
-            margin-top: 0.5rem;
-            margin-bottom: 0.75rem;
-        }
-        .gauge {
-            width: 220px;
-            height: 120px;
-            margin: 0.2rem auto 0.1rem;
-            position: relative;
-        }
-        .gauge-body {
-            width: 100%;
-            height: 100%;
-            border-radius: 220px 220px 0 0;
-            background: #f5effc;
-            border: 1px solid rgba(75,33,66,0.25);
-            position: relative;
-            overflow: hidden;
-        }
-        .gauge-needle {
-            position: absolute;
-            width: 2px;
-            height: 85%;
-            top: 15%;
-            left: 50%;
-            background: #4b2142;
-            transform-origin: bottom center;
-            transition: transform 0.25s ease-out;
-        }
-        .gauge-cover {
-            width: 68%;
-            height: 68%;
-            background: #ffffff;
-            border-radius: 50%;
-            position: absolute;
-            bottom: -10%;
-            left: 50%;
-            transform: translateX(-50%);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 700;
-            font-size: 0.9rem;
-            color: #4b2142;
-        }
-
-        /* --- Website-style FULL-WIDTH tabs --- */
-
-        /* Tabs container spacing */
-        div[data-testid="stTabs"] {
-            width: 100%;
-            margin-top: 0.75rem;
-            margin-bottom: 1.25rem;
-        }
-
-        /* The tabs row */
-        div[data-testid="stTabs"] [role="tablist"] {
-            width: 100%;
-            display: flex;
-            justify-content: space-between;
-            gap: 0.75rem;
-            padding: 0.35rem 0.45rem;
-            border-bottom: 1px solid rgba(75,33,66,0.12);
-        }
-
-        /* Each tab button (equal width) */
-        div[data-testid="stTabs"] [role="tab"] {
-            flex: 1 1 0;
-            width: 100%;
-            text-align: center;
-            justify-content: center;
-
-            background: transparent;
-            border: 1px solid rgba(75,33,66,0.18);
-            border-bottom: 0;
-            border-radius: 14px 14px 0 0;
-            padding: 0.65rem 0.95rem;
-
-            color: #4b2142;
-            font-weight: 650;
-            font-size: 0.95rem;
-            transition: all 120ms ease-in-out;
-        }
-
-        /* Hover state */
-        div[data-testid="stTabs"] [role="tab"]:hover {
-            background: rgba(75,33,66,0.06);
-            border-color: rgba(75,33,66,0.28);
-        }
-
-        /* Selected tab */
-        div[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
-            background: #ffffff;
-            border-color: rgba(75,33,66,0.35);
-            box-shadow: 0 10px 20px rgba(75,33,66,0.05);
-            position: relative;
-        }
-
-        /* Selected underline accent */
-        div[data-testid="stTabs"] [role="tab"][aria-selected="true"]::after {
-            content: "";
-            position: absolute;
-            left: 12%;
-            right: 12%;
-            bottom: -2px;
-            height: 3px;
-            border-radius: 999px;
-            background: #4b2142;
-        }
-
-        /* Remove Streamlit's default focus outline and replace with subtle ring */
-        div[data-testid="stTabs"] [role="tab"]:focus-visible {
-            outline: none;
-            box-shadow: 0 0 0 3px rgba(75,33,66,0.18);
-        }
-
-        /* Content panel spacing */
-        div[data-testid="stTabs"] [data-testid="stTabContent"] {
-            padding-top: 0.75rem;
-        }
-
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Header: centered logo and text
-        # Header: logo + title in a centered column
-    logo_path = HERE / "cutler.png"
-    col_left, col_center, col_right = st.columns([1, 2, 1])
-
-    with col_center:
-        if logo_path.exists():
-            st.image(str(logo_path), width=260)
-
-        st.markdown("<div class='app-title'>Cutler Capital Letter Scraper</div>", unsafe_allow_html=True)
-
-    # Sidebar: run settings
-    st.sidebar.header("Run settings")
-    try:
-        _ticker_status = get_ticker_load_status()
-        if _ticker_status.source == "google_sheet":
-            st.sidebar.success(
-                f"Tickers loaded from Google Sheet: {_ticker_status.count}\n\n"
-                f"Pattern: {_ticker_status.url_pattern or 'csv'}\n\n"
-                f"Last loaded: {_ticker_status.loaded_at}"
-            )
-        else:
-            st.sidebar.warning(
-                f"{_ticker_status.message}\n\n"
-                f"Last checked: {_ticker_status.loaded_at}"
-            )
-    except Exception:
-        st.sidebar.warning("Using fallback local ticker list")
-
-    quarter_options = get_available_quarters()
-    default_q = choose_default_quarter(quarter_options)
-
-    # Auto-update the default quarter based on current date (ET),
-    # without overriding a user's manual selection.
-    if "quarters" not in st.session_state:
-        st.session_state["quarters"] = ([default_q] if default_q else quarter_options[:1])
-        st.session_state["auto_default_quarter"] = (st.session_state["quarters"][0] if st.session_state["quarters"] else None)
-    else:
-        prev_auto = st.session_state.get("auto_default_quarter")
-        if prev_auto and st.session_state.get("quarters") == [prev_auto] and default_q and default_q != prev_auto:
-            st.session_state["quarters"] = [default_q]
-            st.session_state["auto_default_quarter"] = default_q
-
-    quarters = st.sidebar.multiselect(
-        "Quarters",
-        quarter_options,
-        default=st.session_state.get("quarters") or ([default_q] if default_q else quarter_options[:1]),
-        key="quarters",
-    )
-
-    use_first_word = st.sidebar.checkbox(
-        "Use first word for search (recommended)",
-        value=True,
-    )
-
-    # Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
-    ai_score_enabled = st.sidebar.checkbox(
-        "AI relevance scoring (1–5 highlights)",
-        value=True,
-        help="Uses OpenAI to rate how directly a paragraph discusses the company. "
-             "Adds a rating tag and background highlight for faster skimming.",
-        key="ai_score_enabled",
-    )
-    ai_score_model = "gpt-4o-mini"
-    st.session_state["ai_score_model"] = ai_score_model
-
-    batch_names = list(RUNNABLE_BATCHES.keys())
-
-    # --- Tabs (website-style nav) ---
-    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
-
-    
-    # ---------------------- RUN ALL (orchestrator) ----------------------
-    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.markdown("### Run All (Fund Families Latest + Seeking Alpha All + Substack + Podcasts All)")
-
-    ra_state = _load_run_all_state()
-    ra_cfg = ra_state.get("config") or {}
-    ra_mf_days = st.selectbox(
-        "Fund Families Latest lookback (days)",
-        options=[7, 14, 30],
-        index=[7, 14, 30].index(int(ra_cfg.get("mf_lookback_days", 7))) if int(ra_cfg.get("mf_lookback_days", 7)) in [7, 14, 30] else 0,
-        key="run_all_mf_days",
-    )
-    ra_sa_max = st.number_input(
-        "Seeking Alpha max articles per ticker",
-        min_value=1,
-        max_value=20,
-        value=int(ra_cfg.get("sa_max_articles", 5)),
-        step=1,
-        key="run_all_sa_max_articles",
-    )
-    ra_sa_model = st.selectbox(
-        "Seeking Alpha model (digest/export)",
-        options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
-        index=0,
-        key="run_all_sa_model",
-    )
-
-    ra_substack_days = st.selectbox(
-        "Substack lookback (days)",
-        options=[2, 7],
-        index=[2, 7].index(int(ra_cfg.get("substack_lookback_days", 2))) if int(ra_cfg.get("substack_lookback_days", 2)) in [2, 7] else 0,
-        key="run_all_substack_days",
-    )
-    ra_substack_max = st.number_input(
-        "Substack max posts per ticker",
-        min_value=1,
-        max_value=10,
-        value=int(ra_cfg.get("substack_max_posts", 3)),
-        step=1,
-        key="run_all_substack_max_posts",
-    )
-
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        start_all = st.button("Run All", use_container_width=True, key="run_all_start")
-    with c2:
-        resume_all = st.button(
-            "Resume",
-            use_container_width=True,
-            key="run_all_resume",
-            disabled=not bool(ra_state and ra_state.get("status") == "running"),
+    Extracted verbatim from main() so it can be registered as a page; the five
+    arguments are the sidebar values the block previously read as main() locals.
+    """
+    if st.button("Clean current tab cache", key="clean_mf_cache", use_container_width=True):
+        _clear_session_keys(
+            exact=["batch_cache"],
+            prefixes=["mf_","fund_","funds_","batch_"],
         )
-    with c3:
-        clear_all = st.button("Clear Run All state", use_container_width=True, key="run_all_clear")
-
-    if clear_all:
-        _clear_run_all_state()
         st.rerun()
 
-    if start_all:
-        ra_state = {
-            "status": "running",
-            "current_step": "fund_families",
-            "completed": [],
-            "outputs": {},
-            "config": {
-                "mf_lookback_days": int(ra_mf_days),
-                "sa_max_articles": int(ra_sa_max),
-                "sa_model": str(ra_sa_model),
-                            "substack_lookback_days": int(ra_substack_days),
-                "substack_max_posts": int(ra_substack_max),
-},
-            "started_at": _now_et().isoformat(),
-        }
-        _save_run_all_state(ra_state)
-        st.rerun()
+    # Main controls in a card — full run
+    with st.container(border=True):
+        st.markdown("#### Run scope", unsafe_allow_html=True)
+        st.write("Choose whether you want a full run across all batches or a targeted test.")
 
-    if resume_all:
-        st.rerun()
+        run_mode = st.radio(
+            "Run mode",
+            ["Run all 7 batches", "Run a specific batch", "Run Batch 8 — Latest"],
+            index=1,
+        )
 
-    # Existing outputs (persisted)
-    outs = ra_state.get("outputs") or {}
-
-    # Download-button helper: cache PDF bytes so reruns (e.g., while Run All is running)
-    # do not repeatedly re-read large files from disk. This prevents downloads from
-    # "stalling" other steps when the app reruns.
-    def _dl_bytes_cached(fp: Path) -> bytes:
-        try:
-            st_ = fp.stat()
-            cache_key = f"{str(fp)}::{st_.st_size}::{st_.st_mtime_ns}"
-        except Exception:
-            cache_key = str(fp)
-        cache = st.session_state.setdefault("_dl_cache_pdf_bytes", {})
-        if cache_key in cache:
-            return cache[cache_key]
-        data = fp.read_bytes()
-        # Keep cache bounded to avoid memory growth
-        if isinstance(cache, dict) and len(cache) > 8:
-            try:
-                cache.clear()
-            except Exception:
-                pass
-        cache[cache_key] = data
-        return data
-
-
-    mf_paths = (outs.get("fund_families") or {}).get("paths") or []
-    if mf_paths:
-        st.markdown("**Fund Families outputs:**")
-        for pinfo in mf_paths:
-            try:
-                fp = Path(pinfo.get("path") or "")
-                if fp.exists():
-                    st.download_button(
-                        f"Download {fp.name}",
-                        data=_dl_bytes_cached(fp),
-                        file_name=fp.name,
-                        mime="application/pdf",
-                        key=f"ra_dl_mf_{fp.name}",
-                        use_container_width=True,
-                    )
-            except Exception:
-                pass
-
-    sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
-    if sa_path:
-        try:
-            fp = Path(sa_path)
-            if fp.exists():
-                st.download_button(
-                    f"Download {fp.name}",
-                    data=_dl_bytes_cached(fp),
-                    file_name=fp.name,
-                    mime="application/pdf",
-                    key=f"ra_dl_sa_{fp.name}",
-                    use_container_width=True,
-                )
-        except Exception:
-            pass
-
-
-    sub_path = (outs.get("substack") or {}).get("path") or ""
-    if sub_path:
-        try:
-            fp = Path(sub_path)
-            if fp.exists():
-                st.download_button(
-                    f"Download {fp.name}",
-                    data=_dl_bytes_cached(fp),
-                    file_name=fp.name,
-                    mime="application/pdf",
-                    key=f"ra_dl_sub_{fp.name}",
-                    use_container_width=True,
-                )
-        except Exception:
-            pass
-
-    pod_path = (outs.get("podcasts") or {}).get("path") or ""
-    if pod_path:
-        try:
-            fp = Path(pod_path)
-            if fp.exists():
-                st.download_button(
-                    f"Download {fp.name}",
-                    data=_dl_bytes_cached(fp),
-                    file_name=fp.name,
-                    mime="application/pdf",
-                    key=f"ra_dl_pod_{fp.name}",
-                    use_container_width=True,
-                )
-        except Exception:
-            pass
-
-    # Execute next step if running
-    if ra_state.get("status") == "running":
-        step = ra_state.get("current_step")
-        cfg = ra_state.get("config") or {}
-
-        # Auto-skip completed steps (prevents download_button reruns from restarting work)
-        # If an output path is already persisted and the file exists on disk, mark the step complete and advance.
-        _advance_guard = 0
-        while _advance_guard < 6 and ra_state.get("status") == "running":
-            _advance_guard += 1
-            step = ra_state.get("current_step")
-            outs = ra_state.get("outputs") or {}
-            completed = ra_state.get("completed") or []
-            if not isinstance(completed, list):
-                completed = []
-
-            def _mark_done(_step: str, _next: str):
-                if _step not in completed:
-                    completed.append(_step)
-                ra_state["completed"] = completed
-                ra_state["current_step"] = _next
-                _save_run_all_state(ra_state)
-
-            if step == "fund_families":
-                mf_paths = (outs.get("fund_families") or {}).get("paths") or []
-                ok = False
-                try:
-                    for pinfo in mf_paths:
-                        fp = Path((pinfo or {}).get("path") or "")
-                        if fp and fp.exists():
-                            ok = True
-                            break
-                except Exception:
-                    ok = False
-                if ok:
-                    _mark_done("fund_families", "seeking_alpha")
-                    continue
-
-            if step == "seeking_alpha":
-                sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
-                if sa_path and Path(sa_path).exists():
-                    _mark_done("seeking_alpha", "substack")
-                    continue
-
-            if step == "substack":
-                sub_path = (outs.get("substack") or {}).get("path") or ""
-                if sub_path and Path(sub_path).exists():
-                    _mark_done("substack", "podcasts")
-                    continue
-
-            if step == "podcasts":
-                pod_path = (outs.get("podcasts") or {}).get("path") or ""
-                if pod_path and Path(pod_path).exists():
-                    # If podcasts already exist, finalize Run All state.
-                    if "podcasts" not in completed:
-                        completed.append("podcasts")
-                    ra_state["completed"] = completed
-                    ra_state["current_step"] = "done"
-                    ra_state["status"] = "complete"
-                    ra_state["completed_at"] = _now_et().isoformat()
-                    _save_run_all_state(ra_state)
-                    break
-
-            break
-
-        try:
-            if step == "fund_families":
-                days = int(cfg.get("mf_lookback_days", 7))
-                # NOTE: Do not wrap Fund Families in st.status(expanded=True) because Fund Families uses expanders internally.
-                st.info(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
-                quarter_options = get_available_quarters()
-                run_batch8_latest(quarter_options, days, use_first_word, ensure_compiled_index=True)
-                cache_all = st.session_state.get("batch_cache", {}) or {}
-                cache_key = f"{BATCH8_NAME}|{days}d"
-                by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
-                paths = []
-                for q, qd in by_q.items():
-                    c = (qd or {}).get("compiled") or ""
-                    if c and Path(c).exists():
-                        paths.append({"quarter": q, "path": c})
-                fund_output = ra_state.setdefault("outputs", {}).setdefault("fund_families", {})
-                fund_output["paths"] = paths
-                fund_output["result"] = "compiled" if paths else "no_excerpts"
-
-                if not paths:
-                    st.warning(
-                        "Run All: Fund Families finished, but no compiled Fund Families PDF was produced. "
-                        "This usually means no matching letters or narrative ticker excerpts were found. "
-                        "Continuing to Seeking Alpha."
-                    )
-
-                if "fund_families" not in (ra_state.get("completed") or []):
-                    ra_state.setdefault("completed", []).append("fund_families")
-                ra_state["current_step"] = "seeking_alpha"
-                _save_run_all_state(ra_state)
-                st.rerun()
-
-            if step == "seeking_alpha":
-                max_articles = int(cfg.get("sa_max_articles", 5))
-                model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
-                with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
-                    universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
-                    if not universe:
-                        universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
-
-                    out_pdf = _runall_sa_step_incremental(universe=universe, max_articles=max_articles, model=model_name)
-                    if out_pdf:
-                        ra_state.setdefault("outputs", {}).setdefault("seeking_alpha", {})["path"] = str(out_pdf)
-                        ra_state.setdefault("completed", []).append("seeking_alpha")
-                        ra_state["current_step"] = "substack"
-                        _save_run_all_state(ra_state)
-                        st.rerun()
-
-            if step == "substack":
-                days_back = int(cfg.get("substack_lookback_days", 2))
-                max_posts = int(cfg.get("substack_max_posts", 3))
-                with st.status(f"Run All: Substack — building compiled PDF (last {days_back} days)", expanded=True):
-                    universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
-                    if not universe:
-                        universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
-
-                    out_pdf = _runall_substack_step_incremental(universe=universe, lookback_days=days_back, max_posts=max_posts)
-                    if out_pdf:
-                        ra_state.setdefault("outputs", {}).setdefault("substack", {})["path"] = str(out_pdf)
-                        ra_state.setdefault("completed", []).append("substack")
-                        ra_state["current_step"] = "podcasts"
-                        _save_run_all_state(ra_state)
-                        st.rerun()
-
-            if step == "podcasts":
-                # Run All podcasts lookback (days). Kept separate from the Podcast tab lookback.
-                # Default is 2 days as requested.
-                days_back = int(cfg.get("podcast_runall_lookback_days", 2))
-                model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
-
-                # Run podcasts in small groups to avoid long blocking runs in Streamlit.
-                run_dir = BASE / "Podcasts" / "_run_all"
-                run_dir.mkdir(parents=True, exist_ok=True)
-
-                pr = ra_state.get("podcasts_runall") or {}
-                if not isinstance(pr, dict):
-                    pr = {}
-                group_index = int(pr.get("group_index", 0))
-
-                # Prefer the same grouping logic used in the Podcast tab (9 buckets).
-                groups = _podcast_run_all_group_ids(n_groups=9)
-                if not groups:
-                    # Fallback: single group from podcasts_config
-                    try:
-                        from podcasts_config import PODCASTS as _PODCASTS  # type: ignore
-                        fallback_ids = []
-                        for p in (_PODCASTS or []):
-                            pid = getattr(p, "podcast_id", None) or getattr(p, "id", None) or getattr(p, "pod_id", None)
-                            if pid:
-                                fallback_ids.append(str(pid))
-                        groups = [fallback_ids] if fallback_ids else []
-                    except Exception:
-                        groups = []
-
-                total_groups = len(groups)
-
-                # Persistent checkpointing for Run All podcasts (survives reloads/timeouts)
-                ckpt_path = (BASE / "Podcasts" / "runall_podcasts_state.json")
-                run_sig = {
-                    "date": str(_now_et().date()),
-                    "days_back": days_back,
-                    "model_name": model_name,
-                    "total_groups": total_groups,
-                }
-                ckpt = _load_json_safe(ckpt_path, {})
-                if not isinstance(ckpt, dict):
-                    ckpt = {}
-                # If the signature changed (new day/params), reset checkpoint.
-                if ckpt.get("sig") != run_sig:
-                    ckpt = {"sig": run_sig, "completed_groups": []}
-                    _save_json_safe(ckpt_path, ckpt)
-
-                completed_groups = ckpt.get("completed_groups") or []
-                if not isinstance(completed_groups, list):
-                    completed_groups = []
-                completed_set = {int(x) for x in completed_groups if str(x).isdigit()}
-                # Resume from first incomplete group, regardless of session_state value.
-                for gi in range(total_groups):
-                    if gi not in completed_set:
-                        group_index = gi
-                        break
-                else:
-                    group_index = total_groups
-
-                # Progress bar for Run All podcasts (group-level)
-                _completed_groups_n = len(completed_set)
-                _prog_den = max(1, int(total_groups))
-                _prog_num = min(_prog_den, int(_completed_groups_n))
-                st.progress(float(_prog_num) / float(_prog_den))
-                st.caption(f"Run All: Podcasts progress — {_prog_num}/{_prog_den} groups complete")
-
-
-
-                if not groups or total_groups == 0:
-                    st.warning("No podcast IDs found; skipping podcasts.")
-                    out_pdf = None
-                else:
-                    # Process one group per rerun for stability
-                    if group_index < total_groups:
-                        with st.status(
-                            f"Run All: Podcasts — processing group {group_index + 1}/{total_groups} (last {days_back} days)",
-                            expanded=True,
-                        ):
-                            podcast_ids = groups[group_index] or []
-                            if not podcast_ids:
-                                st.info("Empty podcast group; skipping.")
-                            else:
-                                group_dir = run_dir / f"g{group_index + 1:02d}"
-                                podcasts_root = group_dir / "transcripts"
-                                excerpts_path = group_dir / "podcast_excerpts.json"
-                                insights_path = group_dir / "podcast_insights.json"
-                                group_dir.mkdir(parents=True, exist_ok=True)
-
-                                _ = run_podcast_pipeline_from_ui(
-                                    days_back=days_back,
-                                    podcast_ids=podcast_ids,
-                                    podcasts_root=podcasts_root,
-                                    excerpts_path=excerpts_path,
-                                    insights_path=insights_path,
-                                    model_name=model_name,
-                                )
-
-                        # Mark this group completed and persist progress
-                        try:
-                            ckpt = _load_json_safe(ckpt_path, {})
-                            if not isinstance(ckpt, dict):
-                                ckpt = {"sig": run_sig, "completed_groups": []}
-                            cg = ckpt.get("completed_groups") or []
-                            if not isinstance(cg, list):
-                                cg = []
-                            if group_index not in cg:
-                                cg.append(group_index)
-                            ckpt["sig"] = run_sig
-                            ckpt["completed_groups"] = cg
-                            _save_json_safe(ckpt_path, ckpt)
-                        except Exception:
-                            pass
-
-                        pr["group_index"] = group_index + 1
-                        pr["total_groups"] = total_groups
-                        ra_state["podcasts_runall"] = pr
-                        _save_run_all_state(ra_state)
-                        st.rerun()
-
-                    # All groups done -> merge and build final PDF once
-                    with st.status(
-                        f"Run All: Podcasts — merging groups and building compiled PDF (last {days_back} days)",
-                        expanded=True,
-                    ):
-                        merged_excerpts: dict = {}
-                        merged_insights = []
-
-                        for gi in range(total_groups):
-                            group_dir = run_dir / f"g{gi + 1:02d}"
-                            ep = group_dir / "podcast_excerpts.json"
-                            ip = group_dir / "podcast_insights.json"
-                            merged_excerpts = _merge_podcast_excerpts_dict(
-                                merged_excerpts, _load_json_safe(ep, {})
-                            )
-                            merged_insights = _merge_podcast_insights_list(
-                                merged_insights, _load_json_safe(ip, [])
-                            )
-
-                        excerpts_path = run_dir / "podcast_excerpts.json"
-                        insights_path = run_dir / "podcast_insights.json"
-                        excerpts_path.write_text(json.dumps(merged_excerpts, ensure_ascii=False, indent=2), encoding="utf-8")
-                        insights_path.write_text(json.dumps(merged_insights, ensure_ascii=False, indent=2), encoding="utf-8")
-
-                        now_et = _now_et()
-                        out_name = f"{now_et:%m.%d.%y} Podcast ALL.pdf"
-                        out_path = (BASE / "Podcasts" / out_name)
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-                        out_pdf = _build_podcast_all_pdf(
-                            excerpts_path=excerpts_path,
-                            insights_path=insights_path,
-                            output_path=out_path,
-                            days_back=days_back,
-                        )
-                        # Cleanup checkpoint on successful completion
-                        try:
-                            if ckpt_path.exists():
-                                ckpt_path.unlink()
-                        except Exception:
-                            pass
-
-
-                if out_pdf:
-                    ra_state.setdefault("outputs", {}).setdefault("podcasts", {})["path"] = str(out_pdf)
-
-                ra_state.setdefault("completed", []).append("podcasts")
-                ra_state["current_step"] = "done"
-                ra_state["status"] = "complete"
-                ra_state["completed_at"] = _now_et().isoformat()
-                _save_run_all_state(ra_state)
-                st.rerun()
-        except Exception as e:
-            ra_state["status"] = "error"
-            ra_state["error"] = str(e)
-            _save_run_all_state(ra_state)
-            st.error(f"Run All failed at step '{step}': {e}")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
-
-    tab_dashboard, tab_mf, tab_sa, tab_substack, tab_podcast, tab_daily = st.tabs(
-        ["Dashboard", "Fund Families", "Seeking Alpha", "Substack", "Podcast", "Daily Research Brief"]
-    )
-
-    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-
-    with tab_dashboard:
-        draw_dashboard_section()
-
-    with tab_mf:
-        if st.button("Clean current tab cache", key="clean_mf_cache", use_container_width=True):
-            _clear_session_keys(
-                exact=["batch_cache"],
-                prefixes=["mf_","fund_","funds_","batch_"],
+        if run_mode == "Run all 7 batches":
+            st.info(
+                "Runs every fund family in all 7 batches for the selected quarter(s). "
+                "Use the specific batch mode below if you are just testing a few names."
             )
-            st.rerun()
-
-        # Main controls in a card — full run
-        with st.container():
-            st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-            st.markdown("#### Run scope", unsafe_allow_html=True)
-            st.write("Choose whether you want a full run across all batches or a targeted test.")
-
-            run_mode = st.radio(
-                "Run mode",
-                ["Run all 7 batches", "Run a specific batch", "Run Batch 8 — Latest"],
-                index=1,
+            if st.button("Run all 7 batches", use_container_width=True):
+                for bn in batch_names:
+                    run_batch(bn, quarters, use_first_word, subset=None)
+                st.stop()
+        elif run_mode == "Run Batch 8 — Latest":
+            lookback_days = st.selectbox(
+                "Lookback window (days)",
+                options=[7, 14, 30],
+                index=0,
             )
+            st.info(
+                "Batch 8 scans the BSD database for anything published within the lookback window. "
+                "If a fund matches one of Batch 1–7 names, it is labeled with that batch for traceability."
+            )
+            if st.button("Run Batch 8 — Latest", use_container_width=True):
+                run_batch8_latest(quarter_options, int(lookback_days), use_first_word)
+        else:
+            selected_batch = st.selectbox("Choose a batch to run", batch_names)
+            if selected_batch:
+                names_in_batch = RUNNABLE_BATCHES[selected_batch]
+                st.write(f"{selected_batch} contains **{len(names_in_batch)}** fund families.")
 
-            if run_mode == "Run all 7 batches":
-                st.info(
-                    "Runs every fund family in all 7 batches for the selected quarter(s). "
-                    "Use the specific batch mode below if you are just testing a few names."
-                )
-                if st.button("Run all 7 batches", use_container_width=True):
-                    for bn in batch_names:
-                        run_batch(bn, quarters, use_first_word, subset=None)
-                    st.markdown("</div>", unsafe_allow_html=True)
-                    st.stop()
-            elif run_mode == "Run Batch 8 — Latest":
-                lookback_days = st.selectbox(
-                    "Lookback window (days)",
-                    options=[7, 14, 30],
-                    index=0,
-                )
-                st.info(
-                    "Batch 8 scans the BSD database for anything published within the lookback window. "
-                    "If a fund matches one of Batch 1–7 names, it is labeled with that batch for traceability."
-                )
-                if st.button("Run Batch 8 — Latest", use_container_width=True):
-                    run_batch8_latest(quarter_options, int(lookback_days), use_first_word)
-                    st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                selected_batch = st.selectbox("Choose a batch to run", batch_names)
-                if selected_batch:
-                    names_in_batch = RUNNABLE_BATCHES[selected_batch]
-                    st.write(f"{selected_batch} contains **{len(names_in_batch)}** fund families.")
-
-                    with st.expander("Preview fund families in this batch"):
-                        chips = "".join(
-                            f"<span class='fund-chip'>{name}</span>"
-                            for name in names_in_batch
-                        )
-                        st.markdown(chips, unsafe_allow_html=True)
-
-                    selected_funds = st.multiselect(
-                        "Optionally target specific fund families "
-                        "(leave empty to run the entire batch):",
-                        options=names_in_batch,
+                with st.expander("Preview fund families in this batch"):
+                    chips = "".join(
+                        f"<span class='fund-chip'>{name}</span>"
+                        for name in names_in_batch
                     )
-                    subset = selected_funds or None
+                    st.markdown(chips, unsafe_allow_html=True)
 
-                    # Button only decides whether we *run* scraping.
-                    run_clicked = st.button(f"Run {selected_batch}", use_container_width=True)
+                selected_funds = st.multiselect(
+                    "Optionally target specific fund families "
+                    "(leave empty to run the entire batch):",
+                    options=names_in_batch,
+                )
+                subset = selected_funds or None
 
-                    if run_clicked:
-                        # First time or explicit re-run: run_batch may scrape,
-                        # build excerpts, compile, and update session cache.
+                # Button only decides whether we *run* scraping.
+                run_clicked = st.button(f"Run {selected_batch}", use_container_width=True)
+
+                if run_clicked:
+                    # First time or explicit re-run: run_batch may scrape,
+                    # build excerpts, compile, and update session cache.
+                    run_batch(selected_batch, quarters, use_first_word, subset=subset)
+                else:
+                    # No click this rerun (e.g. user just hit a download button),
+                    # but if we have cached results for this batch+quarters,
+                    # re-render them without scraping.
+                    cache_all = st.session_state.get("batch_cache", {})
+                    cache_entry = cache_all.get(selected_batch)
+                    if cache_entry and cache_entry.get("quarters") == quarters:
                         run_batch(selected_batch, quarters, use_first_word, subset=subset)
-                    else:
-                        # No click this rerun (e.g. user just hit a download button),
-                        # but if we have cached results for this batch+quarters,
-                        # re-render them without scraping.
-                        cache_all = st.session_state.get("batch_cache", {})
-                        cache_entry = cache_all.get(selected_batch)
-                        if cache_entry and cache_entry.get("quarters") == quarters:
-                            run_batch(selected_batch, quarters, use_first_word, subset=subset)
 
 
-            st.markdown("</div>", unsafe_allow_html=True)
 
-        # Incremental per-batch updater
-        st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+    # Incremental per-batch updater
+    with st.container(border=True):
         st.markdown("#### Incremental update (per batch)", unsafe_allow_html=True)
         st.write(
             "Use this when interns run the tool daily. It compares the current BSD table "
@@ -8896,10 +8092,9 @@ def main():
         if st.button("Check for updates and download new letters", key="inc_btn"):
             run_incremental_update(inc_batch, inc_quarter, use_first_word)
 
-        st.markdown("</div>", unsafe_allow_html=True)
 
-        # Document Checker
-        st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+    # Document Checker
+    with st.container(border=True):
         st.markdown("#### Document Checker", unsafe_allow_html=True)
         st.write(
             "Compare two compiled runs for a given batch and quarter, and generate a PDF "
@@ -8921,7 +8116,7 @@ def main():
 
         manifests = _load_manifests(checker_batch, checker_quarter)
         if not manifests:
-            st.info(
+            st.caption(
                 "No history found yet for this batch and quarter. "
                 "Run the scraper at least twice to compare documents."
             )
@@ -8982,10 +8177,9 @@ def main():
                             "Everything appears to be the same."
                         )
 
-        st.markdown("</div>", unsafe_allow_html=True)
 
-            # ---------- AI Insights: Buy / Hold / Sell ----------
-        st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+        # ---------- AI Insights: Buy / Hold / Sell ----------
+    with st.container(border=True):
         st.markdown("#### AI Insights — Buy / Hold / Sell by company", unsafe_allow_html=True)
         st.write(
             "Use OpenAI to classify each ticker in a compiled run as **buy**, **hold**, "
@@ -9007,7 +8201,7 @@ def main():
 
         ai_manifests = _load_manifests(ai_batch, ai_quarter)
         if not ai_manifests:
-            st.info(
+            st.caption(
                 "No manifests found yet for this batch and quarter. "
                 "Run this batch at least once (full or incremental) before using AI insights."
             )
@@ -9139,74 +8333,1272 @@ def main():
                     "for a detailed gauge view."
                 )
 
-        st.markdown("</div>", unsafe_allow_html=True)
 
 
-    with tab_sa:
-        if st.button("Clean current tab cache", key="clean_sa_cache", use_container_width=True):
+
+def draw_run_all_section(*, use_first_word: bool) -> None:
+    """Run All orchestrator: Fund Families Latest + Seeking Alpha + Substack + Podcasts.
+
+    Extracted verbatim from main() so it can be registered as a page. The block
+    already sat at function-body indentation, so it moves unchanged; use_first_word
+    is the only value it read as a main() local.
+    """
+    # ---------------------- RUN ALL (orchestrator) ----------------------
+    with st.container(border=True):
+        st.markdown("### Run All (Fund Families Latest + Seeking Alpha All + Substack + Podcasts All)")
+
+        ra_state = _load_run_all_state()
+        ra_cfg = ra_state.get("config") or {}
+        ra_mf_days = st.selectbox(
+            "Fund Families Latest lookback (days)",
+            options=[7, 14, 30],
+            index=[7, 14, 30].index(int(ra_cfg.get("mf_lookback_days", 7))) if int(ra_cfg.get("mf_lookback_days", 7)) in [7, 14, 30] else 0,
+            key="run_all_mf_days",
+        )
+        ra_sa_max = st.number_input(
+            "Seeking Alpha max articles per ticker",
+            min_value=1,
+            max_value=20,
+            value=int(ra_cfg.get("sa_max_articles", 5)),
+            step=1,
+            key="run_all_sa_max_articles",
+        )
+        ra_sa_model = st.selectbox(
+            "Seeking Alpha model (digest/export)",
+            options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
+            index=0,
+            key="run_all_sa_model",
+        )
+
+        ra_substack_days = st.selectbox(
+            "Substack lookback (days)",
+            options=[2, 7],
+            index=[2, 7].index(int(ra_cfg.get("substack_lookback_days", 2))) if int(ra_cfg.get("substack_lookback_days", 2)) in [2, 7] else 0,
+            key="run_all_substack_days",
+        )
+        ra_substack_max = st.number_input(
+            "Substack max posts per ticker",
+            min_value=1,
+            max_value=10,
+            value=int(ra_cfg.get("substack_max_posts", 3)),
+            step=1,
+            key="run_all_substack_max_posts",
+        )
+
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            start_all = st.button("Run All", use_container_width=True, key="run_all_start")
+        with c2:
+            resume_all = st.button(
+                "Resume",
+                use_container_width=True,
+                key="run_all_resume",
+                disabled=not bool(ra_state and ra_state.get("status") == "running"),
+            )
+        with c3:
+            clear_all = st.button("Clear Run All state", use_container_width=True, key="run_all_clear")
+
+        if clear_all:
+            _clear_run_all_state()
+            st.rerun()
+
+        if start_all:
+            ra_state = {
+                "status": "running",
+                "current_step": "fund_families",
+                "completed": [],
+                "outputs": {},
+                "config": {
+                    "mf_lookback_days": int(ra_mf_days),
+                    "sa_max_articles": int(ra_sa_max),
+                    "sa_model": str(ra_sa_model),
+                                "substack_lookback_days": int(ra_substack_days),
+                    "substack_max_posts": int(ra_substack_max),
+    },
+                "started_at": _now_et().isoformat(),
+            }
+            _save_run_all_state(ra_state)
+            st.rerun()
+
+        if resume_all:
+            st.rerun()
+
+        # Existing outputs (persisted)
+        outs = ra_state.get("outputs") or {}
+
+        # Download-button helper: cache PDF bytes so reruns (e.g., while Run All is running)
+        # do not repeatedly re-read large files from disk. This prevents downloads from
+        # "stalling" other steps when the app reruns.
+        def _dl_bytes_cached(fp: Path) -> bytes:
+            try:
+                st_ = fp.stat()
+                cache_key = f"{str(fp)}::{st_.st_size}::{st_.st_mtime_ns}"
+            except Exception:
+                cache_key = str(fp)
+            cache = st.session_state.setdefault("_dl_cache_pdf_bytes", {})
+            if cache_key in cache:
+                return cache[cache_key]
+            data = fp.read_bytes()
+            # Keep cache bounded to avoid memory growth
+            if isinstance(cache, dict) and len(cache) > 8:
+                try:
+                    cache.clear()
+                except Exception:
+                    pass
+            cache[cache_key] = data
+            return data
+
+
+        mf_paths = (outs.get("fund_families") or {}).get("paths") or []
+        if mf_paths:
+            st.markdown("**Fund Families outputs:**")
+            for pinfo in mf_paths:
+                try:
+                    fp = Path(pinfo.get("path") or "")
+                    if fp.exists():
+                        st.download_button(
+                            f"Download {fp.name}",
+                            data=_dl_bytes_cached(fp),
+                            file_name=fp.name,
+                            mime="application/pdf",
+                            key=f"ra_dl_mf_{fp.name}",
+                            use_container_width=True,
+                        )
+                except Exception:
+                    pass
+
+        sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
+        if sa_path:
+            try:
+                fp = Path(sa_path)
+                if fp.exists():
+                    st.download_button(
+                        f"Download {fp.name}",
+                        data=_dl_bytes_cached(fp),
+                        file_name=fp.name,
+                        mime="application/pdf",
+                        key=f"ra_dl_sa_{fp.name}",
+                        use_container_width=True,
+                    )
+            except Exception:
+                pass
+
+
+        sub_path = (outs.get("substack") or {}).get("path") or ""
+        if sub_path:
+            try:
+                fp = Path(sub_path)
+                if fp.exists():
+                    st.download_button(
+                        f"Download {fp.name}",
+                        data=_dl_bytes_cached(fp),
+                        file_name=fp.name,
+                        mime="application/pdf",
+                        key=f"ra_dl_sub_{fp.name}",
+                        use_container_width=True,
+                    )
+            except Exception:
+                pass
+
+        pod_path = (outs.get("podcasts") or {}).get("path") or ""
+        if pod_path:
+            try:
+                fp = Path(pod_path)
+                if fp.exists():
+                    st.download_button(
+                        f"Download {fp.name}",
+                        data=_dl_bytes_cached(fp),
+                        file_name=fp.name,
+                        mime="application/pdf",
+                        key=f"ra_dl_pod_{fp.name}",
+                        use_container_width=True,
+                    )
+            except Exception:
+                pass
+
+        # Execute next step if running
+        if ra_state.get("status") == "running":
+            step = ra_state.get("current_step")
+            cfg = ra_state.get("config") or {}
+
+            # Auto-skip completed steps (prevents download_button reruns from restarting work)
+            # If an output path is already persisted and the file exists on disk, mark the step complete and advance.
+            _advance_guard = 0
+            while _advance_guard < 6 and ra_state.get("status") == "running":
+                _advance_guard += 1
+                step = ra_state.get("current_step")
+                outs = ra_state.get("outputs") or {}
+                completed = ra_state.get("completed") or []
+                if not isinstance(completed, list):
+                    completed = []
+
+                def _mark_done(_step: str, _next: str):
+                    if _step not in completed:
+                        completed.append(_step)
+                    ra_state["completed"] = completed
+                    ra_state["current_step"] = _next
+                    _save_run_all_state(ra_state)
+
+                if step == "fund_families":
+                    mf_paths = (outs.get("fund_families") or {}).get("paths") or []
+                    ok = False
+                    try:
+                        for pinfo in mf_paths:
+                            fp = Path((pinfo or {}).get("path") or "")
+                            if fp and fp.exists():
+                                ok = True
+                                break
+                    except Exception:
+                        ok = False
+                    if ok:
+                        _mark_done("fund_families", "seeking_alpha")
+                        continue
+
+                if step == "seeking_alpha":
+                    sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
+                    if sa_path and Path(sa_path).exists():
+                        _mark_done("seeking_alpha", "substack")
+                        continue
+
+                if step == "substack":
+                    sub_path = (outs.get("substack") or {}).get("path") or ""
+                    if sub_path and Path(sub_path).exists():
+                        _mark_done("substack", "podcasts")
+                        continue
+
+                if step == "podcasts":
+                    pod_path = (outs.get("podcasts") or {}).get("path") or ""
+                    if pod_path and Path(pod_path).exists():
+                        # If podcasts already exist, finalize Run All state.
+                        if "podcasts" not in completed:
+                            completed.append("podcasts")
+                        ra_state["completed"] = completed
+                        ra_state["current_step"] = "done"
+                        ra_state["status"] = "complete"
+                        ra_state["completed_at"] = _now_et().isoformat()
+                        _save_run_all_state(ra_state)
+                        break
+
+                break
+
+            try:
+                if step == "fund_families":
+                    days = int(cfg.get("mf_lookback_days", 7))
+                    # NOTE: Do not wrap Fund Families in st.status(expanded=True) because Fund Families uses expanders internally.
+                    st.info(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
+                    quarter_options = get_available_quarters()
+                    run_batch8_latest(quarter_options, days, use_first_word, ensure_compiled_index=True)
+                    cache_all = st.session_state.get("batch_cache", {}) or {}
+                    cache_key = f"{BATCH8_NAME}|{days}d"
+                    by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
+                    paths = []
+                    for q, qd in by_q.items():
+                        c = (qd or {}).get("compiled") or ""
+                        if c and Path(c).exists():
+                            paths.append({"quarter": q, "path": c})
+                    fund_output = ra_state.setdefault("outputs", {}).setdefault("fund_families", {})
+                    fund_output["paths"] = paths
+                    fund_output["result"] = "compiled" if paths else "no_excerpts"
+
+                    if not paths:
+                        st.warning(
+                            "Run All: Fund Families finished, but no compiled Fund Families PDF was produced. "
+                            "This usually means no matching letters or narrative ticker excerpts were found. "
+                            "Continuing to Seeking Alpha."
+                        )
+
+                    if "fund_families" not in (ra_state.get("completed") or []):
+                        ra_state.setdefault("completed", []).append("fund_families")
+                    ra_state["current_step"] = "seeking_alpha"
+                    _save_run_all_state(ra_state)
+                    st.rerun()
+
+                if step == "seeking_alpha":
+                    max_articles = int(cfg.get("sa_max_articles", 5))
+                    model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
+                    with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
+                        universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
+                        if not universe:
+                            universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
+
+                        out_pdf = _runall_sa_step_incremental(universe=universe, max_articles=max_articles, model=model_name)
+                        if out_pdf:
+                            ra_state.setdefault("outputs", {}).setdefault("seeking_alpha", {})["path"] = str(out_pdf)
+                            ra_state.setdefault("completed", []).append("seeking_alpha")
+                            ra_state["current_step"] = "substack"
+                            _save_run_all_state(ra_state)
+                            st.rerun()
+
+                if step == "substack":
+                    days_back = int(cfg.get("substack_lookback_days", 2))
+                    max_posts = int(cfg.get("substack_max_posts", 3))
+                    with st.status(f"Run All: Substack — building compiled PDF (last {days_back} days)", expanded=True):
+                        universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
+                        if not universe:
+                            universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
+
+                        out_pdf = _runall_substack_step_incremental(universe=universe, lookback_days=days_back, max_posts=max_posts)
+                        if out_pdf:
+                            ra_state.setdefault("outputs", {}).setdefault("substack", {})["path"] = str(out_pdf)
+                            ra_state.setdefault("completed", []).append("substack")
+                            ra_state["current_step"] = "podcasts"
+                            _save_run_all_state(ra_state)
+                            st.rerun()
+
+                if step == "podcasts":
+                    # Run All podcasts lookback (days). Kept separate from the Podcast tab lookback.
+                    # Default is 2 days as requested.
+                    days_back = int(cfg.get("podcast_runall_lookback_days", 2))
+                    model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
+
+                    # Run podcasts in small groups to avoid long blocking runs in Streamlit.
+                    run_dir = BASE / "Podcasts" / "_run_all"
+                    run_dir.mkdir(parents=True, exist_ok=True)
+
+                    pr = ra_state.get("podcasts_runall") or {}
+                    if not isinstance(pr, dict):
+                        pr = {}
+                    group_index = int(pr.get("group_index", 0))
+
+                    # Prefer the same grouping logic used in the Podcast tab (9 buckets).
+                    groups = _podcast_run_all_group_ids(n_groups=9)
+                    if not groups:
+                        # Fallback: single group from podcasts_config
+                        try:
+                            from podcasts_config import PODCASTS as _PODCASTS  # type: ignore
+                            fallback_ids = []
+                            for p in (_PODCASTS or []):
+                                pid = getattr(p, "podcast_id", None) or getattr(p, "id", None) or getattr(p, "pod_id", None)
+                                if pid:
+                                    fallback_ids.append(str(pid))
+                            groups = [fallback_ids] if fallback_ids else []
+                        except Exception:
+                            groups = []
+
+                    total_groups = len(groups)
+
+                    # Persistent checkpointing for Run All podcasts (survives reloads/timeouts)
+                    ckpt_path = (BASE / "Podcasts" / "runall_podcasts_state.json")
+                    run_sig = {
+                        "date": str(_now_et().date()),
+                        "days_back": days_back,
+                        "model_name": model_name,
+                        "total_groups": total_groups,
+                    }
+                    ckpt = _load_json_safe(ckpt_path, {})
+                    if not isinstance(ckpt, dict):
+                        ckpt = {}
+                    # If the signature changed (new day/params), reset checkpoint.
+                    if ckpt.get("sig") != run_sig:
+                        ckpt = {"sig": run_sig, "completed_groups": []}
+                        _save_json_safe(ckpt_path, ckpt)
+
+                    completed_groups = ckpt.get("completed_groups") or []
+                    if not isinstance(completed_groups, list):
+                        completed_groups = []
+                    completed_set = {int(x) for x in completed_groups if str(x).isdigit()}
+                    # Resume from first incomplete group, regardless of session_state value.
+                    for gi in range(total_groups):
+                        if gi not in completed_set:
+                            group_index = gi
+                            break
+                    else:
+                        group_index = total_groups
+
+                    # Progress bar for Run All podcasts (group-level)
+                    _completed_groups_n = len(completed_set)
+                    _prog_den = max(1, int(total_groups))
+                    _prog_num = min(_prog_den, int(_completed_groups_n))
+                    st.progress(float(_prog_num) / float(_prog_den))
+                    st.caption(f"Run All: Podcasts progress — {_prog_num}/{_prog_den} groups complete")
+
+
+
+                    if not groups or total_groups == 0:
+                        st.warning("No podcast IDs found; skipping podcasts.")
+                        out_pdf = None
+                    else:
+                        # Process one group per rerun for stability
+                        if group_index < total_groups:
+                            with st.status(
+                                f"Run All: Podcasts — processing group {group_index + 1}/{total_groups} (last {days_back} days)",
+                                expanded=True,
+                            ):
+                                podcast_ids = groups[group_index] or []
+                                if not podcast_ids:
+                                    st.info("Empty podcast group; skipping.")
+                                else:
+                                    group_dir = run_dir / f"g{group_index + 1:02d}"
+                                    podcasts_root = group_dir / "transcripts"
+                                    excerpts_path = group_dir / "podcast_excerpts.json"
+                                    insights_path = group_dir / "podcast_insights.json"
+                                    group_dir.mkdir(parents=True, exist_ok=True)
+
+                                    _ = run_podcast_pipeline_from_ui(
+                                        days_back=days_back,
+                                        podcast_ids=podcast_ids,
+                                        podcasts_root=podcasts_root,
+                                        excerpts_path=excerpts_path,
+                                        insights_path=insights_path,
+                                        model_name=model_name,
+                                    )
+
+                            # Mark this group completed and persist progress
+                            try:
+                                ckpt = _load_json_safe(ckpt_path, {})
+                                if not isinstance(ckpt, dict):
+                                    ckpt = {"sig": run_sig, "completed_groups": []}
+                                cg = ckpt.get("completed_groups") or []
+                                if not isinstance(cg, list):
+                                    cg = []
+                                if group_index not in cg:
+                                    cg.append(group_index)
+                                ckpt["sig"] = run_sig
+                                ckpt["completed_groups"] = cg
+                                _save_json_safe(ckpt_path, ckpt)
+                            except Exception:
+                                pass
+
+                            pr["group_index"] = group_index + 1
+                            pr["total_groups"] = total_groups
+                            ra_state["podcasts_runall"] = pr
+                            _save_run_all_state(ra_state)
+                            st.rerun()
+
+                        # All groups done -> merge and build final PDF once
+                        with st.status(
+                            f"Run All: Podcasts — merging groups and building compiled PDF (last {days_back} days)",
+                            expanded=True,
+                        ):
+                            merged_excerpts: dict = {}
+                            merged_insights = []
+
+                            for gi in range(total_groups):
+                                group_dir = run_dir / f"g{gi + 1:02d}"
+                                ep = group_dir / "podcast_excerpts.json"
+                                ip = group_dir / "podcast_insights.json"
+                                merged_excerpts = _merge_podcast_excerpts_dict(
+                                    merged_excerpts, _load_json_safe(ep, {})
+                                )
+                                merged_insights = _merge_podcast_insights_list(
+                                    merged_insights, _load_json_safe(ip, [])
+                                )
+
+                            excerpts_path = run_dir / "podcast_excerpts.json"
+                            insights_path = run_dir / "podcast_insights.json"
+                            excerpts_path.write_text(json.dumps(merged_excerpts, ensure_ascii=False, indent=2), encoding="utf-8")
+                            insights_path.write_text(json.dumps(merged_insights, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                            now_et = _now_et()
+                            out_name = f"{now_et:%m.%d.%y} Podcast ALL.pdf"
+                            out_path = (BASE / "Podcasts" / out_name)
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+
+                            out_pdf = _build_podcast_all_pdf(
+                                excerpts_path=excerpts_path,
+                                insights_path=insights_path,
+                                output_path=out_path,
+                                days_back=days_back,
+                            )
+                            # Cleanup checkpoint on successful completion
+                            try:
+                                if ckpt_path.exists():
+                                    ckpt_path.unlink()
+                            except Exception:
+                                pass
+
+
+                    if out_pdf:
+                        ra_state.setdefault("outputs", {}).setdefault("podcasts", {})["path"] = str(out_pdf)
+
+                    ra_state.setdefault("completed", []).append("podcasts")
+                    ra_state["current_step"] = "done"
+                    ra_state["status"] = "complete"
+                    ra_state["completed_at"] = _now_et().isoformat()
+                    _save_run_all_state(ra_state)
+                    st.rerun()
+            except Exception as e:
+                ra_state["status"] = "error"
+                ra_state["error"] = str(e)
+                _save_run_all_state(ra_state)
+                st.error(f"Run All failed at step '{step}': {e}")
+
+
+
+
+# ---------------------- Outputs / History / Settings pages ----------------------
+
+def _human_size(num_bytes: int) -> str:
+    """Render a byte count as a short human-readable string."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _compiled_outputs(limit: int | None = None) -> List[Path]:
+    """Every compiled PDF, newest first. All pipelines write into CP_DIR."""
+    try:
+        pdfs = [q for q in CP_DIR.glob("*.pdf") if q.is_file()]
+    except Exception:
+        return []
+    pdfs.sort(key=lambda q: q.stat().st_mtime, reverse=True)
+    return pdfs[:limit] if limit else pdfs
+
+
+def draw_outputs_section() -> None:
+    """Outputs & Downloads: every compiled PDF produced by any pipeline."""
+    st.markdown("### Outputs & Downloads")
+    st.caption(
+        "Compiled PDFs from Fund Families, Seeking Alpha, Substack and Podcasts, newest first."
+    )
+
+    pdfs = _compiled_outputs()
+    if not pdfs:
+        with st.container(border=True):
+            st.caption(
+                "No compiled PDFs yet. Run a pipeline from Run Scraper and its output will appear here."
+            )
+        return
+
+    st.caption(f"{len(pdfs)} file{'s' if len(pdfs) != 1 else ''} in {CP_DIR}")
+    for idx, pdf in enumerate(pdfs):
+        with st.container(border=True):
+            try:
+                stat = pdf.stat()
+            except Exception:
+                continue
+            col_meta, col_dl = st.columns([4, 1])
+            with col_meta:
+                st.markdown(f"**{_clean_report_visible_text(pdf.name)}**")
+                st.caption(
+                    f"{_human_size(stat.st_size)} · "
+                    f"{datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M}"
+                )
+            with col_dl:
+                try:
+                    st.download_button(
+                        "Download",
+                        data=pdf.read_bytes(),
+                        file_name=pdf.name,
+                        mime="application/pdf",
+                        key=f"outputs_dl_{idx}",
+                        use_container_width=True,
+                    )
+                except Exception as exc:
+                    st.caption(f"Unavailable: {exc}")
+
+
+def _all_manifests() -> List[Dict[str, Any]]:
+    """Every run manifest across all quarters, newest first.
+
+    Mirrors _load_manifests() but without its batch/quarter filter, since the
+    history view is global.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        paths = list(MAN_DIR.glob("*/manifest_*.json"))
+    except Exception:
+        return []
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            data["_path"] = str(path)
+            out.append(data)
+    out.sort(key=lambda m: str(m.get("created_at") or ""), reverse=True)
+    return out
+
+
+def draw_run_history_section() -> None:
+    """Run History: one row per stored manifest."""
+    st.markdown("### Run History")
+    st.caption("Every completed run that wrote a manifest, newest first.")
+
+    manifests = _all_manifests()
+    if not manifests:
+        with st.container(border=True):
+            st.caption(
+                "No runs recorded yet. Manifests are written when a batch finishes compiling."
+            )
+        return
+
+    rows = []
+    for man in manifests:
+        compiled = str(man.get("compiled_pdf") or "")
+        rows.append(
+            {
+                "Batch": _clean_report_visible_text(man.get("batch") or "—"),
+                "Quarter": str(man.get("quarter") or "—"),
+                "Started": str(man.get("created_at") or "").replace("T", " "),
+                "Items": len(man.get("items") or []),
+                "Output": _clean_report_visible_text(Path(compiled).name) if compiled else "—",
+            }
+        )
+
+    with st.container(border=True):
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Batch": st.column_config.TextColumn("Batch", width="medium"),
+                "Quarter": st.column_config.TextColumn("Quarter", width="small"),
+                "Started": st.column_config.TextColumn("Started", width="medium"),
+                "Items": st.column_config.NumberColumn("Items", width="small"),
+                "Output": st.column_config.TextColumn("Output", width="large"),
+            },
+        )
+    st.caption(
+        "Duration, status and error count are not recorded in manifests today, so they are "
+        "omitted rather than estimated. Failed runs do not write a manifest and so do not appear."
+    )
+
+
+def draw_settings_section() -> None:
+    """Settings: read-only view of ticker source, paths and credential presence."""
+    st.markdown("### Settings")
+    st.caption("Current configuration. This page is read-only.")
+
+    with st.container(border=True):
+        st.markdown("#### Ticker source")
+        try:
+            status = get_ticker_load_status()
+            if status.source == "google_sheet":
+                st.success(f"Google Sheet · {status.count} tickers · loaded {status.loaded_at}")
+            else:
+                st.warning(status.message)
+            st.caption(f"Read pattern: {status.url_pattern or 'n/a'}")
+        except Exception as exc:
+            st.warning(f"Ticker status unavailable: {exc}")
+        try:
+            from live_tickers import GOOGLE_SHEET_SHARED_URL  # type: ignore
+
+            st.caption("Workbook")
+            st.code(GOOGLE_SHEET_SHARED_URL, language=None)
+        except Exception:
+            pass
+
+    with st.container(border=True):
+        st.markdown("#### Paths")
+        for label, path in (
+            ("Downloads", DL_DIR),
+            ("Excerpts", EX_DIR),
+            ("Compiled", CP_DIR),
+            ("Manifests", MAN_DIR),
+            ("Delta", DELTA_DIR),
+        ):
+            st.caption(f"{label}")
+            st.code(str(path), language=None)
+
+    with st.container(border=True):
+        st.markdown("#### Credentials")
+        st.caption("Presence only - values are never displayed.")
+        for key in (
+            "OPENAI_API_KEY",
+            "SA_RAPIDAPI_KEY",
+            "SUBSTACK_RAPIDAPI_KEY",
+            "LISTENNOTES_API_KEY",
+            "DEEPGRAM_API_KEY",
+            "BSD_EMAIL",
+            "BSD_PASSWORD",
+        ):
+            present = bool(os.environ.get(key))
+            if not present:
+                try:
+                    present = bool(st.secrets.get(key))  # type: ignore[attr-defined]
+                except Exception:
+                    present = False
+            st.markdown(f"{'Set' if present else 'Missing'} — `{key}`")
+
+
+def main():
+    st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
+
+    # Global styling: Cutler purple theme and modernized controls
+    st.markdown(
+        """
+        <style>
+        /* ============================================================
+           Cutler Capital - design tokens
+           ============================================================ */
+        :root {
+            --cc-plum:      #4b2142;
+            --cc-plum-600:  #5d2a53;
+            --cc-plum-700:  #3a1834;
+            --cc-plum-050:  #f8f4fb;
+            --cc-plum-100:  #efe6f5;
+            --cc-ink:       #241a2b;
+            --cc-muted:     #6f6178;
+            --cc-surface:   #ffffff;
+            --cc-canvas:    #faf8fc;
+            --cc-line:      rgba(75, 33, 66, 0.10);
+            --cc-line-2:    rgba(75, 33, 66, 0.18);
+            --cc-ring:      rgba(75, 33, 66, 0.16);
+            --cc-radius:    16px;
+            --cc-radius-lg: 22px;
+            --cc-shadow:    0 1px 2px rgba(36, 26, 43, 0.04),
+                            0 8px 24px rgba(36, 26, 43, 0.06);
+            --cc-shadow-lg: 0 2px 4px rgba(36, 26, 43, 0.05),
+                            0 18px 48px rgba(36, 26, 43, 0.09);
+        }
+
+        /* ---------- Canvas ---------- */
+        .stApp {
+            background:
+                radial-gradient(1200px 520px at 12% -8%, #f3ebfa 0%, rgba(243,235,250,0) 62%),
+                radial-gradient(1000px 460px at 92% 0%, #f6f0fb 0%, rgba(246,240,251,0) 58%),
+                var(--cc-canvas);
+            color: var(--cc-ink);
+        }
+        .block-container {
+            padding-top: 2.6rem;
+            padding-bottom: 4rem;
+            max-width: 1180px;
+        }
+        html, body, [class*="css"] {
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* ---------- Typography ---------- */
+        h1, h2, h3, h4, h5 {
+            color: var(--cc-plum-700);
+            letter-spacing: -0.014em;
+            font-weight: 700;
+        }
+        h1 { font-size: 1.65rem; }
+        h2 { font-size: 1.32rem; }
+        h3 { font-size: 1.10rem; }
+        h4 { font-size: 0.98rem; }
+        p, li, label, .stMarkdown { color: var(--cc-ink); }
+
+        /* ---------- App header ---------- */
+        .stImage, [data-testid="stImage"] {
+            display: flex;
+            justify-content: center;
+        }
+        .stImage img { display: block; margin: 0 auto; }
+
+        .app-header { text-align: center; margin: 0.2rem 0 1.6rem; }
+        .app-title {
+            text-align: center;
+            color: var(--cc-plum);
+            font-size: 2.05rem;
+            font-weight: 750;
+            letter-spacing: -0.028em;
+            line-height: 1.15;
+            margin-bottom: 0.35rem;
+        }
+        .app-subtitle {
+            text-align: center;
+            color: var(--cc-muted);
+            font-size: 0.95rem;
+            font-weight: 450;
+            margin: 0 auto;
+            max-width: 46rem;
+        }
+        .app-header::after {
+            content: "";
+            display: block;
+            width: 54px;
+            height: 3px;
+            margin: 1.05rem auto 0;
+            border-radius: 999px;
+            background: linear-gradient(90deg, var(--cc-plum), #9a6fa0);
+            opacity: 0.85;
+        }
+
+        /* ---------- Chrome ---------- */
+        header[data-testid="stHeader"] {
+            background: transparent !important;
+            box-shadow: none !important;
+            border-bottom: none !important;
+        }
+        [data-testid="stToolbar"] { background: transparent !important; }
+        header[data-testid="stHeader"] * { color: var(--cc-plum) !important; }
+
+        /* ---------- Sidebar ---------- */
+        [data-testid="stSidebar"] > div {
+            background: linear-gradient(180deg, #fdfbff 0%, #f7f1fb 100%);
+            border-right: 1px solid var(--cc-line);
+        }
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] label {
+            color: var(--cc-plum) !important;
+            font-weight: 620;
+        }
+        [data-testid="stSidebar"] hr { border-color: var(--cc-line); }
+
+        /* ---------- Buttons ---------- */
+        .stButton > button, .stDownloadButton > button {
+            width: 100%;
+            border-radius: 999px;
+            background: var(--cc-plum);
+            color: #ffffff;
+            border: 1px solid var(--cc-plum);
+            padding: 0.62rem 1.5rem;
+            font-weight: 620;
+            font-size: 0.94rem;
+            box-shadow: 0 1px 2px rgba(75, 33, 66, 0.16);
+            transition: background 140ms ease, transform 90ms ease,
+                        box-shadow 140ms ease, border-color 140ms ease;
+        }
+        .stButton > button:hover, .stDownloadButton > button:hover {
+            background: var(--cc-plum-600);
+            border-color: var(--cc-plum-600);
+            box-shadow: 0 6px 18px rgba(75, 33, 66, 0.20);
+            transform: translateY(-1px);
+        }
+        .stButton > button:active, .stDownloadButton > button:active {
+            transform: translateY(0);
+            box-shadow: 0 1px 2px rgba(75, 33, 66, 0.18);
+        }
+        .stButton > button:focus-visible, .stDownloadButton > button:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px var(--cc-ring);
+        }
+        /* NOTE: this app never passes type="primary", so every button is
+           kind="secondary". They stay plum, matching the previous theme. */
+        .stButton > button:disabled { opacity: 0.45; box-shadow: none; transform: none; }
+
+        /* ---------- Inputs ---------- */
+        .stTextInput input,
+        .stNumberInput input,
+        .stDateInput input,
+        .stTextArea textarea,
+        div[data-baseweb="select"] > div {
+            border-radius: 12px !important;
+            border-color: var(--cc-line-2) !important;
+            background: var(--cc-surface) !important;
+            transition: border-color 140ms ease, box-shadow 140ms ease;
+        }
+        .stTextInput input:focus,
+        .stNumberInput input:focus,
+        .stTextArea textarea:focus,
+        div[data-baseweb="select"] > div:focus-within {
+            border-color: var(--cc-plum) !important;
+            box-shadow: 0 0 0 3px var(--cc-ring) !important;
+        }
+        div[data-baseweb="tag"] {
+            background: var(--cc-plum) !important;
+            border-radius: 999px !important;
+        }
+
+        /* ---------- Radio pill toggle ---------- */
+        div[role="radiogroup"] {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 0.4rem;
+            background: var(--cc-plum-050);
+            padding: 0.28rem;
+            border-radius: 999px;
+            border: 1px solid var(--cc-line);
+        }
+        div[role="radiogroup"] > label {
+            flex: 1 1 0;
+            justify-content: center;
+            border-radius: 999px !important;
+            padding: 0.4rem 0.95rem !important;
+            border: 1px solid transparent !important;
+            background: transparent !important;
+            color: var(--cc-plum) !important;
+            font-weight: 550 !important;
+            white-space: nowrap;
+            transition: background 130ms ease, border-color 130ms ease,
+                        box-shadow 130ms ease;
+        }
+        div[role="radiogroup"] > label:hover {
+            background: #ffffff !important;
+            border-color: var(--cc-line-2) !important;
+        }
+        div[role="radiogroup"] > label:has(input:checked) {
+            background: #ffffff !important;
+            border-color: var(--cc-line-2) !important;
+            box-shadow: 0 2px 8px rgba(75, 33, 66, 0.10);
+        }
+        div[role="radiogroup"] > label[data-baseweb="radio"] > div:first-child > div[aria-checked="true"] + div {
+            background: var(--cc-plum) !important;
+        }
+
+        /* ---------- Cards ---------- */
+        .cc-card {
+            background: var(--cc-surface);
+            border-radius: var(--cc-radius-lg);
+            padding: 1.4rem 1.5rem;
+            border: 1px solid var(--cc-line);
+            box-shadow: var(--cc-shadow);
+            margin-bottom: 1.1rem;
+            transition: box-shadow 180ms ease, transform 180ms ease;
+        }
+        .cc-card:hover {
+            box-shadow: var(--cc-shadow-lg);
+            transform: translateY(-1px);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: var(--cc-radius-lg) !important;
+            border-color: var(--cc-line) !important;
+            background: var(--cc-surface);
+            box-shadow: var(--cc-shadow);
+        }
+
+        /* ---------- Fund chips ---------- */
+        .fund-chip {
+            display: inline-block;
+            margin: 6px 6px 0 0;
+            padding: 6px 13px;
+            border-radius: 999px;
+            background: var(--cc-plum-050);
+            color: var(--cc-plum);
+            font-size: 12px;
+            font-weight: 600;
+            border: 1px solid var(--cc-line-2);
+            white-space: nowrap;
+            transition: background 130ms ease, border-color 130ms ease;
+        }
+        .fund-chip:hover {
+            background: var(--cc-plum-100);
+            border-color: var(--cc-plum);
+        }
+
+        /* ---------- Metrics ---------- */
+        div[data-testid="stMetric"] {
+            background: var(--cc-surface);
+            border: 1px solid var(--cc-line);
+            border-radius: var(--cc-radius);
+            padding: 0.9rem 1.05rem;
+            box-shadow: var(--cc-shadow);
+        }
+        div[data-testid="stMetricLabel"] {
+            color: var(--cc-muted) !important;
+            font-weight: 560;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            font-size: 0.72rem !important;
+        }
+        div[data-testid="stMetricValue"] {
+            color: var(--cc-plum-700) !important;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        /* ---------- Expanders ---------- */
+        div[data-testid="stExpander"] {
+            border: 1px solid var(--cc-line);
+            border-radius: var(--cc-radius);
+            background: var(--cc-surface);
+            box-shadow: var(--cc-shadow);
+            overflow: hidden;
+        }
+        div[data-testid="stExpander"] summary {
+            font-weight: 600;
+            color: var(--cc-plum);
+            padding: 0.7rem 0.95rem;
+        }
+        div[data-testid="stExpander"] summary:hover { background: var(--cc-plum-050); }
+
+        /* ---------- Tables ---------- */
+        div[data-testid="stDataFrame"], div[data-testid="stTable"] {
+            border: 1px solid var(--cc-line);
+            border-radius: var(--cc-radius);
+            overflow: hidden;
+            box-shadow: var(--cc-shadow);
+        }
+
+        /* ---------- Alerts / progress ---------- */
+        div[data-testid="stAlert"] {
+            border-radius: 14px;
+            border: 1px solid var(--cc-line-2);
+            box-shadow: none;
+        }
+        .stProgress > div > div > div > div { background: var(--cc-plum); }
+
+        /* ---------- Gauge (needle) ---------- */
+        .gauge-wrapper { margin-top: 0.5rem; margin-bottom: 0.75rem; }
+        .gauge {
+            width: 220px;
+            height: 120px;
+            margin: 0.2rem auto 0.1rem;
+            position: relative;
+        }
+        .gauge-body {
+            width: 100%;
+            height: 100%;
+            border-radius: 220px 220px 0 0;
+            background: linear-gradient(180deg, var(--cc-plum-100) 0%, var(--cc-plum-050) 100%);
+            border: 1px solid var(--cc-line-2);
+            position: relative;
+            overflow: hidden;
+        }
+        .gauge-needle {
+            position: absolute;
+            width: 2px;
+            height: 85%;
+            top: 15%;
+            left: 50%;
+            background: var(--cc-plum);
+            transform-origin: bottom center;
+            transition: transform 0.25s ease-out;
+        }
+        .gauge-cover {
+            width: 68%;
+            height: 68%;
+            background: var(--cc-surface);
+            border-radius: 50%;
+            position: absolute;
+            bottom: -10%;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.9rem;
+            color: var(--cc-plum);
+            box-shadow: 0 -2px 10px rgba(75, 33, 66, 0.07);
+        }
+
+        /* ---------- Full-width tabs ---------- */
+        div[data-testid="stTabs"] {
+            width: 100%;
+            margin-top: 0.75rem;
+            margin-bottom: 1.25rem;
+        }
+        div[data-testid="stTabs"] [role="tablist"] {
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            gap: 0.4rem;
+            padding: 0.32rem;
+            background: var(--cc-plum-050);
+            border: 1px solid var(--cc-line);
+            border-radius: 999px;
+        }
+        div[data-testid="stTabs"] [role="tab"] {
+            flex: 1 1 0;
+            width: 100%;
+            text-align: center;
+            justify-content: center;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 999px;
+            padding: 0.6rem 0.9rem;
+            color: var(--cc-muted);
+            font-weight: 600;
+            font-size: 0.93rem;
+            transition: background 140ms ease, color 140ms ease,
+                        box-shadow 140ms ease, border-color 140ms ease;
+        }
+        div[data-testid="stTabs"] [role="tab"]:hover {
+            background: rgba(255, 255, 255, 0.75);
+            color: var(--cc-plum);
+        }
+        div[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+            background: var(--cc-surface);
+            color: var(--cc-plum);
+            border-color: var(--cc-line-2);
+            box-shadow: 0 2px 10px rgba(75, 33, 66, 0.10);
+        }
+        div[data-testid="stTabs"] [role="tab"]:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px var(--cc-ring);
+        }
+        div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+        div[data-testid="stTabs"] [data-baseweb="tab-border"] {
+            display: none !important;
+        }
+        div[data-testid="stTabs"] [data-testid="stTabContent"] { padding-top: 1rem; }
+
+        /* ---------- Misc ---------- */
+        hr { border-color: var(--cc-line); }
+        code {
+            background: var(--cc-plum-050);
+            color: var(--cc-plum-700);
+            border-radius: 6px;
+            padding: 0.1rem 0.35rem;
+        }
+        ::selection { background: var(--cc-plum-100); color: var(--cc-plum-700); }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+    # Brand mark above the sidebar navigation (mockup places it there).
+    logo_path = HERE / "cutler.png"
+    if logo_path.exists():
+        try:
+            st.logo(str(logo_path), size="large")
+        except Exception:
+            pass
+
+    st.markdown(
+        "<div class='app-header'>"
+        "<div class='app-title'>Cutler Capital Letter Scraper</div>"
+        "<div class='app-subtitle'>Fund letters, Seeking Alpha, Substack and podcasts,"
+        " excerpted and indexed by ticker</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+    # Sidebar: run settings
+    st.sidebar.header("Run settings")
+    try:
+        _ticker_status = get_ticker_load_status()
+        if _ticker_status.source == "google_sheet":
+            st.sidebar.success(
+                f"Tickers loaded from Google Sheet: {_ticker_status.count}\n\n"
+                f"Pattern: {_ticker_status.url_pattern or 'csv'}\n\n"
+                f"Last loaded: {_ticker_status.loaded_at}"
+            )
+        else:
+            st.sidebar.warning(
+                f"{_ticker_status.message}\n\n"
+                f"Last checked: {_ticker_status.loaded_at}"
+            )
+    except Exception:
+        st.sidebar.warning("Using fallback local ticker list")
+
+    quarter_options = get_available_quarters()
+    default_q = choose_default_quarter(quarter_options)
+
+    # Auto-update the default quarter based on current date (ET),
+    # without overriding a user's manual selection.
+    if "quarters" not in st.session_state:
+        st.session_state["quarters"] = ([default_q] if default_q else quarter_options[:1])
+        st.session_state["auto_default_quarter"] = (st.session_state["quarters"][0] if st.session_state["quarters"] else None)
+    else:
+        prev_auto = st.session_state.get("auto_default_quarter")
+        if prev_auto and st.session_state.get("quarters") == [prev_auto] and default_q and default_q != prev_auto:
+            st.session_state["quarters"] = [default_q]
+            st.session_state["auto_default_quarter"] = default_q
+
+    # Value comes from session_state via key="quarters", which the block above
+    # always initialises. Passing default= as well is what made Streamlit warn
+    # about a widget both created with a default and set via the Session State API.
+    quarters = st.sidebar.multiselect(
+        "Quarters",
+        quarter_options,
+        key="quarters",
+    )
+
+    use_first_word = st.sidebar.checkbox(
+        "Use first word for search (recommended)",
+        value=True,
+    )
+
+    # Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
+    ai_score_enabled = st.sidebar.checkbox(
+        "AI relevance scoring (1–5 highlights)",
+        value=True,
+        help="Uses OpenAI to rate how directly a paragraph discusses the company. "
+             "Adds a rating tag and background highlight for faster skimming.",
+        key="ai_score_enabled",
+    )
+    ai_score_model = "gpt-4o-mini"
+    st.session_state["ai_score_model"] = ai_score_model
+
+    batch_names = list(RUNNABLE_BATCHES.keys())
+
+
+    # --- Page wrappers -------------------------------------------------
+    # st.Page takes a zero-argument callable, so the sections that need
+    # sidebar values are wrapped in closures over them. main() is the router
+    # and re-runs on every interaction, so these are rebuilt each rerun.
+    def page_run_all() -> None:
+        draw_run_all_section(use_first_word=use_first_word)
+
+    def page_fund_families() -> None:
+        draw_fund_families_section(
+            batch_names=batch_names,
+            quarter_options=quarter_options,
+            quarters=quarters,
+            default_q=default_q,
+            use_first_word=use_first_word,
+        )
+
+    def page_seeking_alpha() -> None:
+        if st.button("Clean this page's cache", key="clean_sa_cache", use_container_width=True):
             _clear_session_keys(
                 exact=["sa_cache","sa_pdf_bytes","sa_pdf_name","sa_nav_idx","sa_batch_select_idx","sa_ticker_select","sa_manual_tickers"],
                 prefixes=["sa_"],
             )
             st.rerun()
 
-        # ---------- Seeking Alpha news + AI digest ----------
         draw_seeking_alpha_news_section()
 
-        # ---------- Navigation: move to next ticker in the selected list ----------
+        # Move to next/previous ticker in the selected list
         selected_tickers = st.session_state.get("sa_selected_tickers_prev", [])
         if selected_tickers and len(selected_tickers) > 1:
             col_prev, col_spacer, col_next = st.columns([1, 3, 1])
             with col_next:
                 if st.button("Next ticker …", key="sa_next_ticker"):
                     current_idx = st.session_state.get("sa_current_index", 0)
-                    next_idx = (current_idx + 1) % len(selected_tickers)
-                    st.session_state["sa_current_index"] = next_idx
+                    st.session_state["sa_current_index"] = (current_idx + 1) % len(selected_tickers)
                     st.rerun()
             with col_prev:
                 if st.button("◀ Previous", key="sa_prev_ticker"):
                     current_idx = st.session_state.get("sa_current_index", 0)
-                    prev_idx = (current_idx - 1) % len(selected_tickers)
-                    st.session_state["sa_current_index"] = prev_idx
+                    st.session_state["sa_current_index"] = (current_idx - 1) % len(selected_tickers)
                     st.rerun()
-    
 
-    with tab_substack:
-        if st.button("Clean current tab cache", key="clean_substack_cache", use_container_width=True):
-            _clear_session_keys(
-                exact=["substack_cache"],
-                prefixes=["substack_"],
-            )
+    def page_substack() -> None:
+        if st.button("Clean this page's cache", key="clean_substack_cache", use_container_width=True):
+            _clear_session_keys(exact=["substack_cache"], prefixes=["substack_"])
             st.rerun()
-
-        # ---------- Substack (research feed) ----------
         draw_substack_section()
 
-
-    with tab_podcast:
-        if st.button("Clean current tab cache", key="clean_podcast_cache", use_container_width=True):
+    def page_podcast() -> None:
+        if st.button("Clean this page's cache", key="clean_podcast_cache", use_container_width=True):
             _clear_session_keys(
                 exact=["podcast_cache","podcast_last_cache_key","pod_export_pdf_path","podcast_pdf_bytes","podcast_pdf_name"],
                 prefixes=["pod_","podcast_"],
             )
             st.rerun()
-
-        # ---------- Podcast intelligence (ticker mentions across podcasts) ----------
         draw_podcast_intelligence_section()
 
-    with tab_daily:
-        draw_daily_research_brief_section()
-
-
-    # Output path
-    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.write("Output folder (local reference):")
-    st.code(r"V:\CCM-AI\2025")
-    st.caption(
-        "This path is on your local machine. "
-        "Copy and paste it into Windows Explorer to open."
+    # --- Navigation ----------------------------------------------------
+    # Only the active page's function runs, so opening the app no longer
+    # fires the Seeking Alpha API call from behind the Dashboard.
+    nav = st.navigation(
+        {
+            "": [
+                st.Page(draw_dashboard_section, title="Overview", url_path="overview",
+                        icon=":material/dashboard:", default=True),
+            ],
+            "Run Scraper": [
+                st.Page(page_run_all, title="Run All", url_path="run-all", icon=":material/play_circle:"),
+                st.Page(page_fund_families, title="Fund Families", url_path="fund-families", icon=":material/account_balance:"),
+                st.Page(page_seeking_alpha, title="Seeking Alpha", url_path="seeking-alpha", icon=":material/insights:"),
+                st.Page(page_substack, title="Substack", url_path="substack", icon=":material/article:"),
+                st.Page(page_podcast, title="Podcast", url_path="podcast", icon=":material/podcasts:"),
+                st.Page(draw_daily_research_brief_section, title="Daily Research Brief", url_path="daily-brief",
+                        icon=":material/description:"),
+            ],
+            "Library": [
+                st.Page(draw_outputs_section, title="Outputs & Downloads", url_path="outputs", icon=":material/download:"),
+                st.Page(draw_run_history_section, title="Run History", url_path="run-history", icon=":material/history:"),
+            ],
+            "Configuration": [
+                st.Page(draw_settings_section, title="Settings", url_path="settings", icon=":material/settings:"),
+            ],
+        }
     )
-    st.markdown("</div>", unsafe_allow_html=True)
+    nav.run()
+
+    st.divider()
+    st.caption(
+        "Cutler Capital Management · outputs are written to your local machine; "
+        "see Settings for the resolved paths."
+    )
+
 
 # Streamlit needs main() to run on import.
 main()
