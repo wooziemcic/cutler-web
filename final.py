@@ -22,6 +22,7 @@ import shutil
 import traceback
 import json
 import hashlib
+from contextlib import nullcontext
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -6500,13 +6501,14 @@ def _recent_runs_html(manifests: List[Dict[str, Any]], limit: int = 8) -> str:
     return f"<div class='cc-tablewrap'><table class='cc-table'>{head}<tbody>{''.join(body)}</tbody></table></div>"
 
 
-def draw_overview_section() -> None:
-    """Operations dashboard for the whole scraper.
+def draw_overview_section(*, use_first_word: bool = True) -> None:
+    """Command centre for the whole scraper: status, controls, outputs, history.
 
-    Deliberately independent of the Daily Research ZIP: everything here comes
-    from the Run All state file, the compiled-output directory, the stored
-    manifests and the live ticker universe. The research analysis that used to
-    live here now sits on the Daily Research Brief page.
+    Independent of the Daily Research ZIP - everything comes from the Run All
+    state file, the compiled-output directory, the stored manifests and the live
+    ticker universe. The Run All controls and orchestration engine are embedded
+    here via draw_run_all_section(embedded=True), which is why there is no longer
+    a separate Run All page.
     """
     st.markdown(
         "<div class='cc-page-h'>Overview</div>"
@@ -6549,67 +6551,59 @@ def draw_overview_section() -> None:
         unsafe_allow_html=True,
     )
 
-    col_main, col_side = st.columns([2, 1], gap="medium")
+    col_main, col_side = st.columns([1.9, 1], gap="medium")
 
     with col_main:
-        sub = (
-            f"Started {started}" if snap["active"] and started != "—"
-            else ("Last run finished " + started if snap["state"] and started != "—"
-                  else "No run has been started yet")
-        )
-        st.markdown(
-            "<div class='cc-panel'>"
-            "<div class='cc-panel-h'>Current run"
-            f"<span class='cc-pill'><span class='cc-dot {snap['tone']}'></span>"
-            f"{_esc(snap['status_label'])}</span></div>"
-            f"<div class='cc-panel-sub'>{_esc(sub)}</div>"
-            + _pipeline_html(snap)
-            + "</div>",
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            "<div class='cc-panel'><div class='cc-panel-h'>Recent runs</div>"
-            "<div class='cc-panel-sub'>Latest completed runs recorded in manifests.</div>"
-            + (
-                _recent_runs_html(manifests)
-                if manifests
-                else "<div class='cc-empty'>No runs recorded yet. Manifests are written "
-                     "when a batch finishes compiling.</div>"
+        # One panel: pipeline state on top, the real Run All controls beneath it.
+        with st.container(border=True, key="ccpanel_run"):
+            sub = (
+                f"Started {started}" if snap["active"] and started != "—"
+                else ("Last run finished " + started if snap["state"] and started != "—"
+                      else "No run has been started yet")
             )
-            + "</div>",
-            unsafe_allow_html=True,
-        )
+            st.markdown(
+                "<div class='cc-panel-h'>Current run"
+                f"<span class='cc-pill'><span class='cc-dot {snap['tone']}'></span>"
+                f"{_esc(snap['status_label'])}</span></div>"
+                f"<div class='cc-panel-sub'>{_esc(sub)}</div>"
+                + _pipeline_html(snap),
+                unsafe_allow_html=True,
+            )
+            st.markdown("<div class='cc-rule'></div>", unsafe_allow_html=True)
+            # draw_run_all_section owns the step-advance engine, so it has to
+            # render wherever the controls live. embedded=True drops its own
+            # border and heading and folds the inputs into an expander.
+            draw_run_all_section(use_first_word=use_first_word, embedded=True)
 
     with col_side:
-        st.markdown(
-            "<div class='cc-panel' style='margin-bottom:.55rem'>"
-            "<div class='cc-panel-h'>Recent output</div>"
-            "<div class='cc-panel-sub'>Most recent compiled PDF.</div>",
-            unsafe_allow_html=True,
-        )
-        if outputs:
-            newest = outputs[0]
-            try:
-                stat = newest.stat()
-                st.markdown(
-                    f"**{_clean_report_visible_text(newest.name)}**  \n"
-                    f"<span class='cc-kpi-m'>{_human_size(stat.st_size)} · "
-                    f"{datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M}</span>",
-                    unsafe_allow_html=True,
-                )
-                st.download_button(
-                    "Download",
-                    data=newest.read_bytes(),
-                    file_name=newest.name,
-                    mime="application/pdf",
-                    key="overview_recent_dl",
-                    use_container_width=True,
-                )
-            except Exception as exc:
-                st.caption(f"Unavailable: {exc}")
-        else:
-            st.caption("No compiled PDFs yet. Run a pipeline to generate one.")
+        with st.container(border=True, key="ccpanel_output"):
+            st.markdown(
+                "<div class='cc-panel-h'>Recent output</div>"
+                "<div class='cc-panel-sub'>Most recent compiled PDF.</div>",
+                unsafe_allow_html=True,
+            )
+            if outputs:
+                newest = outputs[0]
+                try:
+                    stat = newest.stat()
+                    st.markdown(
+                        f"<div class='cc-file'>{_esc(newest.name)}</div>"
+                        f"<div class='cc-kpi-m'>{_human_size(stat.st_size)} · "
+                        f"{datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.download_button(
+                        "Download",
+                        data=newest.read_bytes(),
+                        file_name=newest.name,
+                        mime="application/pdf",
+                        key="overview_recent_dl",
+                        use_container_width=True,
+                    )
+                except Exception as exc:
+                    st.caption(f"Unavailable: {exc}")
+            else:
+                st.caption("No compiled PDFs yet. Run a pipeline to generate one.")
 
         rows = _overview_config_rows(snap)
         st.markdown(
@@ -6629,6 +6623,21 @@ def draw_overview_section() -> None:
             + "</div>",
             unsafe_allow_html=True,
         )
+
+    # Anchored full width beneath the dashboard area.
+    st.markdown(
+        "<div class='cc-panel cc-panel-wide'><div class='cc-panel-h'>Recent runs</div>"
+        "<div class='cc-panel-sub'>Latest completed runs recorded in manifests.</div>"
+        + (
+            _recent_runs_html(manifests)
+            if manifests
+            else "<div class='cc-empty'>No runs recorded yet. Manifests are written "
+                 "when a batch finishes compiling.</div>"
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
 
 def draw_dashboard_section() -> None:
     import pandas as pd
@@ -8628,58 +8637,70 @@ def draw_fund_families_section(
 
 
 
-def draw_run_all_section(*, use_first_word: bool) -> None:
+def draw_run_all_section(*, use_first_word: bool, embedded: bool = False) -> None:
     """Run All orchestrator: Fund Families Latest + Seeking Alpha + Substack + Podcasts.
 
-    Extracted verbatim from main() so it can be registered as a page. The block
-    already sat at function-body indentation, so it moves unchanged; use_first_word
-    is the only value it read as a main() local.
+    This owns the orchestration engine - the step advance loop, state persistence
+    and output rendering - so it has to run wherever the controls live.
+
+    embedded=True renders it inside a panel the caller already opened (Overview):
+    the borders and heading are dropped and the configuration inputs collapse into
+    an expander, so Overview stays a dashboard rather than turning into a form. The
+    body below is identical either way; only the surrounding chrome changes.
     """
     # ---------------------- RUN ALL (orchestrator) ----------------------
-    with st.container(border=True):
-        st.markdown("### Run All (Fund Families Latest + Seeking Alpha All + Substack + Podcasts All)")
+    with (nullcontext() if embedded else st.container(border=True)):
+        if not embedded:
+            st.markdown("### Run All (Fund Families Latest + Seeking Alpha All + Substack + Podcasts All)")
 
         ra_state = _load_run_all_state()
         ra_cfg = ra_state.get("config") or {}
-        ra_mf_days = st.selectbox(
-            "Fund Families Latest lookback (days)",
-            options=[7, 14, 30],
-            index=[7, 14, 30].index(int(ra_cfg.get("mf_lookback_days", 7))) if int(ra_cfg.get("mf_lookback_days", 7)) in [7, 14, 30] else 0,
-            key="run_all_mf_days",
-        )
-        ra_sa_max = st.number_input(
-            "Seeking Alpha max articles per ticker",
-            min_value=1,
-            max_value=20,
-            value=int(ra_cfg.get("sa_max_articles", 5)),
-            step=1,
-            key="run_all_sa_max_articles",
-        )
-        ra_sa_model = st.selectbox(
-            "Seeking Alpha model (digest/export)",
-            options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
-            index=0,
-            key="run_all_sa_model",
-        )
 
-        ra_substack_days = st.selectbox(
-            "Substack lookback (days)",
-            options=[2, 7],
-            index=[2, 7].index(int(ra_cfg.get("substack_lookback_days", 2))) if int(ra_cfg.get("substack_lookback_days", 2)) in [2, 7] else 0,
-            key="run_all_substack_days",
+        # Embedded on Overview the inputs collapse into an expander so the page
+        # stays a dashboard; standalone they render inline exactly as before.
+        _cfg_shell = (
+            st.expander("Run configuration", expanded=False) if embedded else nullcontext()
         )
-        ra_substack_max = st.number_input(
-            "Substack max posts per ticker",
-            min_value=1,
-            max_value=10,
-            value=int(ra_cfg.get("substack_max_posts", 3)),
-            step=1,
-            key="run_all_substack_max_posts",
-        )
+        with _cfg_shell:
+            ra_mf_days = st.selectbox(
+                "Fund Families Latest lookback (days)",
+                options=[7, 14, 30],
+                index=[7, 14, 30].index(int(ra_cfg.get("mf_lookback_days", 7))) if int(ra_cfg.get("mf_lookback_days", 7)) in [7, 14, 30] else 0,
+                key="run_all_mf_days",
+            )
+            ra_sa_max = st.number_input(
+                "Seeking Alpha max articles per ticker",
+                min_value=1,
+                max_value=20,
+                value=int(ra_cfg.get("sa_max_articles", 5)),
+                step=1,
+                key="run_all_sa_max_articles",
+            )
+            ra_sa_model = st.selectbox(
+                "Seeking Alpha model (digest/export)",
+                options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
+                index=0,
+                key="run_all_sa_model",
+            )
+
+            ra_substack_days = st.selectbox(
+                "Substack lookback (days)",
+                options=[2, 7],
+                index=[2, 7].index(int(ra_cfg.get("substack_lookback_days", 2))) if int(ra_cfg.get("substack_lookback_days", 2)) in [2, 7] else 0,
+                key="run_all_substack_days",
+            )
+            ra_substack_max = st.number_input(
+                "Substack max posts per ticker",
+                min_value=1,
+                max_value=10,
+                value=int(ra_cfg.get("substack_max_posts", 3)),
+                step=1,
+                key="run_all_substack_max_posts",
+            )
 
         c1, c2, c3 = st.columns([1, 1, 2])
         with c1:
-            start_all = st.button("Run All", use_container_width=True, key="run_all_start")
+            start_all = st.button("Run All", use_container_width=True, key="run_all_start", type="primary")
         with c2:
             resume_all = st.button(
                 "Resume",
@@ -9879,6 +9900,87 @@ def main():
         .cc-side-r { display: flex; justify-content: space-between; font-size: .795rem; padding: .12rem 0; }
         .cc-side-k { color: var(--cc-text-dim); }
         .cc-side-v { color: var(--cc-text); font-weight: 600; }
+
+        /* ============================================================
+           Overview alignment pass: one card system, even rhythm
+           ============================================================ */
+
+        /* Streamlit's bordered container is the only wrapper that can hold
+           widgets, so make it visually identical to the .cc-panel markup. */
+        /* st.container(border=True, key=...) puts the key class on the inner
+           stVerticalBlock while Streamlit borders the outer wrapper. Style the
+           outer one and keep the inner flat, otherwise every card double-borders. */
+        [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [class*="st-key-ccpanel"]) {
+            background: #fff !important;
+            border: 1px solid var(--cc-card-bd) !important;
+            border-radius: 14px !important;
+            box-shadow: var(--cc-card-sh) !important;
+        }
+        [class*="st-key-ccpanel"] {
+            background: transparent !important; border: none !important;
+            box-shadow: none !important; padding: 1.05rem 1.15rem; gap: .6rem;
+        }
+
+        /* Even vertical rhythm between top-level blocks. */
+        [data-testid="stMain"] [data-testid="stVerticalBlock"] { gap: .75rem; }
+        [data-testid="stMain"] [data-testid="stElementContainer"] { margin-bottom: 0; }
+
+        /* Columns: tighten the gutter and kill the stray top offset that
+           makes the left and right cards start on different lines. */
+        [data-testid="stHorizontalBlock"] { gap: .9rem; align-items: flex-start; }
+        [data-testid="stColumn"] > div { gap: .9rem; }
+
+        /* KPI row: equal heights, aligned baselines. */
+        .cc-kpis { gap: .9rem; margin-bottom: .9rem; align-items: stretch; }
+        .cc-kpi {
+            display: flex; flex-direction: column; justify-content: flex-start;
+            min-height: 104px; padding: .9rem 1.05rem;
+        }
+        .cc-kpi-v { margin-top: .28rem; }
+        .cc-kpi-m { margin-top: auto; padding-top: .25rem; }
+
+        /* Panels: consistent internal padding and no double bottom margin. */
+        .cc-panel { padding: 1.05rem 1.15rem; margin-bottom: .9rem; }
+        .cc-panel:last-child { margin-bottom: 0; }
+        .cc-panel-wide { margin-top: .9rem; margin-bottom: 0; }
+        .cc-panel-h { margin-bottom: .18rem; }
+        .cc-panel-sub { margin-bottom: .85rem; }
+
+        /* Divider between the pipeline and the Run All controls. */
+        .cc-rule { height: 1px; background: var(--cc-card-bd); margin: .95rem 0 .1rem; }
+
+        .cc-file {
+            font-weight: 600; font-size: .865rem; color: var(--cc-text);
+            word-break: break-word; line-height: 1.35;
+        }
+
+        /* Run All controls, embedded in the Current run panel. */
+        [data-testid="stMain"] [data-testid="stExpander"] {
+            border: 1px solid var(--cc-card-bd) !important;
+            border-radius: 10px !important; box-shadow: none !important;
+            background: #fbfbfc !important;
+        }
+        [data-testid="stMain"] [data-testid="stExpander"] summary { font-size: .845rem; font-weight: 600; }
+        [data-testid="stMain"] [data-testid="stExpander"] [data-testid="stVerticalBlock"] { gap: .45rem; }
+
+        /* Buttons: compact, plum primary. */
+        [data-testid="stMain"] .stButton > button {
+            border-radius: 9px; font-size: .845rem; font-weight: 600;
+            padding: .42rem .8rem; border: 1px solid var(--cc-card-bd);
+        }
+        [data-testid="stMain"] .stButton > button[kind="primary"] {
+            background: var(--cc-plum); border-color: var(--cc-plum); color: #fff;
+        }
+        [data-testid="stMain"] .stDownloadButton > button {
+            border-radius: 9px; font-size: .845rem; font-weight: 600; padding: .42rem .8rem;
+        }
+
+        /* Compact inputs inside the run configuration expander. */
+        [data-testid="stExpander"] label { font-size: .8rem !important; }
+        [data-testid="stExpander"] [data-testid="stWidgetLabel"] p { font-size: .8rem !important; }
+
+        /* Pipeline stepper sits flush inside its panel. */
+        .cc-steps { margin: .5rem 0 1rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -9993,8 +10095,9 @@ def main():
     # st.Page takes a zero-argument callable, so the sections that need
     # sidebar values are wrapped in closures over them. main() is the router
     # and re-runs on every interaction, so these are rebuilt each rerun.
-    def page_run_all() -> None:
-        draw_run_all_section(use_first_word=use_first_word)
+    def page_overview() -> None:
+        # Overview is the command centre: status plus the live Run All controls.
+        draw_overview_section(use_first_word=use_first_word)
 
     def page_fund_families() -> None:
         draw_fund_families_section(
@@ -10061,11 +10164,10 @@ def main():
     nav = st.navigation(
         {
             "": [
-                st.Page(draw_overview_section, title="Overview", url_path="overview",
+                st.Page(page_overview, title="Overview", url_path="overview",
                         icon=":material/dashboard:", default=True),
             ],
             "Run Scraper": [
-                st.Page(page_run_all, title="Run All", url_path="run-all", icon=":material/play_circle:"),
                 st.Page(page_fund_families, title="Fund Families", url_path="fund-families", icon=":material/account_balance:"),
                 st.Page(page_seeking_alpha, title="Seeking Alpha", url_path="seeking-alpha", icon=":material/insights:"),
                 st.Page(page_substack, title="Substack", url_path="substack", icon=":material/article:"),
