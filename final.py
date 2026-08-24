@@ -6338,6 +6338,298 @@ def _process_cross_day_uploaded_zip(uploaded, known_tickers: set[str]):
         raise
 
 
+
+# ---------------------- Overview: operations dashboard ----------------------
+
+# The Run All orchestrator advances through these steps in order; the labels are
+# what the pipeline card renders. Kept in sync with draw_run_all_section().
+_PIPELINE_STEPS: List[Tuple[str, str]] = [
+    ("fund_families", "Fund Families"),
+    ("seeking_alpha", "Seeking Alpha"),
+    ("substack", "Substack"),
+    ("podcasts", "Podcasts"),
+]
+
+
+def _esc(value: object) -> str:
+    """Escape a value for interpolation into the dashboard's HTML fragments."""
+    return html_lib.escape(_clean_report_visible_text(value))
+
+
+def _fmt_run_ts(raw_ts: object) -> str:
+    """Render an ISO timestamp as 'YYYY-MM-DD HH:MM', or an em dash."""
+    text = str(raw_ts or "").strip()
+    if not text:
+        return "—"
+    try:
+        return datetime.fromisoformat(text).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return text.replace("T", " ")[:16]
+
+
+def _run_all_snapshot() -> Dict[str, Any]:
+    """Summarise the persisted Run All state for the pipeline card.
+
+    Reads the same file the orchestrator writes, so the dashboard always
+    reflects the real run rather than a separate copy of the truth.
+    """
+    state = _load_run_all_state() or {}
+    completed = [s for s in (state.get("completed") or []) if isinstance(s, str)]
+    current = str(state.get("current_step") or "")
+    status = str(state.get("status") or "")
+
+    if status == "running":
+        label, tone = ("Running", "run")
+    elif status in {"complete", "done"} or current == "done":
+        label, tone = ("Completed", "ok")
+    elif status:
+        label, tone = (status.title(), "idle")
+    else:
+        label, tone = ("Idle", "idle")
+
+    done_count = len([k for k, _ in _PIPELINE_STEPS if k in completed])
+    if current == "done" or status in {"complete", "done"}:
+        done_count = len(_PIPELINE_STEPS)
+
+    return {
+        "state": state,
+        "status_label": label,
+        "tone": tone,
+        "completed": completed,
+        "current": current,
+        "done_count": done_count,
+        "total": len(_PIPELINE_STEPS),
+        "started_at": state.get("started_at"),
+        "config": state.get("config") or {},
+        "outputs": state.get("outputs") or {},
+        "active": status == "running",
+    }
+
+
+def _pipeline_html(snap: Dict[str, Any]) -> str:
+    """Render the Fund Families -> ... -> Complete stepper."""
+    nodes = []
+    for idx, (key, label) in enumerate(_PIPELINE_STEPS, start=1):
+        if key in snap["completed"]:
+            cls, sub, glyph = "done", "Complete", "&#10003;"
+        elif key == snap["current"] and snap["active"]:
+            cls, sub, glyph = "active", "In progress", str(idx)
+        else:
+            cls, sub, glyph = "", "Pending", str(idx)
+        nodes.append(
+            f'<div class="cc-step {cls}"><div class="cc-step-i">{glyph}</div>'
+            f'<div class="cc-step-n">{_esc(label)}</div>'
+            f'<div class="cc-step-s">{sub}</div></div>'
+        )
+
+    finished = snap["done_count"] >= snap["total"]
+    fin_cls = "done" if finished else ""
+    fin_sub = "Complete" if finished else "Pending"
+    nodes.append(
+        f'<div class="cc-step {fin_cls}"><div class="cc-step-i">&#9679;</div>'
+        f'<div class="cc-step-n">Complete</div>'
+        f'<div class="cc-step-s">{fin_sub}</div></div>'
+    )
+
+    pct = int(round(100 * snap["done_count"] / max(1, snap["total"])))
+    return (
+        f'<div class="cc-steps">{"".join(nodes)}</div>'
+        f'<div class="cc-bar"><i style="width:{pct}%"></i></div>'
+        f'<div class="cc-bar-row"><span>{_esc(snap["status_label"])}</span>'
+        f'<span>{snap["done_count"]} of {snap["total"]} stages complete</span></div>'
+    )
+
+
+def _overview_config_rows(snap: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Configuration actually in effect: the live run's config when there is one,
+    otherwise the current sidebar selection. Values that do not exist are skipped."""
+    cfg = snap["config"]
+    rows: List[Tuple[str, str]] = []
+
+    quarters = st.session_state.get("quarters") or []
+    if quarters:
+        rows.append(("Quarter", ", ".join(str(q) for q in quarters)))
+
+    def _pick(cfg_key: str, session_key: str) -> Optional[str]:
+        if cfg.get(cfg_key) not in (None, ""):
+            return str(cfg.get(cfg_key))
+        val = st.session_state.get(session_key)
+        return None if val in (None, "") else str(val)
+
+    for label, cfg_key, session_key, suffix in (
+        ("Fund Families lookback", "mf_lookback_days", "run_all_mf_days", " days"),
+        ("Seeking Alpha articles", "sa_max_articles", "run_all_sa_max_articles", " per ticker"),
+        ("Seeking Alpha model", "sa_model", "run_all_sa_model", ""),
+        ("Substack lookback", "substack_lookback_days", "run_all_substack_days", " days"),
+        ("Substack max posts", "substack_max_posts", "run_all_substack_max_posts", " per ticker"),
+    ):
+        value = _pick(cfg_key, session_key)
+        if value is not None:
+            rows.append((label, f"{value}{suffix}"))
+
+    for label, key in (
+        ("First-word search", "use_first_word"),
+        ("AI relevance scoring", "ai_score_enabled"),
+    ):
+        if key in st.session_state:
+            rows.append((label, "On" if st.session_state.get(key) else "Off"))
+
+    return rows
+
+
+def _recent_runs_html(manifests: List[Dict[str, Any]], limit: int = 8) -> str:
+    """Compact Recent Runs table. Only columns the manifests actually record."""
+    head = (
+        "<thead><tr><th>Run / Batch</th><th>Quarter</th><th>Started</th>"
+        "<th>Status</th><th class='num'>Items</th><th>Output</th></tr></thead>"
+    )
+    body = []
+    for man in manifests[:limit]:
+        compiled = str(man.get("compiled_pdf") or "")
+        out_name = _esc(Path(compiled).name) if compiled else "—"
+        body.append(
+            "<tr>"
+            f"<td>{_esc(man.get('batch') or '—')}</td>"
+            f"<td>{_esc(man.get('quarter') or '—')}</td>"
+            f"<td>{_esc(_fmt_run_ts(man.get('created_at')))}</td>"
+            "<td><span class='cc-badge ok'>Completed</span></td>"
+            f"<td class='num'>{len(man.get('items') or [])}</td>"
+            f"<td>{out_name}</td>"
+            "</tr>"
+        )
+    return f"<div class='cc-tablewrap'><table class='cc-table'>{head}<tbody>{''.join(body)}</tbody></table></div>"
+
+
+def draw_overview_section() -> None:
+    """Operations dashboard for the whole scraper.
+
+    Deliberately independent of the Daily Research ZIP: everything here comes
+    from the Run All state file, the compiled-output directory, the stored
+    manifests and the live ticker universe. The research analysis that used to
+    live here now sits on the Daily Research Brief page.
+    """
+    st.markdown(
+        "<div class='cc-page-h'>Overview</div>"
+        "<div class='cc-page-sub'>Pipeline activity, run status, generated research, "
+        "and recent scraper activity.</div>",
+        unsafe_allow_html=True,
+    )
+
+    snap = _run_all_snapshot()
+    outputs = _compiled_outputs()
+    manifests = _all_manifests()
+
+    try:
+        ticker_status = get_ticker_load_status()
+        ticker_count = int(ticker_status.count or 0)
+        ticker_note = "Google Sheet" if ticker_status.source == "google_sheet" else "Local fallback"
+    except Exception:
+        ticker_count, ticker_note = 0, "Unavailable"
+
+    started = _fmt_run_ts(snap["started_at"])
+    kpis = [
+        ("Tickers", f"{ticker_count:,}" if ticker_count else "—", ticker_note, False),
+        ("Current run status", snap["status_label"],
+         f"{snap['done_count']} of {snap['total']} stages" if snap["state"] else "No run recorded",
+         snap["active"]),
+        ("Outputs generated", f"{len(outputs):,}" if outputs else "—",
+         "Compiled PDFs" if outputs else "None yet", False),
+        ("Recorded runs", f"{len(manifests):,}" if manifests else "—",
+         "With manifests" if manifests else "None yet", False),
+    ]
+    st.markdown(
+        "<div class='cc-kpis'>"
+        + "".join(
+            f"<div class='cc-kpi'><div class='cc-kpi-l'>{_esc(label)}</div>"
+            f"<div class='cc-kpi-v{' accent' if accent else ''}'>{_esc(value)}</div>"
+            f"<div class='cc-kpi-m'>{_esc(meta)}</div></div>"
+            for label, value, meta, accent in kpis
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    col_main, col_side = st.columns([2, 1], gap="medium")
+
+    with col_main:
+        sub = (
+            f"Started {started}" if snap["active"] and started != "—"
+            else ("Last run finished " + started if snap["state"] and started != "—"
+                  else "No run has been started yet")
+        )
+        st.markdown(
+            "<div class='cc-panel'>"
+            "<div class='cc-panel-h'>Current run"
+            f"<span class='cc-pill'><span class='cc-dot {snap['tone']}'></span>"
+            f"{_esc(snap['status_label'])}</span></div>"
+            f"<div class='cc-panel-sub'>{_esc(sub)}</div>"
+            + _pipeline_html(snap)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            "<div class='cc-panel'><div class='cc-panel-h'>Recent runs</div>"
+            "<div class='cc-panel-sub'>Latest completed runs recorded in manifests.</div>"
+            + (
+                _recent_runs_html(manifests)
+                if manifests
+                else "<div class='cc-empty'>No runs recorded yet. Manifests are written "
+                     "when a batch finishes compiling.</div>"
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+    with col_side:
+        st.markdown(
+            "<div class='cc-panel' style='margin-bottom:.55rem'>"
+            "<div class='cc-panel-h'>Recent output</div>"
+            "<div class='cc-panel-sub'>Most recent compiled PDF.</div>",
+            unsafe_allow_html=True,
+        )
+        if outputs:
+            newest = outputs[0]
+            try:
+                stat = newest.stat()
+                st.markdown(
+                    f"**{_clean_report_visible_text(newest.name)}**  \n"
+                    f"<span class='cc-kpi-m'>{_human_size(stat.st_size)} · "
+                    f"{datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.download_button(
+                    "Download",
+                    data=newest.read_bytes(),
+                    file_name=newest.name,
+                    mime="application/pdf",
+                    key="overview_recent_dl",
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                st.caption(f"Unavailable: {exc}")
+        else:
+            st.caption("No compiled PDFs yet. Run a pipeline to generate one.")
+
+        rows = _overview_config_rows(snap)
+        st.markdown(
+            "<div class='cc-panel'><div class='cc-panel-h'>Current configuration</div>"
+            "<div class='cc-panel-sub'>Settings in effect for the next run.</div>"
+            + (
+                "<div class='cc-dl'>"
+                + "".join(
+                    f"<div class='cc-dl-r'><span class='cc-dl-k'>{_esc(k)}</span>"
+                    f"<span class='cc-dl-v'>{_esc(v)}</span></div>"
+                    for k, v in rows
+                )
+                + "</div>"
+                if rows
+                else "<div class='cc-empty'>No configuration recorded yet.</div>"
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
 def draw_dashboard_section() -> None:
     import pandas as pd
 
@@ -9424,6 +9716,169 @@ def main():
             padding: 0.1rem 0.35rem;
         }
         ::selection { background: var(--cc-plum-100); color: var(--cc-plum-700); }
+
+        /* ============================================================
+           Operations dashboard - layout, cards, KPIs, pipeline, tables
+           Appended last so these rules win over the earlier ones.
+           ============================================================ */
+        :root {
+            --cc-text:      #1f2430;
+            --cc-text-dim:  #6b7280;
+            --cc-bg:        #f6f7f9;
+            --cc-card-bd:   #e6e8ee;
+            --cc-card-sh:   0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
+        }
+
+        /* ---- Use the width of the window ---- */
+        .block-container {
+            max-width: 1800px !important;
+            padding-top: 1.1rem !important;
+            padding-bottom: 2.2rem !important;
+            padding-left: 1.9rem !important;
+            padding-right: 1.9rem !important;
+        }
+        .stApp { background: var(--cc-bg); }
+        h1, h2, h3, h4, h5 { color: var(--cc-text); letter-spacing: -0.011em; }
+        p, li, label, .stMarkdown { color: var(--cc-text); }
+
+        /* ---- Compact application header ---- */
+        .cc-appbar {
+            display: flex; align-items: center; gap: .85rem;
+            padding: 0 0 .95rem 0; margin: 0 0 1.15rem 0;
+            border-bottom: 1px solid var(--cc-card-bd);
+        }
+        .cc-appbar-mark {
+            width: 42px; height: 42px; flex: 0 0 42px; border-radius: 11px;
+            background: linear-gradient(135deg, var(--cc-plum), #6d3563);
+            display: flex; align-items: center; justify-content: center;
+            color: #fff; font-size: 1.1rem; font-weight: 700;
+        }
+        .cc-appbar-title { font-size: 1.4rem; font-weight: 680; color: var(--cc-text); line-height: 1.2; }
+        .cc-appbar-sub   { font-size: .845rem; color: var(--cc-text-dim); margin-top: .12rem; }
+        .cc-appbar-spacer { flex: 1 1 auto; }
+        .cc-pill {
+            display: inline-flex; align-items: center; gap: .42rem;
+            font-size: .78rem; font-weight: 600; padding: .32rem .68rem;
+            border-radius: 999px; border: 1px solid var(--cc-card-bd); background: #fff;
+            color: var(--cc-text-dim); white-space: nowrap;
+        }
+        .cc-dot { width: 7px; height: 7px; border-radius: 50%; background: #16a34a; }
+        .cc-dot.idle { background: #9aa1ac; }
+        .cc-dot.run  { background: var(--cc-plum); }
+        .cc-dot.err  { background: #dc2626; }
+
+        /* ---- Page heading ---- */
+        .cc-page-h   { font-size: 1.22rem; font-weight: 680; color: var(--cc-text); margin: 0 0 .18rem; }
+        .cc-page-sub { font-size: .855rem; color: var(--cc-text-dim); margin: 0 0 1.05rem; }
+
+        /* ---- Generic panel ---- */
+        .cc-panel {
+            background: #fff; border: 1px solid var(--cc-card-bd); border-radius: 14px;
+            box-shadow: var(--cc-card-sh); padding: 1.05rem 1.15rem; margin-bottom: 1rem;
+        }
+        .cc-panel-h {
+            font-size: .935rem; font-weight: 660; color: var(--cc-text);
+            margin: 0 0 .2rem; display: flex; align-items: center; gap: .5rem;
+        }
+        .cc-panel-sub { font-size: .79rem; color: var(--cc-text-dim); margin: 0 0 .9rem; }
+
+        /* ---- KPI row ---- */
+        .cc-kpis { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: .85rem; margin-bottom: 1rem; }
+        .cc-kpi {
+            background: #fff; border: 1px solid var(--cc-card-bd); border-radius: 14px;
+            box-shadow: var(--cc-card-sh); padding: .95rem 1.05rem;
+        }
+        .cc-kpi-l { font-size: .755rem; font-weight: 600; letter-spacing: .045em;
+                    text-transform: uppercase; color: var(--cc-text-dim); }
+        .cc-kpi-v { font-size: 1.72rem; font-weight: 700; color: var(--cc-text);
+                    line-height: 1.15; margin-top: .3rem; }
+        .cc-kpi-v.accent { color: var(--cc-plum); }
+        .cc-kpi-m { font-size: .775rem; color: var(--cc-text-dim); margin-top: .22rem; }
+
+        /* ---- Pipeline stepper ---- */
+        .cc-steps { display: flex; align-items: flex-start; gap: 0; margin: .35rem 0 1.15rem; }
+        .cc-step  { flex: 1 1 0; text-align: center; position: relative; min-width: 0; }
+        .cc-step-i {
+            width: 34px; height: 34px; border-radius: 50%; margin: 0 auto .45rem;
+            display: flex; align-items: center; justify-content: center;
+            font-size: .82rem; font-weight: 700; border: 2px solid var(--cc-card-bd);
+            background: #fff; color: #9aa1ac; position: relative; z-index: 2;
+        }
+        .cc-step.done   .cc-step-i { background: #f1e9f0; border-color: #d9c4d6; color: var(--cc-plum); }
+        .cc-step.active .cc-step-i { background: var(--cc-plum); border-color: var(--cc-plum); color: #fff;
+                                     box-shadow: 0 0 0 4px rgba(75,33,66,.12); }
+        .cc-step-n { font-size: .795rem; font-weight: 600; color: #9aa1ac; }
+        .cc-step.done   .cc-step-n { color: var(--cc-text); }
+        .cc-step.active .cc-step-n { color: var(--cc-plum); }
+        .cc-step-s { font-size: .715rem; color: var(--cc-text-dim); margin-top: .05rem; }
+        .cc-step::before {
+            content: ""; position: absolute; top: 17px; left: -50%; width: 100%;
+            height: 2px; background: var(--cc-card-bd); z-index: 1;
+        }
+        .cc-step:first-child::before { display: none; }
+        .cc-step.done::before, .cc-step.active::before { background: #d9c4d6; }
+
+        /* ---- Progress bar ---- */
+        .cc-bar { height: 7px; background: #edeef2; border-radius: 999px; overflow: hidden; }
+        .cc-bar > i { display: block; height: 100%; background: var(--cc-plum); border-radius: 999px; }
+        .cc-bar-row { display: flex; justify-content: space-between; font-size: .775rem;
+                      color: var(--cc-text-dim); margin-top: .42rem; }
+
+        /* ---- Definition rows ---- */
+        .cc-dl   { display: flex; flex-direction: column; gap: .04rem; }
+        .cc-dl-r { display: flex; justify-content: space-between; gap: 1rem;
+                   padding: .42rem 0; border-bottom: 1px solid #f1f2f5; font-size: .83rem; }
+        .cc-dl-r:last-child { border-bottom: none; }
+        .cc-dl-k { color: var(--cc-text-dim); }
+        .cc-dl-v { color: var(--cc-text); font-weight: 600; text-align: right; }
+
+        /* ---- Compact table ---- */
+        .cc-table { width: 100%; border-collapse: collapse; font-size: .83rem; }
+        .cc-table th {
+            text-align: left; font-weight: 600; font-size: .745rem; letter-spacing: .04em;
+            text-transform: uppercase; color: var(--cc-text-dim);
+            padding: .5rem .7rem; border-bottom: 1px solid var(--cc-card-bd); white-space: nowrap;
+        }
+        .cc-table td { padding: .62rem .7rem; border-bottom: 1px solid #f2f3f6; color: var(--cc-text); }
+        .cc-table tr:last-child td { border-bottom: none; }
+        .cc-table tr:hover td { background: #fafbfc; }
+        .cc-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+        .cc-tablewrap { overflow-x: auto; }
+        .cc-badge {
+            display: inline-block; font-size: .72rem; font-weight: 600;
+            padding: .18rem .52rem; border-radius: 6px; white-space: nowrap;
+        }
+        .cc-badge.ok   { background: #e8f5ee; color: #10693c; }
+        .cc-badge.run  { background: #f1e9f0; color: var(--cc-plum); }
+        .cc-badge.idle { background: #f1f2f5; color: #6b7280; }
+        .cc-empty { color: var(--cc-text-dim); font-size: .84rem; padding: .6rem 0; }
+
+        /* ---- Sidebar tightening ---- */
+        [data-testid="stSidebar"] { background: #fff; border-right: 1px solid var(--cc-card-bd); }
+        [data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {
+            width: 272px !important; min-width: 272px !important; max-width: 272px !important;
+        }
+        [data-testid="stSidebar"] .block-container { padding: .6rem .75rem !important; }
+        [data-testid="stSidebarNav"] ul { padding-top: .15rem; }
+        [data-testid="stSidebarNav"] li { margin: 1px 0; }
+        [data-testid="stSidebarNav"] a { border-radius: 8px; padding: .34rem .6rem !important; margin: 0 .35rem; }
+        [data-testid="stSidebarNav"] a span { font-size: .875rem !important; }
+        [data-testid="stSidebarNav"] a[aria-current="page"] {
+            background: #f4ecf3 !important; box-shadow: inset 2px 0 0 var(--cc-plum);
+        }
+        [data-testid="stSidebarNav"] a[aria-current="page"] span { color: var(--cc-plum) !important; font-weight: 600 !important; }
+        [data-testid="stSidebarHeader"] img, [data-testid="stLogo"] { max-width: 168px; }
+        .cc-side-card {
+            background: #fbfbfc; border: 1px solid var(--cc-card-bd); border-radius: 11px;
+            padding: .6rem .7rem; margin-bottom: .55rem;
+        }
+        .cc-side-h {
+            font-size: .705rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+            color: var(--cc-text-dim); margin: .5rem 0 .35rem;
+        }
+        .cc-side-r { display: flex; justify-content: space-between; font-size: .795rem; padding: .12rem 0; }
+        .cc-side-k { color: var(--cc-text-dim); }
+        .cc-side-v { color: var(--cc-text); font-weight: 600; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -9438,33 +9893,58 @@ def main():
         except Exception:
             pass
 
+    # Compact application header: mark, title, subtitle, live ticker-source pill.
+    try:
+        _hdr_status = get_ticker_load_status()
+        _hdr_ok = bool(_hdr_status.ok)
+        _hdr_txt = (
+            f"{_hdr_status.count} tickers loaded"
+            if _hdr_ok else "Using local fallback tickers"
+        )
+    except Exception:
+        _hdr_ok, _hdr_txt = False, "Ticker status unavailable"
     st.markdown(
-        "<div class='app-header'>"
-        "<div class='app-title'>Cutler Capital Letter Scraper</div>"
-        "<div class='app-subtitle'>Fund letters, Seeking Alpha, Substack and podcasts,"
-        " excerpted and indexed by ticker</div>"
+        "<div class='cc-appbar'>"
+        "<div class='cc-appbar-mark'>CC</div>"
+        "<div><div class='cc-appbar-title'>Cutler Capital Letter Scraper</div>"
+        "<div class='cc-appbar-sub'>Automated collection of fund letters, alpha content,"
+        " Substack posts, and podcasts.</div></div>"
+        "<div class='cc-appbar-spacer'></div>"
+        f"<span class='cc-pill'><span class='cc-dot {'' if _hdr_ok else 'idle'}'></span>"
+        f"{html_lib.escape(_hdr_txt)}</span>"
         "</div>",
         unsafe_allow_html=True,
     )
 
 
-    # Sidebar: run settings
-    st.sidebar.header("Run settings")
+    # Sidebar: run settings. Rendered as a compact product panel rather than a
+    # default Streamlit status box.
+    st.sidebar.markdown("<div class='cc-side-h'>Ticker source</div>", unsafe_allow_html=True)
     try:
         _ticker_status = get_ticker_load_status()
-        if _ticker_status.source == "google_sheet":
-            st.sidebar.success(
-                f"Tickers loaded from Google Sheet: {_ticker_status.count}\n\n"
-                f"Pattern: {_ticker_status.url_pattern or 'csv'}\n\n"
-                f"Last loaded: {_ticker_status.loaded_at}"
+        _src = "Google Sheet" if _ticker_status.source == "google_sheet" else "Local fallback"
+        _rows = [
+            ("Source", _src),
+            ("Tickers", str(_ticker_status.count)),
+            ("Pattern", str(_ticker_status.url_pattern or "csv")),
+            ("Loaded", str(_ticker_status.loaded_at)),
+        ]
+        st.sidebar.markdown(
+            "<div class='cc-side-card'>"
+            + "".join(
+                f"<div class='cc-side-r'><span class='cc-side-k'>{html_lib.escape(k)}</span>"
+                f"<span class='cc-side-v'>{html_lib.escape(v)}</span></div>"
+                for k, v in _rows
             )
-        else:
-            st.sidebar.warning(
-                f"{_ticker_status.message}\n\n"
-                f"Last checked: {_ticker_status.loaded_at}"
-            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+        if not _ticker_status.ok:
+            st.sidebar.caption(_ticker_status.message)
     except Exception:
-        st.sidebar.warning("Using fallback local ticker list")
+        st.sidebar.caption("Using fallback local ticker list.")
+
+    st.sidebar.markdown("<div class='cc-side-h'>Run settings</div>", unsafe_allow_html=True)
 
     quarter_options = get_available_quarters()
     default_q = choose_default_quarter(quarter_options)
@@ -9492,6 +9972,7 @@ def main():
     use_first_word = st.sidebar.checkbox(
         "Use first word for search (recommended)",
         value=True,
+        key="use_first_word",
     )
 
     # Optional: AI relevance scoring inside excerpt PDFs (adds 1–5 rating + highlight per paragraph)
@@ -9555,6 +10036,16 @@ def main():
             st.rerun()
         draw_substack_section()
 
+    def page_daily_brief() -> None:
+        # The Investment Research Dashboard used to be the Overview page. It is
+        # ZIP-driven research analysis, so it belongs with the Daily Research
+        # Brief rather than on the operations Overview.
+        tab_brief, tab_dash = st.tabs(["Daily Brief", "Research Dashboard"])
+        with tab_brief:
+            draw_daily_research_brief_section()
+        with tab_dash:
+            draw_dashboard_section()
+
     def page_podcast() -> None:
         if st.button("Clean this page's cache", key="clean_podcast_cache", use_container_width=True):
             _clear_session_keys(
@@ -9570,7 +10061,7 @@ def main():
     nav = st.navigation(
         {
             "": [
-                st.Page(draw_dashboard_section, title="Overview", url_path="overview",
+                st.Page(draw_overview_section, title="Overview", url_path="overview",
                         icon=":material/dashboard:", default=True),
             ],
             "Run Scraper": [
@@ -9579,7 +10070,7 @@ def main():
                 st.Page(page_seeking_alpha, title="Seeking Alpha", url_path="seeking-alpha", icon=":material/insights:"),
                 st.Page(page_substack, title="Substack", url_path="substack", icon=":material/article:"),
                 st.Page(page_podcast, title="Podcast", url_path="podcast", icon=":material/podcasts:"),
-                st.Page(draw_daily_research_brief_section, title="Daily Research Brief", url_path="daily-brief",
+                st.Page(page_daily_brief, title="Daily Research Brief", url_path="daily-brief",
                         icon=":material/description:"),
             ],
             "Library": [
