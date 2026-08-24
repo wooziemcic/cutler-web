@@ -1,0 +1,14 @@
+# Shared Cutler theme. secrets.toml is gitignored; this file is not, so theme
+# settings travel with the repo.
+[theme]
+base = "light"
+primaryColor = "#4b2142"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4ecf3"
+textColor = "#1f2430"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
