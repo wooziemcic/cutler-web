@@ -8825,6 +8825,197 @@ def draw_run_all_section(*, use_first_word: bool) -> None:
 
 
 
+
+# ---------------------- Outputs / History / Settings pages ----------------------
+
+def _human_size(num_bytes: int) -> str:
+    """Render a byte count as a short human-readable string."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _compiled_outputs(limit: int | None = None) -> List[Path]:
+    """Every compiled PDF, newest first. All pipelines write into CP_DIR."""
+    try:
+        pdfs = [q for q in CP_DIR.glob("*.pdf") if q.is_file()]
+    except Exception:
+        return []
+    pdfs.sort(key=lambda q: q.stat().st_mtime, reverse=True)
+    return pdfs[:limit] if limit else pdfs
+
+
+def draw_outputs_section() -> None:
+    """Outputs & Downloads: every compiled PDF produced by any pipeline."""
+    st.markdown("### Outputs & Downloads")
+    st.caption(
+        "Compiled PDFs from Fund Families, Seeking Alpha, Substack and Podcasts, newest first."
+    )
+
+    pdfs = _compiled_outputs()
+    if not pdfs:
+        with st.container(border=True):
+            st.caption(
+                "No compiled PDFs yet. Run a pipeline from Run Scraper and its output will appear here."
+            )
+        return
+
+    st.caption(f"{len(pdfs)} file{'s' if len(pdfs) != 1 else ''} in {CP_DIR}")
+    for idx, pdf in enumerate(pdfs):
+        with st.container(border=True):
+            try:
+                stat = pdf.stat()
+            except Exception:
+                continue
+            col_meta, col_dl = st.columns([4, 1])
+            with col_meta:
+                st.markdown(f"**{_clean_report_visible_text(pdf.name)}**")
+                st.caption(
+                    f"{_human_size(stat.st_size)} · "
+                    f"{datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M}"
+                )
+            with col_dl:
+                try:
+                    st.download_button(
+                        "Download",
+                        data=pdf.read_bytes(),
+                        file_name=pdf.name,
+                        mime="application/pdf",
+                        key=f"outputs_dl_{idx}",
+                        use_container_width=True,
+                    )
+                except Exception as exc:
+                    st.caption(f"Unavailable: {exc}")
+
+
+def _all_manifests() -> List[Dict[str, Any]]:
+    """Every run manifest across all quarters, newest first.
+
+    Mirrors _load_manifests() but without its batch/quarter filter, since the
+    history view is global.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        paths = list(MAN_DIR.glob("*/manifest_*.json"))
+    except Exception:
+        return []
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            data["_path"] = str(path)
+            out.append(data)
+    out.sort(key=lambda m: str(m.get("created_at") or ""), reverse=True)
+    return out
+
+
+def draw_run_history_section() -> None:
+    """Run History: one row per stored manifest."""
+    st.markdown("### Run History")
+    st.caption("Every completed run that wrote a manifest, newest first.")
+
+    manifests = _all_manifests()
+    if not manifests:
+        with st.container(border=True):
+            st.caption(
+                "No runs recorded yet. Manifests are written when a batch finishes compiling."
+            )
+        return
+
+    rows = []
+    for man in manifests:
+        compiled = str(man.get("compiled_pdf") or "")
+        rows.append(
+            {
+                "Batch": _clean_report_visible_text(man.get("batch") or "—"),
+                "Quarter": str(man.get("quarter") or "—"),
+                "Started": str(man.get("created_at") or "").replace("T", " "),
+                "Items": len(man.get("items") or []),
+                "Output": _clean_report_visible_text(Path(compiled).name) if compiled else "—",
+            }
+        )
+
+    with st.container(border=True):
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Batch": st.column_config.TextColumn("Batch", width="medium"),
+                "Quarter": st.column_config.TextColumn("Quarter", width="small"),
+                "Started": st.column_config.TextColumn("Started", width="medium"),
+                "Items": st.column_config.NumberColumn("Items", width="small"),
+                "Output": st.column_config.TextColumn("Output", width="large"),
+            },
+        )
+    st.caption(
+        "Duration, status and error count are not recorded in manifests today, so they are "
+        "omitted rather than estimated. Failed runs do not write a manifest and so do not appear."
+    )
+
+
+def draw_settings_section() -> None:
+    """Settings: read-only view of ticker source, paths and credential presence."""
+    st.markdown("### Settings")
+    st.caption("Current configuration. This page is read-only.")
+
+    with st.container(border=True):
+        st.markdown("#### Ticker source")
+        try:
+            status = get_ticker_load_status()
+            if status.source == "google_sheet":
+                st.success(f"Google Sheet · {status.count} tickers · loaded {status.loaded_at}")
+            else:
+                st.warning(status.message)
+            st.caption(f"Read pattern: {status.url_pattern or 'n/a'}")
+        except Exception as exc:
+            st.warning(f"Ticker status unavailable: {exc}")
+        try:
+            from live_tickers import GOOGLE_SHEET_SHARED_URL  # type: ignore
+
+            st.caption("Workbook")
+            st.code(GOOGLE_SHEET_SHARED_URL, language=None)
+        except Exception:
+            pass
+
+    with st.container(border=True):
+        st.markdown("#### Paths")
+        for label, path in (
+            ("Downloads", DL_DIR),
+            ("Excerpts", EX_DIR),
+            ("Compiled", CP_DIR),
+            ("Manifests", MAN_DIR),
+            ("Delta", DELTA_DIR),
+        ):
+            st.caption(f"{label}")
+            st.code(str(path), language=None)
+
+    with st.container(border=True):
+        st.markdown("#### Credentials")
+        st.caption("Presence only - values are never displayed.")
+        for key in (
+            "OPENAI_API_KEY",
+            "SA_RAPIDAPI_KEY",
+            "SUBSTACK_RAPIDAPI_KEY",
+            "LISTENNOTES_API_KEY",
+            "DEEPGRAM_API_KEY",
+            "BSD_EMAIL",
+            "BSD_PASSWORD",
+        ):
+            present = bool(os.environ.get(key))
+            if not present:
+                try:
+                    present = bool(st.secrets.get(key))  # type: ignore[attr-defined]
+                except Exception:
+                    present = False
+            st.markdown(f"{'Set' if present else 'Missing'} — `{key}`")
+
+
 def main():
     st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 
