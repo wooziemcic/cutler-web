@@ -8343,6 +8343,496 @@ def draw_fund_families_section(
 
 
 
+def draw_run_all_section(*, use_first_word: bool) -> None:
+    """Run All orchestrator: Fund Families Latest + Seeking Alpha + Substack + Podcasts.
+
+    Extracted verbatim from main() so it can be registered as a page. The block
+    already sat at function-body indentation, so it moves unchanged; use_first_word
+    is the only value it read as a main() local.
+    """
+    # ---------------------- RUN ALL (orchestrator) ----------------------
+    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
+    st.markdown("### Run All (Fund Families Latest + Seeking Alpha All + Substack + Podcasts All)")
+
+    ra_state = _load_run_all_state()
+    ra_cfg = ra_state.get("config") or {}
+    ra_mf_days = st.selectbox(
+        "Fund Families Latest lookback (days)",
+        options=[7, 14, 30],
+        index=[7, 14, 30].index(int(ra_cfg.get("mf_lookback_days", 7))) if int(ra_cfg.get("mf_lookback_days", 7)) in [7, 14, 30] else 0,
+        key="run_all_mf_days",
+    )
+    ra_sa_max = st.number_input(
+        "Seeking Alpha max articles per ticker",
+        min_value=1,
+        max_value=20,
+        value=int(ra_cfg.get("sa_max_articles", 5)),
+        step=1,
+        key="run_all_sa_max_articles",
+    )
+    ra_sa_model = st.selectbox(
+        "Seeking Alpha model (digest/export)",
+        options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
+        index=0,
+        key="run_all_sa_model",
+    )
+
+    ra_substack_days = st.selectbox(
+        "Substack lookback (days)",
+        options=[2, 7],
+        index=[2, 7].index(int(ra_cfg.get("substack_lookback_days", 2))) if int(ra_cfg.get("substack_lookback_days", 2)) in [2, 7] else 0,
+        key="run_all_substack_days",
+    )
+    ra_substack_max = st.number_input(
+        "Substack max posts per ticker",
+        min_value=1,
+        max_value=10,
+        value=int(ra_cfg.get("substack_max_posts", 3)),
+        step=1,
+        key="run_all_substack_max_posts",
+    )
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        start_all = st.button("Run All", use_container_width=True, key="run_all_start")
+    with c2:
+        resume_all = st.button(
+            "Resume",
+            use_container_width=True,
+            key="run_all_resume",
+            disabled=not bool(ra_state and ra_state.get("status") == "running"),
+        )
+    with c3:
+        clear_all = st.button("Clear Run All state", use_container_width=True, key="run_all_clear")
+
+    if clear_all:
+        _clear_run_all_state()
+        st.rerun()
+
+    if start_all:
+        ra_state = {
+            "status": "running",
+            "current_step": "fund_families",
+            "completed": [],
+            "outputs": {},
+            "config": {
+                "mf_lookback_days": int(ra_mf_days),
+                "sa_max_articles": int(ra_sa_max),
+                "sa_model": str(ra_sa_model),
+                            "substack_lookback_days": int(ra_substack_days),
+                "substack_max_posts": int(ra_substack_max),
+},
+            "started_at": _now_et().isoformat(),
+        }
+        _save_run_all_state(ra_state)
+        st.rerun()
+
+    if resume_all:
+        st.rerun()
+
+    # Existing outputs (persisted)
+    outs = ra_state.get("outputs") or {}
+
+    # Download-button helper: cache PDF bytes so reruns (e.g., while Run All is running)
+    # do not repeatedly re-read large files from disk. This prevents downloads from
+    # "stalling" other steps when the app reruns.
+    def _dl_bytes_cached(fp: Path) -> bytes:
+        try:
+            st_ = fp.stat()
+            cache_key = f"{str(fp)}::{st_.st_size}::{st_.st_mtime_ns}"
+        except Exception:
+            cache_key = str(fp)
+        cache = st.session_state.setdefault("_dl_cache_pdf_bytes", {})
+        if cache_key in cache:
+            return cache[cache_key]
+        data = fp.read_bytes()
+        # Keep cache bounded to avoid memory growth
+        if isinstance(cache, dict) and len(cache) > 8:
+            try:
+                cache.clear()
+            except Exception:
+                pass
+        cache[cache_key] = data
+        return data
+
+
+    mf_paths = (outs.get("fund_families") or {}).get("paths") or []
+    if mf_paths:
+        st.markdown("**Fund Families outputs:**")
+        for pinfo in mf_paths:
+            try:
+                fp = Path(pinfo.get("path") or "")
+                if fp.exists():
+                    st.download_button(
+                        f"Download {fp.name}",
+                        data=_dl_bytes_cached(fp),
+                        file_name=fp.name,
+                        mime="application/pdf",
+                        key=f"ra_dl_mf_{fp.name}",
+                        use_container_width=True,
+                    )
+            except Exception:
+                pass
+
+    sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
+    if sa_path:
+        try:
+            fp = Path(sa_path)
+            if fp.exists():
+                st.download_button(
+                    f"Download {fp.name}",
+                    data=_dl_bytes_cached(fp),
+                    file_name=fp.name,
+                    mime="application/pdf",
+                    key=f"ra_dl_sa_{fp.name}",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
+
+
+    sub_path = (outs.get("substack") or {}).get("path") or ""
+    if sub_path:
+        try:
+            fp = Path(sub_path)
+            if fp.exists():
+                st.download_button(
+                    f"Download {fp.name}",
+                    data=_dl_bytes_cached(fp),
+                    file_name=fp.name,
+                    mime="application/pdf",
+                    key=f"ra_dl_sub_{fp.name}",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
+
+    pod_path = (outs.get("podcasts") or {}).get("path") or ""
+    if pod_path:
+        try:
+            fp = Path(pod_path)
+            if fp.exists():
+                st.download_button(
+                    f"Download {fp.name}",
+                    data=_dl_bytes_cached(fp),
+                    file_name=fp.name,
+                    mime="application/pdf",
+                    key=f"ra_dl_pod_{fp.name}",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
+
+    # Execute next step if running
+    if ra_state.get("status") == "running":
+        step = ra_state.get("current_step")
+        cfg = ra_state.get("config") or {}
+
+        # Auto-skip completed steps (prevents download_button reruns from restarting work)
+        # If an output path is already persisted and the file exists on disk, mark the step complete and advance.
+        _advance_guard = 0
+        while _advance_guard < 6 and ra_state.get("status") == "running":
+            _advance_guard += 1
+            step = ra_state.get("current_step")
+            outs = ra_state.get("outputs") or {}
+            completed = ra_state.get("completed") or []
+            if not isinstance(completed, list):
+                completed = []
+
+            def _mark_done(_step: str, _next: str):
+                if _step not in completed:
+                    completed.append(_step)
+                ra_state["completed"] = completed
+                ra_state["current_step"] = _next
+                _save_run_all_state(ra_state)
+
+            if step == "fund_families":
+                mf_paths = (outs.get("fund_families") or {}).get("paths") or []
+                ok = False
+                try:
+                    for pinfo in mf_paths:
+                        fp = Path((pinfo or {}).get("path") or "")
+                        if fp and fp.exists():
+                            ok = True
+                            break
+                except Exception:
+                    ok = False
+                if ok:
+                    _mark_done("fund_families", "seeking_alpha")
+                    continue
+
+            if step == "seeking_alpha":
+                sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
+                if sa_path and Path(sa_path).exists():
+                    _mark_done("seeking_alpha", "substack")
+                    continue
+
+            if step == "substack":
+                sub_path = (outs.get("substack") or {}).get("path") or ""
+                if sub_path and Path(sub_path).exists():
+                    _mark_done("substack", "podcasts")
+                    continue
+
+            if step == "podcasts":
+                pod_path = (outs.get("podcasts") or {}).get("path") or ""
+                if pod_path and Path(pod_path).exists():
+                    # If podcasts already exist, finalize Run All state.
+                    if "podcasts" not in completed:
+                        completed.append("podcasts")
+                    ra_state["completed"] = completed
+                    ra_state["current_step"] = "done"
+                    ra_state["status"] = "complete"
+                    ra_state["completed_at"] = _now_et().isoformat()
+                    _save_run_all_state(ra_state)
+                    break
+
+            break
+
+        try:
+            if step == "fund_families":
+                days = int(cfg.get("mf_lookback_days", 7))
+                # NOTE: Do not wrap Fund Families in st.status(expanded=True) because Fund Families uses expanders internally.
+                st.info(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
+                quarter_options = get_available_quarters()
+                run_batch8_latest(quarter_options, days, use_first_word, ensure_compiled_index=True)
+                cache_all = st.session_state.get("batch_cache", {}) or {}
+                cache_key = f"{BATCH8_NAME}|{days}d"
+                by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
+                paths = []
+                for q, qd in by_q.items():
+                    c = (qd or {}).get("compiled") or ""
+                    if c and Path(c).exists():
+                        paths.append({"quarter": q, "path": c})
+                fund_output = ra_state.setdefault("outputs", {}).setdefault("fund_families", {})
+                fund_output["paths"] = paths
+                fund_output["result"] = "compiled" if paths else "no_excerpts"
+
+                if not paths:
+                    st.warning(
+                        "Run All: Fund Families finished, but no compiled Fund Families PDF was produced. "
+                        "This usually means no matching letters or narrative ticker excerpts were found. "
+                        "Continuing to Seeking Alpha."
+                    )
+
+                if "fund_families" not in (ra_state.get("completed") or []):
+                    ra_state.setdefault("completed", []).append("fund_families")
+                ra_state["current_step"] = "seeking_alpha"
+                _save_run_all_state(ra_state)
+                st.rerun()
+
+            if step == "seeking_alpha":
+                max_articles = int(cfg.get("sa_max_articles", 5))
+                model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
+                with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
+                    universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
+                    if not universe:
+                        universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
+
+                    out_pdf = _runall_sa_step_incremental(universe=universe, max_articles=max_articles, model=model_name)
+                    if out_pdf:
+                        ra_state.setdefault("outputs", {}).setdefault("seeking_alpha", {})["path"] = str(out_pdf)
+                        ra_state.setdefault("completed", []).append("seeking_alpha")
+                        ra_state["current_step"] = "substack"
+                        _save_run_all_state(ra_state)
+                        st.rerun()
+
+            if step == "substack":
+                days_back = int(cfg.get("substack_lookback_days", 2))
+                max_posts = int(cfg.get("substack_max_posts", 3))
+                with st.status(f"Run All: Substack — building compiled PDF (last {days_back} days)", expanded=True):
+                    universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
+                    if not universe:
+                        universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
+
+                    out_pdf = _runall_substack_step_incremental(universe=universe, lookback_days=days_back, max_posts=max_posts)
+                    if out_pdf:
+                        ra_state.setdefault("outputs", {}).setdefault("substack", {})["path"] = str(out_pdf)
+                        ra_state.setdefault("completed", []).append("substack")
+                        ra_state["current_step"] = "podcasts"
+                        _save_run_all_state(ra_state)
+                        st.rerun()
+
+            if step == "podcasts":
+                # Run All podcasts lookback (days). Kept separate from the Podcast tab lookback.
+                # Default is 2 days as requested.
+                days_back = int(cfg.get("podcast_runall_lookback_days", 2))
+                model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
+
+                # Run podcasts in small groups to avoid long blocking runs in Streamlit.
+                run_dir = BASE / "Podcasts" / "_run_all"
+                run_dir.mkdir(parents=True, exist_ok=True)
+
+                pr = ra_state.get("podcasts_runall") or {}
+                if not isinstance(pr, dict):
+                    pr = {}
+                group_index = int(pr.get("group_index", 0))
+
+                # Prefer the same grouping logic used in the Podcast tab (9 buckets).
+                groups = _podcast_run_all_group_ids(n_groups=9)
+                if not groups:
+                    # Fallback: single group from podcasts_config
+                    try:
+                        from podcasts_config import PODCASTS as _PODCASTS  # type: ignore
+                        fallback_ids = []
+                        for p in (_PODCASTS or []):
+                            pid = getattr(p, "podcast_id", None) or getattr(p, "id", None) or getattr(p, "pod_id", None)
+                            if pid:
+                                fallback_ids.append(str(pid))
+                        groups = [fallback_ids] if fallback_ids else []
+                    except Exception:
+                        groups = []
+
+                total_groups = len(groups)
+
+                # Persistent checkpointing for Run All podcasts (survives reloads/timeouts)
+                ckpt_path = (BASE / "Podcasts" / "runall_podcasts_state.json")
+                run_sig = {
+                    "date": str(_now_et().date()),
+                    "days_back": days_back,
+                    "model_name": model_name,
+                    "total_groups": total_groups,
+                }
+                ckpt = _load_json_safe(ckpt_path, {})
+                if not isinstance(ckpt, dict):
+                    ckpt = {}
+                # If the signature changed (new day/params), reset checkpoint.
+                if ckpt.get("sig") != run_sig:
+                    ckpt = {"sig": run_sig, "completed_groups": []}
+                    _save_json_safe(ckpt_path, ckpt)
+
+                completed_groups = ckpt.get("completed_groups") or []
+                if not isinstance(completed_groups, list):
+                    completed_groups = []
+                completed_set = {int(x) for x in completed_groups if str(x).isdigit()}
+                # Resume from first incomplete group, regardless of session_state value.
+                for gi in range(total_groups):
+                    if gi not in completed_set:
+                        group_index = gi
+                        break
+                else:
+                    group_index = total_groups
+
+                # Progress bar for Run All podcasts (group-level)
+                _completed_groups_n = len(completed_set)
+                _prog_den = max(1, int(total_groups))
+                _prog_num = min(_prog_den, int(_completed_groups_n))
+                st.progress(float(_prog_num) / float(_prog_den))
+                st.caption(f"Run All: Podcasts progress — {_prog_num}/{_prog_den} groups complete")
+
+
+
+                if not groups or total_groups == 0:
+                    st.warning("No podcast IDs found; skipping podcasts.")
+                    out_pdf = None
+                else:
+                    # Process one group per rerun for stability
+                    if group_index < total_groups:
+                        with st.status(
+                            f"Run All: Podcasts — processing group {group_index + 1}/{total_groups} (last {days_back} days)",
+                            expanded=True,
+                        ):
+                            podcast_ids = groups[group_index] or []
+                            if not podcast_ids:
+                                st.info("Empty podcast group; skipping.")
+                            else:
+                                group_dir = run_dir / f"g{group_index + 1:02d}"
+                                podcasts_root = group_dir / "transcripts"
+                                excerpts_path = group_dir / "podcast_excerpts.json"
+                                insights_path = group_dir / "podcast_insights.json"
+                                group_dir.mkdir(parents=True, exist_ok=True)
+
+                                _ = run_podcast_pipeline_from_ui(
+                                    days_back=days_back,
+                                    podcast_ids=podcast_ids,
+                                    podcasts_root=podcasts_root,
+                                    excerpts_path=excerpts_path,
+                                    insights_path=insights_path,
+                                    model_name=model_name,
+                                )
+
+                        # Mark this group completed and persist progress
+                        try:
+                            ckpt = _load_json_safe(ckpt_path, {})
+                            if not isinstance(ckpt, dict):
+                                ckpt = {"sig": run_sig, "completed_groups": []}
+                            cg = ckpt.get("completed_groups") or []
+                            if not isinstance(cg, list):
+                                cg = []
+                            if group_index not in cg:
+                                cg.append(group_index)
+                            ckpt["sig"] = run_sig
+                            ckpt["completed_groups"] = cg
+                            _save_json_safe(ckpt_path, ckpt)
+                        except Exception:
+                            pass
+
+                        pr["group_index"] = group_index + 1
+                        pr["total_groups"] = total_groups
+                        ra_state["podcasts_runall"] = pr
+                        _save_run_all_state(ra_state)
+                        st.rerun()
+
+                    # All groups done -> merge and build final PDF once
+                    with st.status(
+                        f"Run All: Podcasts — merging groups and building compiled PDF (last {days_back} days)",
+                        expanded=True,
+                    ):
+                        merged_excerpts: dict = {}
+                        merged_insights = []
+
+                        for gi in range(total_groups):
+                            group_dir = run_dir / f"g{gi + 1:02d}"
+                            ep = group_dir / "podcast_excerpts.json"
+                            ip = group_dir / "podcast_insights.json"
+                            merged_excerpts = _merge_podcast_excerpts_dict(
+                                merged_excerpts, _load_json_safe(ep, {})
+                            )
+                            merged_insights = _merge_podcast_insights_list(
+                                merged_insights, _load_json_safe(ip, [])
+                            )
+
+                        excerpts_path = run_dir / "podcast_excerpts.json"
+                        insights_path = run_dir / "podcast_insights.json"
+                        excerpts_path.write_text(json.dumps(merged_excerpts, ensure_ascii=False, indent=2), encoding="utf-8")
+                        insights_path.write_text(json.dumps(merged_insights, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                        now_et = _now_et()
+                        out_name = f"{now_et:%m.%d.%y} Podcast ALL.pdf"
+                        out_path = (BASE / "Podcasts" / out_name)
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        out_pdf = _build_podcast_all_pdf(
+                            excerpts_path=excerpts_path,
+                            insights_path=insights_path,
+                            output_path=out_path,
+                            days_back=days_back,
+                        )
+                        # Cleanup checkpoint on successful completion
+                        try:
+                            if ckpt_path.exists():
+                                ckpt_path.unlink()
+                        except Exception:
+                            pass
+
+
+                if out_pdf:
+                    ra_state.setdefault("outputs", {}).setdefault("podcasts", {})["path"] = str(out_pdf)
+
+                ra_state.setdefault("completed", []).append("podcasts")
+                ra_state["current_step"] = "done"
+                ra_state["status"] = "complete"
+                ra_state["completed_at"] = _now_et().isoformat()
+                _save_run_all_state(ra_state)
+                st.rerun()
+        except Exception as e:
+            ra_state["status"] = "error"
+            ra_state["error"] = str(e)
+            _save_run_all_state(ra_state)
+            st.error(f"Run All failed at step '{step}': {e}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def main():
     st.set_page_config(page_title="Cutler Capital Scraper", layout="wide")
 
@@ -8836,487 +9326,7 @@ def main():
     st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
     
-    # ---------------------- RUN ALL (orchestrator) ----------------------
-    st.markdown("<div class='cc-card'>", unsafe_allow_html=True)
-    st.markdown("### Run All (Fund Families Latest + Seeking Alpha All + Substack + Podcasts All)")
-
-    ra_state = _load_run_all_state()
-    ra_cfg = ra_state.get("config") or {}
-    ra_mf_days = st.selectbox(
-        "Fund Families Latest lookback (days)",
-        options=[7, 14, 30],
-        index=[7, 14, 30].index(int(ra_cfg.get("mf_lookback_days", 7))) if int(ra_cfg.get("mf_lookback_days", 7)) in [7, 14, 30] else 0,
-        key="run_all_mf_days",
-    )
-    ra_sa_max = st.number_input(
-        "Seeking Alpha max articles per ticker",
-        min_value=1,
-        max_value=20,
-        value=int(ra_cfg.get("sa_max_articles", 5)),
-        step=1,
-        key="run_all_sa_max_articles",
-    )
-    ra_sa_model = st.selectbox(
-        "Seeking Alpha model (digest/export)",
-        options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
-        index=0,
-        key="run_all_sa_model",
-    )
-
-    ra_substack_days = st.selectbox(
-        "Substack lookback (days)",
-        options=[2, 7],
-        index=[2, 7].index(int(ra_cfg.get("substack_lookback_days", 2))) if int(ra_cfg.get("substack_lookback_days", 2)) in [2, 7] else 0,
-        key="run_all_substack_days",
-    )
-    ra_substack_max = st.number_input(
-        "Substack max posts per ticker",
-        min_value=1,
-        max_value=10,
-        value=int(ra_cfg.get("substack_max_posts", 3)),
-        step=1,
-        key="run_all_substack_max_posts",
-    )
-
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        start_all = st.button("Run All", use_container_width=True, key="run_all_start")
-    with c2:
-        resume_all = st.button(
-            "Resume",
-            use_container_width=True,
-            key="run_all_resume",
-            disabled=not bool(ra_state and ra_state.get("status") == "running"),
-        )
-    with c3:
-        clear_all = st.button("Clear Run All state", use_container_width=True, key="run_all_clear")
-
-    if clear_all:
-        _clear_run_all_state()
-        st.rerun()
-
-    if start_all:
-        ra_state = {
-            "status": "running",
-            "current_step": "fund_families",
-            "completed": [],
-            "outputs": {},
-            "config": {
-                "mf_lookback_days": int(ra_mf_days),
-                "sa_max_articles": int(ra_sa_max),
-                "sa_model": str(ra_sa_model),
-                            "substack_lookback_days": int(ra_substack_days),
-                "substack_max_posts": int(ra_substack_max),
-},
-            "started_at": _now_et().isoformat(),
-        }
-        _save_run_all_state(ra_state)
-        st.rerun()
-
-    if resume_all:
-        st.rerun()
-
-    # Existing outputs (persisted)
-    outs = ra_state.get("outputs") or {}
-
-    # Download-button helper: cache PDF bytes so reruns (e.g., while Run All is running)
-    # do not repeatedly re-read large files from disk. This prevents downloads from
-    # "stalling" other steps when the app reruns.
-    def _dl_bytes_cached(fp: Path) -> bytes:
-        try:
-            st_ = fp.stat()
-            cache_key = f"{str(fp)}::{st_.st_size}::{st_.st_mtime_ns}"
-        except Exception:
-            cache_key = str(fp)
-        cache = st.session_state.setdefault("_dl_cache_pdf_bytes", {})
-        if cache_key in cache:
-            return cache[cache_key]
-        data = fp.read_bytes()
-        # Keep cache bounded to avoid memory growth
-        if isinstance(cache, dict) and len(cache) > 8:
-            try:
-                cache.clear()
-            except Exception:
-                pass
-        cache[cache_key] = data
-        return data
-
-
-    mf_paths = (outs.get("fund_families") or {}).get("paths") or []
-    if mf_paths:
-        st.markdown("**Fund Families outputs:**")
-        for pinfo in mf_paths:
-            try:
-                fp = Path(pinfo.get("path") or "")
-                if fp.exists():
-                    st.download_button(
-                        f"Download {fp.name}",
-                        data=_dl_bytes_cached(fp),
-                        file_name=fp.name,
-                        mime="application/pdf",
-                        key=f"ra_dl_mf_{fp.name}",
-                        use_container_width=True,
-                    )
-            except Exception:
-                pass
-
-    sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
-    if sa_path:
-        try:
-            fp = Path(sa_path)
-            if fp.exists():
-                st.download_button(
-                    f"Download {fp.name}",
-                    data=_dl_bytes_cached(fp),
-                    file_name=fp.name,
-                    mime="application/pdf",
-                    key=f"ra_dl_sa_{fp.name}",
-                    use_container_width=True,
-                )
-        except Exception:
-            pass
-
-
-    sub_path = (outs.get("substack") or {}).get("path") or ""
-    if sub_path:
-        try:
-            fp = Path(sub_path)
-            if fp.exists():
-                st.download_button(
-                    f"Download {fp.name}",
-                    data=_dl_bytes_cached(fp),
-                    file_name=fp.name,
-                    mime="application/pdf",
-                    key=f"ra_dl_sub_{fp.name}",
-                    use_container_width=True,
-                )
-        except Exception:
-            pass
-
-    pod_path = (outs.get("podcasts") or {}).get("path") or ""
-    if pod_path:
-        try:
-            fp = Path(pod_path)
-            if fp.exists():
-                st.download_button(
-                    f"Download {fp.name}",
-                    data=_dl_bytes_cached(fp),
-                    file_name=fp.name,
-                    mime="application/pdf",
-                    key=f"ra_dl_pod_{fp.name}",
-                    use_container_width=True,
-                )
-        except Exception:
-            pass
-
-    # Execute next step if running
-    if ra_state.get("status") == "running":
-        step = ra_state.get("current_step")
-        cfg = ra_state.get("config") or {}
-
-        # Auto-skip completed steps (prevents download_button reruns from restarting work)
-        # If an output path is already persisted and the file exists on disk, mark the step complete and advance.
-        _advance_guard = 0
-        while _advance_guard < 6 and ra_state.get("status") == "running":
-            _advance_guard += 1
-            step = ra_state.get("current_step")
-            outs = ra_state.get("outputs") or {}
-            completed = ra_state.get("completed") or []
-            if not isinstance(completed, list):
-                completed = []
-
-            def _mark_done(_step: str, _next: str):
-                if _step not in completed:
-                    completed.append(_step)
-                ra_state["completed"] = completed
-                ra_state["current_step"] = _next
-                _save_run_all_state(ra_state)
-
-            if step == "fund_families":
-                mf_paths = (outs.get("fund_families") or {}).get("paths") or []
-                ok = False
-                try:
-                    for pinfo in mf_paths:
-                        fp = Path((pinfo or {}).get("path") or "")
-                        if fp and fp.exists():
-                            ok = True
-                            break
-                except Exception:
-                    ok = False
-                if ok:
-                    _mark_done("fund_families", "seeking_alpha")
-                    continue
-
-            if step == "seeking_alpha":
-                sa_path = (outs.get("seeking_alpha") or {}).get("path") or ""
-                if sa_path and Path(sa_path).exists():
-                    _mark_done("seeking_alpha", "substack")
-                    continue
-
-            if step == "substack":
-                sub_path = (outs.get("substack") or {}).get("path") or ""
-                if sub_path and Path(sub_path).exists():
-                    _mark_done("substack", "podcasts")
-                    continue
-
-            if step == "podcasts":
-                pod_path = (outs.get("podcasts") or {}).get("path") or ""
-                if pod_path and Path(pod_path).exists():
-                    # If podcasts already exist, finalize Run All state.
-                    if "podcasts" not in completed:
-                        completed.append("podcasts")
-                    ra_state["completed"] = completed
-                    ra_state["current_step"] = "done"
-                    ra_state["status"] = "complete"
-                    ra_state["completed_at"] = _now_et().isoformat()
-                    _save_run_all_state(ra_state)
-                    break
-
-            break
-
-        try:
-            if step == "fund_families":
-                days = int(cfg.get("mf_lookback_days", 7))
-                # NOTE: Do not wrap Fund Families in st.status(expanded=True) because Fund Families uses expanders internally.
-                st.info(f"Run All: Fund Families — Batch 8 Latest (last {days} days)")
-                quarter_options = get_available_quarters()
-                run_batch8_latest(quarter_options, days, use_first_word, ensure_compiled_index=True)
-                cache_all = st.session_state.get("batch_cache", {}) or {}
-                cache_key = f"{BATCH8_NAME}|{days}d"
-                by_q = (cache_all.get(cache_key) or {}).get("by_quarter") or {}
-                paths = []
-                for q, qd in by_q.items():
-                    c = (qd or {}).get("compiled") or ""
-                    if c and Path(c).exists():
-                        paths.append({"quarter": q, "path": c})
-                fund_output = ra_state.setdefault("outputs", {}).setdefault("fund_families", {})
-                fund_output["paths"] = paths
-                fund_output["result"] = "compiled" if paths else "no_excerpts"
-
-                if not paths:
-                    st.warning(
-                        "Run All: Fund Families finished, but no compiled Fund Families PDF was produced. "
-                        "This usually means no matching letters or narrative ticker excerpts were found. "
-                        "Continuing to Seeking Alpha."
-                    )
-
-                if "fund_families" not in (ra_state.get("completed") or []):
-                    ra_state.setdefault("completed", []).append("fund_families")
-                ra_state["current_step"] = "seeking_alpha"
-                _save_run_all_state(ra_state)
-                st.rerun()
-
-            if step == "seeking_alpha":
-                max_articles = int(cfg.get("sa_max_articles", 5))
-                model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
-                with st.status("Run All: Seeking Alpha — building compiled PDF for ALL tickers", expanded=True):
-                    universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
-                    if not universe:
-                        universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
-
-                    out_pdf = _runall_sa_step_incremental(universe=universe, max_articles=max_articles, model=model_name)
-                    if out_pdf:
-                        ra_state.setdefault("outputs", {}).setdefault("seeking_alpha", {})["path"] = str(out_pdf)
-                        ra_state.setdefault("completed", []).append("seeking_alpha")
-                        ra_state["current_step"] = "substack"
-                        _save_run_all_state(ra_state)
-                        st.rerun()
-
-            if step == "substack":
-                days_back = int(cfg.get("substack_lookback_days", 2))
-                max_posts = int(cfg.get("substack_max_posts", 3))
-                with st.status(f"Run All: Substack — building compiled PDF (last {days_back} days)", expanded=True):
-                    universe = [t for t in get_ticker_universe().keys() if _is_probable_ticker(t)]
-                    if not universe:
-                        universe = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "ABBV"]
-
-                    out_pdf = _runall_substack_step_incremental(universe=universe, lookback_days=days_back, max_posts=max_posts)
-                    if out_pdf:
-                        ra_state.setdefault("outputs", {}).setdefault("substack", {})["path"] = str(out_pdf)
-                        ra_state.setdefault("completed", []).append("substack")
-                        ra_state["current_step"] = "podcasts"
-                        _save_run_all_state(ra_state)
-                        st.rerun()
-
-            if step == "podcasts":
-                # Run All podcasts lookback (days). Kept separate from the Podcast tab lookback.
-                # Default is 2 days as requested.
-                days_back = int(cfg.get("podcast_runall_lookback_days", 2))
-                model_name = str(cfg.get("sa_model", "gpt-4o-mini"))
-
-                # Run podcasts in small groups to avoid long blocking runs in Streamlit.
-                run_dir = BASE / "Podcasts" / "_run_all"
-                run_dir.mkdir(parents=True, exist_ok=True)
-
-                pr = ra_state.get("podcasts_runall") or {}
-                if not isinstance(pr, dict):
-                    pr = {}
-                group_index = int(pr.get("group_index", 0))
-
-                # Prefer the same grouping logic used in the Podcast tab (9 buckets).
-                groups = _podcast_run_all_group_ids(n_groups=9)
-                if not groups:
-                    # Fallback: single group from podcasts_config
-                    try:
-                        from podcasts_config import PODCASTS as _PODCASTS  # type: ignore
-                        fallback_ids = []
-                        for p in (_PODCASTS or []):
-                            pid = getattr(p, "podcast_id", None) or getattr(p, "id", None) or getattr(p, "pod_id", None)
-                            if pid:
-                                fallback_ids.append(str(pid))
-                        groups = [fallback_ids] if fallback_ids else []
-                    except Exception:
-                        groups = []
-
-                total_groups = len(groups)
-
-                # Persistent checkpointing for Run All podcasts (survives reloads/timeouts)
-                ckpt_path = (BASE / "Podcasts" / "runall_podcasts_state.json")
-                run_sig = {
-                    "date": str(_now_et().date()),
-                    "days_back": days_back,
-                    "model_name": model_name,
-                    "total_groups": total_groups,
-                }
-                ckpt = _load_json_safe(ckpt_path, {})
-                if not isinstance(ckpt, dict):
-                    ckpt = {}
-                # If the signature changed (new day/params), reset checkpoint.
-                if ckpt.get("sig") != run_sig:
-                    ckpt = {"sig": run_sig, "completed_groups": []}
-                    _save_json_safe(ckpt_path, ckpt)
-
-                completed_groups = ckpt.get("completed_groups") or []
-                if not isinstance(completed_groups, list):
-                    completed_groups = []
-                completed_set = {int(x) for x in completed_groups if str(x).isdigit()}
-                # Resume from first incomplete group, regardless of session_state value.
-                for gi in range(total_groups):
-                    if gi not in completed_set:
-                        group_index = gi
-                        break
-                else:
-                    group_index = total_groups
-
-                # Progress bar for Run All podcasts (group-level)
-                _completed_groups_n = len(completed_set)
-                _prog_den = max(1, int(total_groups))
-                _prog_num = min(_prog_den, int(_completed_groups_n))
-                st.progress(float(_prog_num) / float(_prog_den))
-                st.caption(f"Run All: Podcasts progress — {_prog_num}/{_prog_den} groups complete")
-
-
-
-                if not groups or total_groups == 0:
-                    st.warning("No podcast IDs found; skipping podcasts.")
-                    out_pdf = None
-                else:
-                    # Process one group per rerun for stability
-                    if group_index < total_groups:
-                        with st.status(
-                            f"Run All: Podcasts — processing group {group_index + 1}/{total_groups} (last {days_back} days)",
-                            expanded=True,
-                        ):
-                            podcast_ids = groups[group_index] or []
-                            if not podcast_ids:
-                                st.info("Empty podcast group; skipping.")
-                            else:
-                                group_dir = run_dir / f"g{group_index + 1:02d}"
-                                podcasts_root = group_dir / "transcripts"
-                                excerpts_path = group_dir / "podcast_excerpts.json"
-                                insights_path = group_dir / "podcast_insights.json"
-                                group_dir.mkdir(parents=True, exist_ok=True)
-
-                                _ = run_podcast_pipeline_from_ui(
-                                    days_back=days_back,
-                                    podcast_ids=podcast_ids,
-                                    podcasts_root=podcasts_root,
-                                    excerpts_path=excerpts_path,
-                                    insights_path=insights_path,
-                                    model_name=model_name,
-                                )
-
-                        # Mark this group completed and persist progress
-                        try:
-                            ckpt = _load_json_safe(ckpt_path, {})
-                            if not isinstance(ckpt, dict):
-                                ckpt = {"sig": run_sig, "completed_groups": []}
-                            cg = ckpt.get("completed_groups") or []
-                            if not isinstance(cg, list):
-                                cg = []
-                            if group_index not in cg:
-                                cg.append(group_index)
-                            ckpt["sig"] = run_sig
-                            ckpt["completed_groups"] = cg
-                            _save_json_safe(ckpt_path, ckpt)
-                        except Exception:
-                            pass
-
-                        pr["group_index"] = group_index + 1
-                        pr["total_groups"] = total_groups
-                        ra_state["podcasts_runall"] = pr
-                        _save_run_all_state(ra_state)
-                        st.rerun()
-
-                    # All groups done -> merge and build final PDF once
-                    with st.status(
-                        f"Run All: Podcasts — merging groups and building compiled PDF (last {days_back} days)",
-                        expanded=True,
-                    ):
-                        merged_excerpts: dict = {}
-                        merged_insights = []
-
-                        for gi in range(total_groups):
-                            group_dir = run_dir / f"g{gi + 1:02d}"
-                            ep = group_dir / "podcast_excerpts.json"
-                            ip = group_dir / "podcast_insights.json"
-                            merged_excerpts = _merge_podcast_excerpts_dict(
-                                merged_excerpts, _load_json_safe(ep, {})
-                            )
-                            merged_insights = _merge_podcast_insights_list(
-                                merged_insights, _load_json_safe(ip, [])
-                            )
-
-                        excerpts_path = run_dir / "podcast_excerpts.json"
-                        insights_path = run_dir / "podcast_insights.json"
-                        excerpts_path.write_text(json.dumps(merged_excerpts, ensure_ascii=False, indent=2), encoding="utf-8")
-                        insights_path.write_text(json.dumps(merged_insights, ensure_ascii=False, indent=2), encoding="utf-8")
-
-                        now_et = _now_et()
-                        out_name = f"{now_et:%m.%d.%y} Podcast ALL.pdf"
-                        out_path = (BASE / "Podcasts" / out_name)
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-                        out_pdf = _build_podcast_all_pdf(
-                            excerpts_path=excerpts_path,
-                            insights_path=insights_path,
-                            output_path=out_path,
-                            days_back=days_back,
-                        )
-                        # Cleanup checkpoint on successful completion
-                        try:
-                            if ckpt_path.exists():
-                                ckpt_path.unlink()
-                        except Exception:
-                            pass
-
-
-                if out_pdf:
-                    ra_state.setdefault("outputs", {}).setdefault("podcasts", {})["path"] = str(out_pdf)
-
-                ra_state.setdefault("completed", []).append("podcasts")
-                ra_state["current_step"] = "done"
-                ra_state["status"] = "complete"
-                ra_state["completed_at"] = _now_et().isoformat()
-                _save_run_all_state(ra_state)
-                st.rerun()
-        except Exception as e:
-            ra_state["status"] = "error"
-            ra_state["error"] = str(e)
-            _save_run_all_state(ra_state)
-            st.error(f"Run All failed at step '{step}': {e}")
-
-    st.markdown("</div>", unsafe_allow_html=True)
+    draw_run_all_section(use_first_word=use_first_word)
 
     st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
