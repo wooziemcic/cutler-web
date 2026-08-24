@@ -9429,22 +9429,24 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # Header: logo, title and subtitle in a centered column
+
+    # Brand mark above the sidebar navigation (mockup places it there).
     logo_path = HERE / "cutler.png"
-    col_left, col_center, col_right = st.columns([1, 2, 1])
+    if logo_path.exists():
+        try:
+            st.logo(str(logo_path), size="large")
+        except Exception:
+            pass
 
-    with col_center:
-        if logo_path.exists():
-            st.image(str(logo_path), width=260)
+    st.markdown(
+        "<div class='app-header'>"
+        "<div class='app-title'>Cutler Capital Letter Scraper</div>"
+        "<div class='app-subtitle'>Fund letters, Seeking Alpha, Substack and podcasts,"
+        " excerpted and indexed by ticker</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
-        st.markdown(
-            "<div class='app-header'>"
-            "<div class='app-title'>Cutler Capital Letter Scraper</div>"
-            "<div class='app-subtitle'>Fund letters, Seeking Alpha, Substack and podcasts,"
-            " excerpted and indexed by ticker</div>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
 
     # Sidebar: run settings
     st.sidebar.header("Run settings")
@@ -9505,24 +9507,15 @@ def main():
 
     batch_names = list(RUNNABLE_BATCHES.keys())
 
-    # --- Tabs (website-style nav) ---
-    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
-    
-    draw_run_all_section(use_first_word=use_first_word)
+    # --- Page wrappers -------------------------------------------------
+    # st.Page takes a zero-argument callable, so the sections that need
+    # sidebar values are wrapped in closures over them. main() is the router
+    # and re-runs on every interaction, so these are rebuilt each rerun.
+    def page_run_all() -> None:
+        draw_run_all_section(use_first_word=use_first_word)
 
-    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
-
-    tab_dashboard, tab_mf, tab_sa, tab_substack, tab_podcast, tab_daily = st.tabs(
-        ["Dashboard", "Fund Families", "Seeking Alpha", "Substack", "Podcast", "Daily Research Brief"]
-    )
-
-    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-
-    with tab_dashboard:
-        draw_dashboard_section()
-
-    with tab_mf:
+    def page_fund_families() -> None:
         draw_fund_families_section(
             batch_names=batch_names,
             quarter_options=quarter_options,
@@ -9531,70 +9524,81 @@ def main():
             use_first_word=use_first_word,
         )
 
-    with tab_sa:
-        if st.button("Clean current tab cache", key="clean_sa_cache", use_container_width=True):
+    def page_seeking_alpha() -> None:
+        if st.button("Clean this page's cache", key="clean_sa_cache", use_container_width=True):
             _clear_session_keys(
                 exact=["sa_cache","sa_pdf_bytes","sa_pdf_name","sa_nav_idx","sa_batch_select_idx","sa_ticker_select","sa_manual_tickers"],
                 prefixes=["sa_"],
             )
             st.rerun()
 
-        # ---------- Seeking Alpha news + AI digest ----------
         draw_seeking_alpha_news_section()
 
-        # ---------- Navigation: move to next ticker in the selected list ----------
+        # Move to next/previous ticker in the selected list
         selected_tickers = st.session_state.get("sa_selected_tickers_prev", [])
         if selected_tickers and len(selected_tickers) > 1:
             col_prev, col_spacer, col_next = st.columns([1, 3, 1])
             with col_next:
                 if st.button("Next ticker …", key="sa_next_ticker"):
                     current_idx = st.session_state.get("sa_current_index", 0)
-                    next_idx = (current_idx + 1) % len(selected_tickers)
-                    st.session_state["sa_current_index"] = next_idx
+                    st.session_state["sa_current_index"] = (current_idx + 1) % len(selected_tickers)
                     st.rerun()
             with col_prev:
                 if st.button("◀ Previous", key="sa_prev_ticker"):
                     current_idx = st.session_state.get("sa_current_index", 0)
-                    prev_idx = (current_idx - 1) % len(selected_tickers)
-                    st.session_state["sa_current_index"] = prev_idx
+                    st.session_state["sa_current_index"] = (current_idx - 1) % len(selected_tickers)
                     st.rerun()
-    
 
-    with tab_substack:
-        if st.button("Clean current tab cache", key="clean_substack_cache", use_container_width=True):
-            _clear_session_keys(
-                exact=["substack_cache"],
-                prefixes=["substack_"],
-            )
+    def page_substack() -> None:
+        if st.button("Clean this page's cache", key="clean_substack_cache", use_container_width=True):
+            _clear_session_keys(exact=["substack_cache"], prefixes=["substack_"])
             st.rerun()
-
-        # ---------- Substack (research feed) ----------
         draw_substack_section()
 
-
-    with tab_podcast:
-        if st.button("Clean current tab cache", key="clean_podcast_cache", use_container_width=True):
+    def page_podcast() -> None:
+        if st.button("Clean this page's cache", key="clean_podcast_cache", use_container_width=True):
             _clear_session_keys(
                 exact=["podcast_cache","podcast_last_cache_key","pod_export_pdf_path","podcast_pdf_bytes","podcast_pdf_name"],
                 prefixes=["pod_","podcast_"],
             )
             st.rerun()
-
-        # ---------- Podcast intelligence (ticker mentions across podcasts) ----------
         draw_podcast_intelligence_section()
 
-    with tab_daily:
-        draw_daily_research_brief_section()
+    # --- Navigation ----------------------------------------------------
+    # Only the active page's function runs, so opening the app no longer
+    # fires the Seeking Alpha API call from behind the Dashboard.
+    nav = st.navigation(
+        {
+            "": [
+                st.Page(draw_dashboard_section, title="Overview", url_path="overview",
+                        icon=":material/dashboard:", default=True),
+            ],
+            "Run Scraper": [
+                st.Page(page_run_all, title="Run All", url_path="run-all", icon=":material/play_circle:"),
+                st.Page(page_fund_families, title="Fund Families", url_path="fund-families", icon=":material/account_balance:"),
+                st.Page(page_seeking_alpha, title="Seeking Alpha", url_path="seeking-alpha", icon=":material/insights:"),
+                st.Page(page_substack, title="Substack", url_path="substack", icon=":material/article:"),
+                st.Page(page_podcast, title="Podcast", url_path="podcast", icon=":material/podcasts:"),
+                st.Page(draw_daily_research_brief_section, title="Daily Research Brief", url_path="daily-brief",
+                        icon=":material/description:"),
+            ],
+            "Library": [
+                st.Page(draw_outputs_section, title="Outputs & Downloads", url_path="outputs", icon=":material/download:"),
+                st.Page(draw_run_history_section, title="Run History", url_path="run-history", icon=":material/history:"),
+            ],
+            "Configuration": [
+                st.Page(draw_settings_section, title="Settings", url_path="settings", icon=":material/settings:"),
+            ],
+        }
+    )
+    nav.run()
 
+    st.divider()
+    st.caption(
+        "Cutler Capital Management · outputs are written to your local machine; "
+        "see Settings for the resolved paths."
+    )
 
-    # Output path
-    with st.container(border=True):
-        st.write("Output folder (local reference):")
-        st.code(r"V:\CCM-AI\2025")
-        st.caption(
-            "This path is on your local machine. "
-            "Copy and paste it into Windows Explorer to open."
-        )
 
 # Streamlit needs main() to run on import.
 main()
