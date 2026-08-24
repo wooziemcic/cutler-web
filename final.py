@@ -9981,6 +9981,137 @@ def main():
 
         /* Pipeline stepper sits flush inside its panel. */
         .cc-steps { margin: .5rem 0 1rem; }
+
+        /* ============================================================
+           Polish pass: buttons, header, card interiors, config panel
+           ============================================================ */
+
+        /* ---- Header -------------------------------------------------- */
+        .cc-appbar { align-items: center; gap: .8rem; padding-bottom: .85rem; margin-bottom: 1.05rem; }
+        .cc-appbar-mark {
+            width: 40px; height: 40px; flex: 0 0 40px; border-radius: 10px; font-size: .92rem;
+            letter-spacing: .02em;
+        }
+        .cc-appbar-copy { min-width: 0; }
+        .cc-appbar-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+        .cc-appbar-title { font-size: 1.28rem; font-weight: 680; line-height: 1.25; }
+        .cc-appbar-sub { font-size: .82rem; margin-top: .1rem; }
+        .cc-pill { padding: .24rem .6rem; font-size: .745rem; line-height: 1.3; }
+        .cc-dot { width: 6px; height: 6px; }
+
+        /* ---- Buttons ------------------------------------------------- */
+        /* One system: filled plum for the primary action, quiet outline for
+           the rest. Scoped to the Overview run panel so every other page keeps
+           the plum buttons it has always had. */
+        [data-testid="stMain"] .stButton > button,
+        [data-testid="stMain"] .stDownloadButton > button {
+            display: inline-flex; align-items: center; justify-content: center;
+            min-height: 40px; line-height: 1.1; border-radius: 10px;
+            padding: .5rem 1rem; font-size: .865rem; font-weight: 600;
+            box-shadow: none; transform: none !important;
+        }
+        [data-testid="stMain"] button[data-testid="stBaseButton-primary"] {
+            background: var(--cc-plum) !important; border: 1px solid var(--cc-plum) !important;
+            color: #fff !important;
+        }
+        [data-testid="stMain"] button[data-testid="stBaseButton-primary"] * { color: #fff !important; }
+        [data-testid="stMain"] button[data-testid="stBaseButton-primary"]:hover:not(:disabled) {
+            background: #5d2a53 !important; border-color: #5d2a53 !important;
+        }
+
+        [class*="st-key-ccpanel_run"] button[data-testid="stBaseButton-secondary"] {
+            background: #fff !important; border: 1px solid var(--cc-card-bd) !important;
+            color: var(--cc-text) !important;
+        }
+        [class*="st-key-ccpanel_run"] button[data-testid="stBaseButton-secondary"] * {
+            color: inherit !important;
+        }
+        [class*="st-key-ccpanel_run"] button[data-testid="stBaseButton-secondary"]:hover:not(:disabled) {
+            background: #faf7fa !important; border-color: #d9c4d6 !important; color: var(--cc-plum) !important;
+        }
+        /* Disabled: clearly inactive but still legible - the old 0.4 alpha was not. */
+        [data-testid="stMain"] .stButton > button:disabled,
+        [data-testid="stMain"] .stButton > button:disabled * {
+            opacity: 1 !important; background: #f4f5f7 !important;
+            border-color: var(--cc-card-bd) !important; color: #98a0ad !important;
+            cursor: not-allowed;
+        }
+        [data-testid="stMain"] .stButton > button:disabled:hover {
+            background: #f4f5f7 !important; border-color: var(--cc-card-bd) !important;
+        }
+        /* Action row sits flush under the configuration panel. */
+        [class*="st-key-ccpanel_run"] [data-testid="stHorizontalBlock"] { gap: .6rem; margin-top: .1rem; }
+
+        /* ---- Current run card interior ------------------------------- */
+        [class*="st-key-ccpanel_run"] { padding: 1.15rem 1.25rem 1.2rem !important; gap: .55rem !important; }
+        [class*="st-key-ccpanel_run"] .cc-panel-h { font-size: .95rem; margin-bottom: .22rem; }
+        [class*="st-key-ccpanel_run"] .cc-panel-h .cc-pill { margin-left: .1rem; }
+        [class*="st-key-ccpanel_run"] .cc-panel-sub { margin-bottom: .2rem; }
+        .cc-steps { margin: 1.05rem 0 1.15rem; padding: 0 .25rem; }
+        .cc-step-i { margin-bottom: .55rem; }
+        .cc-step-n { line-height: 1.25; padding: 0 .2rem; }
+        .cc-step-s { margin-top: .12rem; }
+        /* Keep the progress strip inside the card's padding on every width. */
+        .cc-bar { margin: 0 .25rem; }
+        .cc-bar-row { padding: 0 .25rem; margin-top: .5rem; gap: 1rem; }
+        .cc-bar-row > span:last-child { white-space: nowrap; }
+        .cc-rule { margin: 1.05rem .25rem .35rem; }
+
+        /* ---- Run configuration panel --------------------------------- */
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] {
+            border: 1px solid var(--cc-card-bd) !important; border-radius: 12px !important;
+            background: #fbfbfd !important; box-shadow: none !important; overflow: hidden;
+        }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] summary,
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] details > summary {
+            padding: .62rem .85rem !important; font-size: .82rem !important; font-weight: 650 !important;
+            color: var(--cc-text) !important; background: #fbfbfd;
+        }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] summary:hover { color: var(--cc-plum) !important; }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] details[open] > summary {
+            border-bottom: 1px solid var(--cc-card-bd);
+        }
+        /* Two-column field grid - pure CSS, the widgets and their keys are
+           untouched, only the way the stacked blocks are laid out changes. */
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] details [data-testid="stVerticalBlock"] {
+            display: grid !important; grid-template-columns: 1fr 1fr;
+            gap: .6rem .9rem !important; padding: .9rem !important; align-items: start;
+        }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] [data-testid="stWidgetLabel"] p {
+            font-size: .755rem !important; font-weight: 600 !important;
+            letter-spacing: .02em; color: var(--cc-text-dim) !important; margin-bottom: .18rem !important;
+        }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] [data-baseweb="select"] > div,
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] [data-baseweb="input"] {
+            min-height: 40px !important; height: 40px !important; border-radius: 9px !important;
+            border-color: var(--cc-card-bd) !important; background: #fff !important;
+            font-size: .845rem !important;
+        }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] input { font-size: .845rem !important; }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] [data-testid="stNumberInputStepUp"],
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] [data-testid="stNumberInputStepDown"] {
+            border-color: var(--cc-card-bd) !important; background: #fbfbfd !important;
+        }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] [data-testid="stElementContainer"] {
+            margin: 0 !important;
+        }
+
+        /* ---- Right column + shared card interiors -------------------- */
+        [class*="st-key-ccpanel_output"] { padding: 1.15rem 1.25rem !important; gap: .5rem !important; }
+        .cc-panel { padding: 1.15rem 1.25rem; }
+        .cc-dl-r { padding: .46rem .1rem; }
+        .cc-table th:first-child, .cc-table td:first-child { padding-left: .1rem; }
+        .cc-table th:last-child,  .cc-table td:last-child  { padding-right: .1rem; }
+        .cc-kpi { padding: .95rem 1.1rem; }
+
+        /* ---- Consistency: one radius, one border, one shadow --------- */
+        .cc-panel, .cc-kpi { border-radius: 14px; border-color: var(--cc-card-bd); }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] [data-baseweb="input"] input {
+            height: 38px !important;
+        }
+        [class*="st-key-ccpanel_run"] [data-testid="stExpander"] [data-testid="stNumberInputContainer"] {
+            min-height: 40px !important; border-radius: 9px !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -10008,12 +10139,15 @@ def main():
     st.markdown(
         "<div class='cc-appbar'>"
         "<div class='cc-appbar-mark'>CC</div>"
-        "<div><div class='cc-appbar-title'>Cutler Capital Letter Scraper</div>"
-        "<div class='cc-appbar-sub'>Automated collection of fund letters, alpha content,"
-        " Substack posts, and podcasts.</div></div>"
-        "<div class='cc-appbar-spacer'></div>"
+        "<div class='cc-appbar-copy'>"
+        "<div class='cc-appbar-row'>"
+        "<span class='cc-appbar-title'>Cutler Capital Letter Scraper</span>"
         f"<span class='cc-pill'><span class='cc-dot {'' if _hdr_ok else 'idle'}'></span>"
         f"{html_lib.escape(_hdr_txt)}</span>"
+        "</div>"
+        "<div class='cc-appbar-sub'>Automated collection of fund letters, alpha content,"
+        " Substack posts, and podcasts.</div>"
+        "</div>"
         "</div>",
         unsafe_allow_html=True,
     )
