@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 podcast_excerpts.py
 
@@ -264,15 +264,37 @@ def extract_snippets(transcript: str, company_names, ticker=None, window=2):
 
     comp_regex = re.compile(build_company_regex(company_names, ticker=ticker), re.IGNORECASE)
 
+    # Emitting one block per matching sentence produced near-duplicates: when
+    # several consecutive sentences mention the company, their ±window blocks
+    # overlap by up to 2*window sentences and the same passage is quoted again
+    # and again.
+    #
+    # Group the mentions instead. Mentions within `window` sentences of each
+    # other belong to one stretch of discussion and become a single passage;
+    # a mention further away starts a new one, so separate topics stay separate.
+    match_indices = [i for i, sent in enumerate(sentences) if comp_regex.search(sent)]
+    if not match_indices:
+        return []
+
+    groups: list[list[int]] = [[match_indices[0], match_indices[0]]]
+    for i in match_indices[1:]:
+        if i - groups[-1][1] <= window:
+            groups[-1][1] = i
+        else:
+            groups.append([i, i])
+
     hits = []
-    for i, sent in enumerate(sentences):
-        if comp_regex.search(sent):
-            start = max(0, i - window)
-            end = min(len(sentences), i + window + 1)
-            block = " ".join(sentences[start:end]).strip()
-            if _is_ad_or_sponsor_text(block):
-                continue
-            hits.append(block)
+    prev_end = 0
+    for first, last in groups:
+        start = max(0, first - window, prev_end)  # never re-quote earlier sentences
+        end = min(len(sentences), last + window + 1)
+        if start >= end:
+            continue
+        prev_end = end
+        block = " ".join(sentences[start:end]).strip()
+        if _is_ad_or_sponsor_text(block):
+            continue
+        hits.append(block)
 
     return hits
 
