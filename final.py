@@ -4028,6 +4028,7 @@ def run_podcast_pipeline_from_ui(
     excerpts_path: Path,
     insights_path: Path,
     model_name: str = "gpt-4o-mini",
+    tickers: Optional[List[str]] = None,
 ):
     """
     Orchestrates:
@@ -4075,8 +4076,11 @@ def run_podcast_pipeline_from_ui(
         "--root", str(podcasts_root),
         "--out", str(excerpts_path),
         "--window", "2",  # sentence window around mentions
-        # no --tickers: script will use the live Cutler universe with local fallback
     ]
+    # Without --tickers the script scans the whole live Cutler universe.
+    # Passing a subset keeps a run focused on the names you actually want.
+    if tickers:
+        excerpts_cmd += ["--tickers", *[str(t).strip().upper() for t in tickers if str(t).strip()]]
 
     excerpts_proc = subprocess.run(
         excerpts_cmd,
@@ -4279,6 +4283,26 @@ def draw_podcast_intelligence_section():
         f"({date_from.isoformat()} — {date_to.isoformat()})."
     )
 
+    # --- 2.1) Optional ticker filter ---
+    # podcast_excerpts.py accepts --tickers; leaving this empty keeps the
+    # previous behaviour of scanning the whole live universe.
+    try:
+        _pod_universe = sorted(get_ticker_universe().keys())
+    except Exception:
+        _pod_universe = []
+    pod_tickers = st.multiselect(
+        "Limit to tickers (optional)",
+        options=_pod_universe,
+        default=[],
+        key="pod_ticker_filter",
+        help=(
+            "Leave empty to scan every ticker in the Cutler universe. "
+            "Selecting a few keeps the run focused and much faster."
+        ),
+    )
+    if pod_tickers:
+        st.caption(f"Scanning {len(pod_tickers)} ticker(s): " + ", ".join(pod_tickers))
+
     # -------------------------
     # 2.5) Previous-run picker
     # -------------------------
@@ -4323,6 +4347,7 @@ def draw_podcast_intelligence_section():
             with st.spinner("Downloading podcasts, transcribing, and analyzing..."):
                 logs = run_podcast_pipeline_from_ui(
                     days_back=days_back,
+                    tickers=pod_tickers or None,
                     podcast_ids=selected_podcast_ids,
                     podcasts_root=podcasts_root,
                     excerpts_path=excerpts_path,
