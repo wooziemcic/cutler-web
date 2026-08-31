@@ -4029,6 +4029,7 @@ def run_podcast_pipeline_from_ui(
     insights_path: Path,
     model_name: str = "gpt-4o-mini",
     tickers: Optional[List[str]] = None,
+    max_per_podcast: Optional[int] = None,
 ):
     """
     Orchestrates:
@@ -4057,6 +4058,12 @@ def run_podcast_pipeline_from_ui(
     # limit to chosen podcast IDs (batch) if provided
     if podcast_ids:
         ingest_cmd += ["--podcasts"] + list(podcast_ids)
+
+    # podcast_ingest keeps only the newest N episodes per podcast and silently
+    # drops the rest, so a long date range with the default of 20 can cut off
+    # older episodes that are still inside the window.
+    if max_per_podcast:
+        ingest_cmd += ["--max-per-podcast", str(int(max_per_podcast))]
 
     # always use Whisper in this UI flow
     ingest_cmd.append("--whisper")
@@ -4303,6 +4310,30 @@ def draw_podcast_intelligence_section():
     if pod_tickers:
         st.caption(f"Scanning {len(pod_tickers)} ticker(s): " + ", ".join(pod_tickers))
 
+    # --- 2.2) Episodes kept per podcast ---
+    # Ingest keeps only the newest N per podcast. The default of 20 is fine for a
+    # short lookback but truncates a long one: a 12-week window on a show that
+    # publishes twice a week needs ~24. Size the default to the window (assume up
+    # to 5 episodes a week) so nothing inside the range is dropped by accident.
+    _suggested_max = max(20, min(300, math.ceil(days_back / 7.0 * 5)))
+    pod_max_eps = st.number_input(
+        "Max episodes per podcast",
+        min_value=1,
+        max_value=300,
+        value=int(_suggested_max),
+        step=5,
+        key="pod_max_per_podcast",
+        help=(
+            "Ingest keeps only the newest N episodes per podcast. Too low and older "
+            "episodes inside your date range are skipped; too high costs extra "
+            "download and transcription time."
+        ),
+    )
+    st.caption(
+        f"Keeping up to {int(pod_max_eps)} episode(s) per podcast across the "
+        f"{days_back}-day window."
+    )
+
     # -------------------------
     # 2.5) Previous-run picker
     # -------------------------
@@ -4348,6 +4379,7 @@ def draw_podcast_intelligence_section():
                 logs = run_podcast_pipeline_from_ui(
                     days_back=days_back,
                     tickers=pod_tickers or None,
+                    max_per_podcast=int(pod_max_eps),
                     podcast_ids=selected_podcast_ids,
                     podcasts_root=podcasts_root,
                     excerpts_path=excerpts_path,
