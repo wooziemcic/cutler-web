@@ -4029,6 +4029,7 @@ def run_podcast_pipeline_from_ui(
     insights_path: Path,
     model_name: str = "gpt-4o-mini",
     tickers: Optional[List[str]] = None,
+    max_per_podcast: Optional[int] = None,
 ):
     """
     Orchestrates:
@@ -4057,6 +4058,12 @@ def run_podcast_pipeline_from_ui(
     # limit to chosen podcast IDs (batch) if provided
     if podcast_ids:
         ingest_cmd += ["--podcasts"] + list(podcast_ids)
+
+    # podcast_ingest keeps only the newest N episodes per podcast and silently
+    # drops the rest, so a long date range with the default of 20 can cut off
+    # older episodes that are still inside the window.
+    if max_per_podcast:
+        ingest_cmd += ["--max-per-podcast", str(int(max_per_podcast))]
 
     # always use Whisper in this UI flow
     ingest_cmd.append("--whisper")
@@ -4242,20 +4249,57 @@ def draw_podcast_intelligence_section():
         return
 
     selected_group_label = st.selectbox("Podcasts", group_labels)
-    selected_podcast_ids = podcast_groups.get(selected_group_label, [])
+    _group_podcast_ids = podcast_groups.get(selected_group_label, [])
 
-    # Show all podcasts in this batch as "bubbles"
+    # --- Optional: run only some shows from this set ---
+    # podcast_ingest accepts --podcasts, and the set selector already feeds it.
+    # Narrowing here means a single show can be run without downloading and
+    # transcribing the whole set, which is where the cost sits.
+    _podcast_name_by_id = {}
+    try:
+        _podcast_name_by_id = {p.id: p.name for p in PODCASTS}
+    except Exception:
+        _podcast_name_by_id = {}
+
+    def _pod_label(pid: str) -> str:
+        return _podcast_name_by_id.get(pid, pid)
+
+    selected_show_names = st.multiselect(
+        "Limit to specific shows (optional)",
+        options=[_pod_label(pid) for pid in _group_podcast_ids],
+        default=[],
+        key="pod_show_filter",
+        help=(
+            "Leave empty to run every podcast in this set. Picking one or two "
+            "keeps download and transcription time down."
+        ),
+    )
+    if selected_show_names:
+        _wanted = set(selected_show_names)
+        selected_podcast_ids = [
+            pid for pid in _group_podcast_ids if _pod_label(pid) in _wanted
+        ]
+    else:
+        selected_podcast_ids = list(_group_podcast_ids)
+
+    # Show the podcasts that will actually run, by name.
     if selected_podcast_ids:
-        st.markdown("**Podcasts in this batch:**")
+        st.markdown(
+            "**Running these podcasts:**" if selected_show_names
+            else "**Podcasts in this batch:**"
+        )
         bubble_html = ""
         for pod_id in selected_podcast_ids:
             bubble_html += (
                 "<span style='display:inline-block; margin:2px 6px 4px 0; "
                 "padding:4px 10px; border-radius:999px; "
                 "border:1px solid #999; font-size:0.85rem;'>"
-                f"{pod_id}</span>"
+                f"{html_lib.escape(_pod_label(pod_id))}</span>"
             )
         st.markdown(bubble_html, unsafe_allow_html=True)
+        st.caption(
+            f"{len(selected_podcast_ids)} of {len(_group_podcast_ids)} podcast(s) in this set."
+        )
 
     # --- 2) Date range -> converted to days_back ---
     today = datetime.now(timezone.utc).date()
@@ -4303,6 +4347,30 @@ def draw_podcast_intelligence_section():
     if pod_tickers:
         st.caption(f"Scanning {len(pod_tickers)} ticker(s): " + ", ".join(pod_tickers))
 
+    # --- 2.2) Episodes kept per podcast ---
+    # Ingest keeps only the newest N per podcast. The default of 20 is fine for a
+    # short lookback but truncates a long one: a 12-week window on a show that
+    # publishes twice a week needs ~24. Size the default to the window (assume up
+    # to 5 episodes a week) so nothing inside the range is dropped by accident.
+    _suggested_max = max(20, min(300, math.ceil(days_back / 7.0 * 5)))
+    pod_max_eps = st.number_input(
+        "Max episodes per podcast",
+        min_value=1,
+        max_value=300,
+        value=int(_suggested_max),
+        step=5,
+        key="pod_max_per_podcast",
+        help=(
+            "Ingest keeps only the newest N episodes per podcast. Too low and older "
+            "episodes inside your date range are skipped; too high costs extra "
+            "download and transcription time."
+        ),
+    )
+    st.caption(
+        f"Keeping up to {int(pod_max_eps)} episode(s) per podcast across the "
+        f"{days_back}-day window."
+    )
+
     # -------------------------
     # 2.5) Previous-run picker
     # -------------------------
@@ -4337,7 +4405,9 @@ def draw_podcast_intelligence_section():
     excerpts_path = base_dir / "data" / f"podcast_excerpts_ui_{safe_group}_{safe_from}_{safe_to}.json"
     insights_path = base_dir / "data" / f"podcast_insights_ui_{safe_group}_{safe_from}_{safe_to}.json"
 
-    cache_key = f"{selected_group_label}|{safe_from}|{safe_to}"
+    # A narrowed run must not overwrite or masquerade as the full-set entry.
+    _shows_key = ("|shows-" + str(len(selected_podcast_ids))) if selected_show_names else ""
+    cache_key = f"{selected_group_label}{_shows_key}|{safe_from}|{safe_to}"
 
     # --- 3) Run pipeline button ---
     run_clicked = st.button("Run fresh podcast analysis")
@@ -4348,6 +4418,7 @@ def draw_podcast_intelligence_section():
                 logs = run_podcast_pipeline_from_ui(
                     days_back=days_back,
                     tickers=pod_tickers or None,
+                    max_per_podcast=int(pod_max_eps),
                     podcast_ids=selected_podcast_ids,
                     podcasts_root=podcasts_root,
                     excerpts_path=excerpts_path,
@@ -4550,7 +4621,11 @@ def draw_podcast_intelligence_section():
                     ev_lines.append(line.strip())
                 sections.append(("Episode snippets (evidence)", "\n\n".join(ev_lines) if ev_lines else "No snippets available in this window."))
 
-                subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} — Podcasts: {selected_group_label} — Window: {date_from} — {date_to}"
+                _pod_scope = (
+                    ", ".join(_pod_label(pid) for pid in selected_podcast_ids)
+                    if selected_show_names else selected_group_label
+                )
+                subtitle = f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} — Podcasts: {_pod_scope} — Window: {date_from} — {date_to}"
                 try:
                     pdf_path = _build_text_pdf(
                         output_path=out_path,
