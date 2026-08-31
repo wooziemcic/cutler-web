@@ -1,4 +1,4 @@
-# podcast_ingest.py
+﻿# podcast_ingest.py
 
 from __future__ import annotations
 
@@ -106,6 +106,34 @@ def _entry_audio_url(entry) -> Optional[str]:
     return None
 
 
+# A podcast episode runs at roughly 150 spoken words a minute, so even a ten
+# minute segment is ~1,500 words. Show notes are a few hundred. The old bar of
+# 800 characters let episode descriptions through as if they were transcripts,
+# which short-circuited every real transcript source below.
+_MIN_TRANSCRIPT_WORDS = 1500
+
+# Phrases and chapter markers that only appear in show notes.
+_SHOW_NOTES_MARKERS = (
+    "in this episode you",
+    "books and resources",
+    "sponsors",
+    "support our free podcast",
+    "follow us on",
+    "disclaimer:",
+)
+_CHAPTER_RE = re.compile(r"\(\d{1,2}:\d{2}(?::\d{2})?\)")
+
+
+def _looks_like_show_notes(plain: str) -> bool:
+    """True when the text reads as an episode description rather than speech."""
+    lowered = plain.lower()
+    marker_hits = sum(1 for m in _SHOW_NOTES_MARKERS if m in lowered)
+    chapter_hits = len(_CHAPTER_RE.findall(plain))
+    # A chapter list is the giveaway: several "(00:12:34)" markers in a short
+    # body is a table of contents, not somebody talking.
+    return chapter_hits >= 3 or marker_hits >= 2
+
+
 def _looks_like_transcript(text: str) -> bool:
     if not text:
         return False
@@ -121,7 +149,13 @@ def _looks_like_transcript(text: str) -> bool:
 
     plain = re.sub(r"<[^>]+>", " ", text)
     plain = re.sub(r"\s+", " ", plain).strip()
-    if len(plain) < 800:
+
+    words = len(plain.split())
+    if words < _MIN_TRANSCRIPT_WORDS:
+        return False
+
+    # Long enough to be speech, but still obviously a description.
+    if _looks_like_show_notes(plain) and words < _MIN_TRANSCRIPT_WORDS * 3:
         return False
 
     sentences = re.split(r"[.!?]", plain)
@@ -199,7 +233,11 @@ def _load_usage(output_root: Path) -> Dict[str, Any]:
     except Exception:
         return {"listen_notes_calls": 0, "listen_notes_cap": LISTENNOTES_MONTHLY_CAP}
 
-def _transcribe_with_deepgram(audio_url: str, timeout: int = 60) -> Optional[str]:
+def _transcribe_with_deepgram(audio_url: str, timeout: int = 900) -> Optional[str]:
+    """Transcribe from a URL. Deepgram fetches the audio itself, so there is no
+    download or upload size limit. Pre-recorded jobs run at roughly a tenth of
+    real time, so an 80 minute episode needs several minutes - the old 60 second
+    timeout aborted every full-length episode."""
     DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
     if not DEEPGRAM_API_KEY or not audio_url:
         return None
@@ -450,10 +488,31 @@ def _download_audio_to_tmp(
     return out_path
 
 
+def _openai_has_legacy_audio() -> bool:
+    """True only on openai<1.0, where openai.Audio.transcribe still exists.
+
+    openai>=1.0 swaps openai.Audio for APIRemovedInV1Proxy, which answers
+    hasattr() with True for every name and then raises on call, so the version
+    is the only reliable signal."""
+    try:
+        return int(str(getattr(openai, "__version__", "0")).split(".")[0]) < 1
+    except Exception:
+        return False
+
+
 def _transcribe_with_whisper(
     audio_url: str,
     tmp_dir: Path,
 ) -> Optional[str]:
+    # This calls openai.Audio.transcribe, the pre-1.0 interface. On a modern
+    # openai package that raises, and downloading the episode first would waste
+    # a full audio download per episode before failing. Check the interface is
+    # actually there before touching the network so the caller can fall through
+    # to Deepgram immediately.
+    if not _openai_has_legacy_audio():
+        print("    [INFO] Whisper needs openai<1.0; falling through to Deepgram.")
+        return None
+
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     audio_path = _download_audio_to_tmp(audio_url, tmp_dir)
@@ -548,13 +607,16 @@ def _ingest_podcast_feed(
                 transcript_text = ln_text
                 source = "listennotes"
 
-        # Layer C: External STT fallback
+        # Layer C: External STT fallback.
+        # These used to be either/or, so a Whisper failure meant no transcript at
+        # all even with a working Deepgram key. Try Whisper when asked, then fall
+        # through to Deepgram, which takes a URL and has no upload size limit.
         if not transcript_text and audio_url:
             if enable_whisper:
                 w_text = _transcribe_with_whisper(audio_url, whisper_tmp_dir)
                 if w_text:
                     transcript_text, source = w_text, "whisper"
-            else:
+            if not transcript_text:
                 dg_text = _transcribe_with_deepgram(audio_url)
                 if dg_text:
                     transcript_text, source = dg_text, "deepgram"
