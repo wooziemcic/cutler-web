@@ -1,17 +1,23 @@
+# Pinned for Python 3.13, which is what Streamlit Community Cloud provisions.
+# pandas 2.1.4, numpy 1.26.4 and playwright 1.44.0 (via greenlet 3.0.3) have no
+# cp313 wheels, so the cloud tried to compile them from source and failed:
+# greenlet on the removed _PyCFrame, pandas on the changed _PyLong_AsByteArray
+# signature. These versions all ship 3.13 wheels and are what the app is
+# developed against.
 streamlit==1.42.2
 openai==0.28.1
-requests==2.31.0
-beautifulsoup4==4.12.2
-feedparser==6.0.10
+requests==2.32.3
+beautifulsoup4==4.13.3
+feedparser==6.0.11
 python-dotenv==1.0.1
-pandas==2.1.4
+pandas==2.2.3
 openpyxl==3.1.5
-playwright==1.44.0
-pypdf==4.2.0
-reportlab==4.0.7
-lxml==5.2.1
-numpy==1.26.4
-tqdm==4.66.3
-selenium==4.22.0
-webdriver-manager==4.0.1
-pymupdf==1.24.9
+playwright==1.52.0
+pypdf==6.1.3
+reportlab==4.3.1
+lxml==5.3.1
+numpy==2.2.3
+tqdm==4.67.1
+selenium==4.29.0
+webdriver-manager==4.0.2
+pymupdf==1.25.3
