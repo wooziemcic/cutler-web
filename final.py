@@ -4347,10 +4347,16 @@ def draw_podcast_discovery_panel() -> None:
             else:
                 chosen = universe
         with c2:
+            # Seeded once so the widget reads its value from session_state.
+            # Passing value= as well as key= is what makes Streamlit warn about a
+            # widget both created with a default and set via the Session State
+            # API, and it would block the "search a longer window" shortcut.
+            st.session_state.setdefault("pod_disc_lookback", 7)
             lookback = st.number_input(
-                "Lookback (days)", min_value=1, max_value=90, value=7, step=1,
+                "Lookback (days)", min_value=1, max_value=365, step=1,
                 key="pod_disc_lookback",
-                help="Defaults to the last 7 days.",
+                help="Defaults to the last 7 days. Company-specific episodes are "
+                     "sporadic, so a longer window often finds more.",
             )
             max_eps = st.number_input(
                 "Max episodes to analyse", min_value=1, max_value=60, value=15, step=5,
@@ -4476,12 +4482,25 @@ def draw_podcast_discovery_panel() -> None:
                     "problem, not an empty result."
                 )
             else:
+                _used = int(st.session_state.get("pod_disc_lookback_used", 7))
                 st.caption(
-                    f"0 candidates. No episode published in the last "
-                    f"{int(st.session_state.get('pod_disc_lookback_used', 7))} days matched "
-                    "these entities. Try a longer lookback, or add aliases and "
-                    "executives to podcast_entities.csv."
+                    f"0 candidates. No episode published in the last {_used} days "
+                    "matched these entities. Company-specific episodes are episodic - "
+                    "a large cap is discussed most weeks, a mid cap may go months "
+                    "between appearances, so a short window legitimately returns "
+                    "nothing most days."
                 )
+                # Widening is the usual next step, so offer it rather than making
+                # the analyst re-enter the search by hand.
+                for _wider in (d for d in (30, 90, 180) if d > _used):
+                    if st.button(
+                        f"Search the last {_wider} days instead",
+                        key=f"pod_disc_widen_{_wider}",
+                    ):
+                        st.session_state["pod_disc_lookback"] = _wider
+                        st.session_state["pod_disc_has_run"] = False
+                        st.rerun()
+                    break
             return
 
         reportable = [p for p in processed if p.reportable]
