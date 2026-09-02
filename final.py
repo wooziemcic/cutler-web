@@ -4261,6 +4261,7 @@ def run_podcast_discovery(
     state = DiscoveryState(root / "discovery_state.json")
     store = ResearchStore(root)
     profiles = build_profiles(tickers)
+    diagnostics: List[str] = []
 
     cands = discover_for_tickers(
         tickers,
@@ -4269,6 +4270,8 @@ def run_podcast_discovery(
         profiles=profiles,
         skip_processed=skip_processed,
         on_progress=(lambda s, m, n: on_progress(f"{s}: {m}")) if on_progress else None,
+        diagnostics=diagnostics,
+        budget_root=root,
     )
     state.save()
 
@@ -4282,7 +4285,7 @@ def run_podcast_discovery(
         max_episodes=max_episodes,
         on_progress=(lambda uid, m: on_progress(f"{uid}: {m}")) if on_progress else None,
     )
-    return processed, cands, profiles
+    return processed, cands, profiles, diagnostics
 
 
 def build_discovery_pdf(processed, profiles, *, output_path: Path, lookback_days: int, include_ai: bool = True) -> Optional[Path]:
@@ -4398,7 +4401,7 @@ def draw_podcast_discovery_panel() -> None:
 
             try:
                 with st.spinner("Searching podcasts, fetching transcripts, extracting evidence..."):
-                    processed, cands, profiles = run_podcast_discovery(
+                    processed, cands, profiles, diags = run_podcast_discovery(
                         list(chosen),
                         lookback_days=int(lookback),
                         max_episodes=int(max_eps),
@@ -4410,7 +4413,9 @@ def draw_podcast_discovery_panel() -> None:
                 st.session_state["pod_disc_processed"] = processed
                 st.session_state["pod_disc_candidates"] = cands
                 st.session_state["pod_disc_profiles"] = profiles
+                st.session_state["pod_disc_diagnostics"] = diags
                 st.session_state["pod_disc_lookback_used"] = int(lookback)
+                st.session_state["pod_disc_has_run"] = True
             except Exception as exc:
                 prog.empty()
                 st.error(f"Discovery failed: {type(exc).__name__}: {exc}")
@@ -4422,8 +4427,30 @@ def draw_podcast_discovery_panel() -> None:
         cands = st.session_state.get("pod_disc_candidates") or []
         profiles = st.session_state.get("pod_disc_profiles") or {}
 
-        if not cands and not processed:
+        diags = st.session_state.get("pod_disc_diagnostics") or []
+        if diags:
+            st.warning(
+                "Discovery could not search normally:\n\n"
+                + "\n\n".join(f"- {d}" for d in diags[:5])
+            )
+
+        if not st.session_state.get("pod_disc_has_run"):
             st.caption("No run yet. Choose a scope and press Discover & analyse.")
+            return
+
+        if not cands and not processed:
+            if diags:
+                st.caption(
+                    "0 candidates. The messages above explain why - this is an API "
+                    "problem, not an empty result."
+                )
+            else:
+                st.caption(
+                    f"0 candidates. No episode published in the last "
+                    f"{int(st.session_state.get('pod_disc_lookback_used', 7))} days matched "
+                    "these entities. Try a longer lookback, or add aliases and "
+                    "executives to podcast_entities.csv."
+                )
             return
 
         reportable = [p for p in processed if p.reportable]
@@ -9398,7 +9425,7 @@ def draw_run_all_section(*, use_first_word: bool, embedded: bool = False) -> Non
                                 _disc_days = int(cfg.get("podcast_discovery_lookback_days", 7))
                                 _disc_max = int(cfg.get("podcast_discovery_max_episodes", 12))
                                 st.caption(f"Searching {len(_disc_universe)} ticker(s)…")
-                                _processed, _cands, _profiles = run_podcast_discovery(
+                                _processed, _cands, _profiles, _diags = run_podcast_discovery(
                                     _disc_universe,
                                     lookback_days=_disc_days,
                                     max_episodes=_disc_max,
@@ -9414,6 +9441,8 @@ def draw_run_all_section(*, use_first_word: bool, embedded: bool = False) -> Non
                                     f"{len(_cands)} candidate(s), {len(_processed)} analysed, "
                                     f"{len(_rep)} materially relevant."
                                 )
+                                for _d in (_diags or [])[:3]:
+                                    st.warning(_d)
                             except Exception as _disc_exc:
                                 # Discovery is additive; never let it stop Run All.
                                 st.warning(f"Podcast discovery skipped: {_disc_exc}")

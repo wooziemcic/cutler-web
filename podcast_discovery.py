@@ -153,14 +153,25 @@ def search_episodes(
     page_size: int = 10,
     timeout: int = 20,
     api_key: Optional[str] = None,
+    diagnostics: Optional[List[str]] = None,
 ) -> List[dict]:
     """One Listen Notes episode search restricted to the lookback window.
 
     Returns raw result dicts. Network and quota failures return [] rather than
-    raising - discovery is best-effort and must never abort a run.
+    raising - discovery is best-effort and must never abort a run - but they
+    are recorded in `diagnostics` so the caller can tell "nothing was
+    published" apart from "the API refused us".
     """
+    def _note(msg: str) -> None:
+        print(f"    [WARN] {msg}")
+        if diagnostics is not None and msg not in diagnostics:
+            diagnostics.append(msg)
+
     key = (api_key or _api_key()).strip()
-    if not key or not query.strip():
+    if not key:
+        _note("LISTENNOTES_API_KEY is not set - discovery cannot search.")
+        return []
+    if not query.strip():
         return []
 
     since_ms = int(
@@ -185,12 +196,18 @@ def search_episodes(
             timeout=timeout,
         )
         if resp.status_code == 429:
-            print("    [WARN] Listen Notes rate limit / quota reached.")
+            _note(
+                "Listen Notes returned 429 - the API key is rate limited or its "
+                "monthly quota is used up. No episodes can be discovered until it resets."
+            )
+            return []
+        if resp.status_code in (401, 403):
+            _note(f"Listen Notes rejected the API key (HTTP {resp.status_code}).")
             return []
         resp.raise_for_status()
         return list(resp.json().get("results") or [])
     except Exception as exc:
-        print(f"    [WARN] Listen Notes search failed for {query!r}: {exc}")
+        _note(f"Listen Notes search failed for {query!r}: {type(exc).__name__}: {exc}")
         return []
 
 
@@ -292,6 +309,8 @@ def discover_for_tickers(
     profiles: Optional[Dict[str, TickerProfile]] = None,
     skip_processed: bool = True,
     on_progress=None,
+    diagnostics: Optional[List[str]] = None,
+    budget_root: Optional[Path] = None,
 ) -> List[Candidate]:
     """Find recent episodes plausibly about the given tickers.
 
@@ -302,6 +321,29 @@ def discover_for_tickers(
     profiles = profiles or build_profiles(tickers)
     by_uid: Dict[str, Candidate] = {}
     calls = 0
+    cached_skips = 0
+
+    # Share podcast_ingest's monthly Listen Notes counter so discovery and
+    # transcript fetching draw down one budget rather than two.
+    def _budget_ok() -> bool:
+        if budget_root is None:
+            return True
+        try:
+            import podcast_ingest as ing
+
+            return bool(ing._listen_notes_budget_left(Path(budget_root)))
+        except Exception:
+            return True
+
+    def _budget_spend() -> None:
+        if budget_root is None:
+            return
+        try:
+            import podcast_ingest as ing
+
+            ing._bump_listen_notes_usage(Path(budget_root))
+        except Exception:
+            pass
 
     for sym in [str(t).strip().upper() for t in tickers if str(t).strip()]:
         profile = profiles.get(sym)
@@ -321,9 +363,18 @@ def discover_for_tickers(
                 break
             skey = f"{sym}|{term}|{lookback_days}"
             if state and state.seen_search(skey):
+                cached_skips += 1
                 continue
+            if not _budget_ok():
+                msg = "Listen Notes monthly budget reached (LISTENNOTES_MONTHLY_CAP); stopping discovery."
+                if diagnostics is not None and msg not in diagnostics:
+                    diagnostics.append(msg)
+                break
             calls += 1
-            results = search_episodes(term, lookback_days=lookback_days)
+            _budget_spend()
+            results = search_episodes(
+                term, lookback_days=lookback_days, diagnostics=diagnostics
+            )
             if state:
                 state.mark_search(skey)
             time.sleep(0.25)  # be polite to the API
@@ -341,6 +392,18 @@ def discover_for_tickers(
 
         if on_progress:
             on_progress(sym, f"{found} candidate(s) from {len(terms)} term(s)", found)
+
+    if diagnostics is not None and calls >= max_calls:
+        diagnostics.append(
+            f"Stopped after {calls} searches (max_calls={max_calls}); some tickers were not searched."
+        )
+    # Without this, a fully cached rerun returns zero with no explanation -
+    # indistinguishable from "nothing was published".
+    if diagnostics is not None and cached_skips and not calls:
+        diagnostics.append(
+            f"All {cached_skips} search(es) were skipped because the same queries ran "
+            "in the last 20 hours. Tick 'Re-check processed' to force a fresh search."
+        )
 
     out = sorted(by_uid.values(), key=lambda c: (-c.score, c.published), reverse=False)
     return sorted(out, key=lambda c: -c.score)
