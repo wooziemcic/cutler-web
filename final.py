@@ -4246,6 +4246,7 @@ def run_podcast_discovery(
     max_episodes: int = 15,
     allow_stt: bool = True,
     skip_processed: bool = True,
+    backends: Optional[List[str]] = None,
     on_progress=None,
 ):
     """Discover -> transcribe -> verify -> excerpt, for the given tickers.
@@ -4253,7 +4254,7 @@ def run_podcast_discovery(
     Thin wrapper so both the Podcast page and the Run All step share one path.
     Returns (processed_episodes, candidates, profiles).
     """
-    from podcast_discovery import DiscoveryState, discover_for_tickers
+    from podcast_discovery import DEFAULT_BACKENDS, DiscoveryState, discover_for_tickers
     from podcast_entities import build_profiles
     from podcast_research import ResearchStore, process_candidates
 
@@ -4272,6 +4273,7 @@ def run_podcast_discovery(
         on_progress=(lambda s, m, n: on_progress(f"{s}: {m}")) if on_progress else None,
         diagnostics=diagnostics,
         budget_root=root,
+        backends=tuple(backends) if backends else DEFAULT_BACKENDS,
     )
     state.save()
 
@@ -4378,6 +4380,23 @@ def draw_podcast_discovery_panel() -> None:
                     "Add aliases or executives to podcast_entities.csv to make these searchable."
                 )
 
+        # Apple search and the monitored RSS feeds are free and uncapped, so they
+        # are on by default. Listen Notes is opt-in: 300 requests a month.
+        src_labels = st.multiselect(
+            "Discovery sources",
+            options=["Apple (free, finds new shows)",
+                     "Monitored RSS feeds (free)",
+                     "Listen Notes (uses monthly quota)"],
+            default=["Apple (free, finds new shows)", "Monitored RSS feeds (free)"],
+            key="pod_disc_backends",
+            help="Apple needs no key and has no monthly cap. Listen Notes has a "
+                 "300-request free tier that one full sweep can exhaust.",
+        )
+        _backends = []
+        if any(s.startswith("Apple") for s in src_labels): _backends.append("apple")
+        if any(s.startswith("Monitored") for s in src_labels): _backends.append("rss")
+        if any(s.startswith("Listen") for s in src_labels): _backends.append("listennotes")
+
         b1, b2, b3 = st.columns([1, 1, 2])
         with b1:
             go = st.button("Discover & analyse", type="primary", use_container_width=True, key="pod_disc_go")
@@ -4407,6 +4426,7 @@ def draw_podcast_discovery_panel() -> None:
                         max_episodes=int(max_eps),
                         allow_stt=bool(allow_stt),
                         skip_processed=not bool(rescan),
+                        backends=_backends or None,
                         on_progress=_note,
                     )
                 prog.progress(1.0)
@@ -4427,19 +4447,30 @@ def draw_podcast_discovery_panel() -> None:
         cands = st.session_state.get("pod_disc_candidates") or []
         profiles = st.session_state.get("pod_disc_profiles") or {}
 
+        # Split diagnostics that actually explain a zero result from merely
+        # informational ones. "1 RSS feed could not be read" is not why a search
+        # came back empty, and claiming otherwise sends you after the wrong bug.
         diags = st.session_state.get("pod_disc_diagnostics") or []
-        if diags:
+        _blocking_marks = (
+            "429", "quota", "rate limited", "API_KEY", "API key", "api key",
+            "skipped because the same queries", "Stopped after",
+        )
+        blocking = [d for d in diags if any(m in d for m in _blocking_marks)]
+        informational = [d for d in diags if d not in blocking]
+        if blocking:
             st.warning(
                 "Discovery could not search normally:\n\n"
-                + "\n\n".join(f"- {d}" for d in diags[:5])
+                + "\n\n".join(f"- {d}" for d in blocking[:5])
             )
+        for _d in informational[:3]:
+            st.caption(_d)
 
         if not st.session_state.get("pod_disc_has_run"):
             st.caption("No run yet. Choose a scope and press Discover & analyse.")
             return
 
         if not cands and not processed:
-            if diags:
+            if blocking:
                 st.caption(
                     "0 candidates. The messages above explain why - this is an API "
                     "problem, not an empty result."
@@ -9431,6 +9462,7 @@ def draw_run_all_section(*, use_first_word: bool, embedded: bool = False) -> Non
                                     max_episodes=_disc_max,
                                     allow_stt=True,
                                     skip_processed=True,
+                                    backends=["apple", "rss"],  # free sources only
                                 )
                                 from podcast_research import to_excerpt_records
 

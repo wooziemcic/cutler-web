@@ -38,6 +38,11 @@ DEFAULT_LOOKBACK_DAYS = 7
 # Score a candidate must reach on metadata alone to be worth a transcript.
 MIN_CANDIDATE_SCORE = 3.0
 
+# Apple search and plain RSS cost nothing and have no monthly cap, so they are
+# the default. Listen Notes is opt-in: its free tier is 300 requests a month,
+# which a single all-ticker sweep exhausts.
+DEFAULT_BACKENDS = ("apple", "rss")
+
 
 @dataclass
 class Candidate:
@@ -52,13 +57,28 @@ class Candidate:
     audio_url: str = ""
     page_url: str = ""
     listennotes_url: str = ""
+    feed_url: str = ""       # lets us look for a free published transcript
+    guid: str = ""           # episode guid, stable across backends
     score: float = 0.0
     matched: List[str] = field(default_factory=list)  # human-readable reasons
-    source: str = "discovery"  # "discovery" | "monitored"
+    source: str = "discovery"  # "discovery" | "monitored" | "apple" | "rss"
 
     @property
     def uid(self) -> str:
         return f"{self.ticker}::{self.episode_id}"
+
+    @property
+    def dedupe_key(self) -> str:
+        """Identity that holds across backends.
+
+        Apple and RSS number the same episode differently, so episode_id alone
+        would let one episode through twice. A guid is authoritative when both
+        sides publish one; otherwise fall back to podcast + title.
+        """
+        if self.guid:
+            return f"{self.ticker}::guid::{self.guid.strip().lower()}"
+        norm = re.sub(r"[^a-z0-9]+", "", f"{self.podcast_name}{self.title}".lower())
+        return f"{self.ticker}::t::{norm[:120]}"
 
     def why(self) -> str:
         return "; ".join(self.matched) or "no explicit match"
@@ -263,6 +283,200 @@ def score_candidate(
     return score, reasons
 
 
+
+
+# ---------------------------------------------------------------------------
+# Free backends: Apple search (breadth) and the monitored RSS feeds (depth)
+# ---------------------------------------------------------------------------
+
+APPLE_SEARCH_URL = "https://itunes.apple.com/search"
+_UA = {"User-Agent": "Mozilla/5.0 CutlerResearch"}
+
+
+def search_apple(
+    query: str,
+    *,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    limit: int = 25,
+    timeout: int = 20,
+    diagnostics: Optional[List[str]] = None,
+) -> List[dict]:
+    """Apple's podcast search. No API key, no monthly quota.
+
+    Apple has no published-after parameter, so the window is applied here.
+    Results carry an audio URL, so a discovered episode can still be
+    transcribed downstream.
+    """
+    def _note(msg: str) -> None:
+        print(f"    [WARN] {msg}")
+        if diagnostics is not None and msg not in diagnostics:
+            diagnostics.append(msg)
+
+    if not query.strip():
+        return []
+    try:
+        resp = requests.get(
+            APPLE_SEARCH_URL,
+            params={
+                "term": query,
+                "media": "podcast",
+                "entity": "podcastEpisode",
+                "limit": max(1, min(200, limit)),
+            },
+            headers=_UA,
+            timeout=timeout,
+        )
+        if resp.status_code == 403:
+            _note("Apple search is throttling requests (HTTP 403); slowing down.")
+            time.sleep(3.0)
+            return []
+        resp.raise_for_status()
+        results = list(resp.json().get("results") or [])
+    except Exception as exc:
+        _note(f"Apple search failed for {query!r}: {type(exc).__name__}: {exc}")
+        return []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))
+    fresh = []
+    for r in results:
+        raw_date = str(r.get("releaseDate") or "")
+        try:
+            when = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if when >= cutoff:
+            fresh.append(r)
+    return fresh
+
+
+def _apple_to_candidate(res: dict, ticker: str, profile: TickerProfile) -> Optional[Candidate]:
+    title = re.sub(r"\s+", " ", str(res.get("trackName") or "")).strip()
+    if not title:
+        return None
+    desc = re.sub(r"<[^>]+>", " ", str(res.get("description") or res.get("shortDescription") or ""))
+    desc = re.sub(r"\s+", " ", desc).strip()
+    podcast = str(res.get("collectionName") or "").strip()
+    score, reasons = score_candidate(profile, title, desc, podcast)
+    ep_id = str(res.get("trackId") or res.get("episodeGuid") or "").strip()
+    if not ep_id:
+        return None
+    return Candidate(
+        episode_id=f"apple:{ep_id}",
+        ticker=ticker,
+        podcast_name=podcast,
+        title=title,
+        description=desc,
+        published=str(res.get("releaseDate") or ""),
+        audio_url=str(res.get("episodeUrl") or ""),
+        page_url=str(res.get("trackViewUrl") or ""),
+        feed_url=str(res.get("feedUrl") or ""),
+        guid=str(res.get("episodeGuid") or ""),
+        score=score,
+        matched=reasons,
+        source="apple",
+    )
+
+
+def load_monitored_feeds(csv_path: Optional[Path] = None) -> List[tuple]:
+    """(name, rss_url) for every monitored podcast that has a feed."""
+    import csv as _csv
+
+    path = Path(csv_path) if csv_path else Path(__file__).resolve().parent / "podcast_sources.csv"
+    out: List[tuple] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as fh:
+            for row in _csv.DictReader(fh):
+                name = str(row.get("podcast_name") or "").strip()
+                url = str(row.get("rss_url") or row.get("rss_from_website") or "").strip()
+                if name and url:
+                    out.append((name, url))
+    except Exception:
+        return []
+    return out
+
+
+def scan_rss_feeds(
+    profiles: Dict[str, TickerProfile],
+    *,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    feeds: Optional[List[tuple]] = None,
+    min_score: float = MIN_CANDIDATE_SCORE,
+    max_feeds: int = 200,
+    on_progress=None,
+    diagnostics: Optional[List[str]] = None,
+) -> List[Candidate]:
+    """Score every recent episode in the monitored feeds against every ticker.
+
+    Free and unlimited - these are plain RSS fetches, no API key involved. It
+    only sees podcasts already in podcast_sources.csv, which is exactly the
+    coverage Apple search complements.
+    """
+    import feedparser
+
+    feeds = feeds if feeds is not None else load_monitored_feeds()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))
+    found: List[Candidate] = []
+    failed = 0
+
+    for idx, (name, url) in enumerate(feeds[:max_feeds]):
+        try:
+            parsed = feedparser.parse(url)
+        except Exception:
+            failed += 1
+            continue
+        if on_progress and idx % 10 == 0:
+            on_progress(f"RSS {idx + 1}/{min(len(feeds), max_feeds)}: {name[:30]}")
+
+        for entry in getattr(parsed, "entries", []) or []:
+            pp = entry.get("published_parsed")
+            if not pp:
+                continue
+            try:
+                when = datetime(*pp[:6], tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if when < cutoff:
+                continue
+
+            title = re.sub(r"<[^>]+>", " ", str(entry.get("title") or ""))
+            title = re.sub(r"\s+", " ", title).strip()
+            desc = re.sub(r"<[^>]+>", " ", str(entry.get("summary") or ""))[:6000]
+            desc = re.sub(r"\s+", " ", desc).strip()
+
+            audio = ""
+            for link in entry.get("links", []) or []:
+                if str(link.get("type", "")).startswith("audio"):
+                    audio = str(link.get("href") or "")
+                    break
+
+            for sym, prof in profiles.items():
+                score, reasons = score_candidate(prof, title, desc, name)
+                if score < min_score:
+                    continue
+                guid = str(entry.get("id") or entry.get("guid") or "")
+                found.append(
+                    Candidate(
+                        episode_id=f"rss:{guid or title[:60]}",
+                        ticker=sym,
+                        podcast_name=name,
+                        title=title,
+                        description=desc,
+                        published=when.isoformat(),
+                        audio_url=audio,
+                        page_url=str(entry.get("link") or ""),
+                        feed_url=url,
+                        guid=guid,
+                        score=score,
+                        matched=reasons,
+                        source="rss",
+                    )
+                )
+
+    if failed and diagnostics is not None:
+        diagnostics.append(f"{failed} RSS feed(s) could not be read; the rest were scanned.")
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
@@ -311,6 +525,7 @@ def discover_for_tickers(
     on_progress=None,
     diagnostics: Optional[List[str]] = None,
     budget_root: Optional[Path] = None,
+    backends: Sequence[str] = DEFAULT_BACKENDS,
 ) -> List[Candidate]:
     """Find recent episodes plausibly about the given tickers.
 
@@ -322,6 +537,32 @@ def discover_for_tickers(
     by_uid: Dict[str, Candidate] = {}
     calls = 0
     cached_skips = 0
+    backends = tuple(b.strip().lower() for b in (backends or DEFAULT_BACKENDS))
+
+    def _keep(cand: Optional[Candidate]) -> None:
+        """Add a candidate, deduping across backends on episode identity."""
+        if cand is None or cand.score < min_score:
+            return
+        if skip_processed and state and state.is_done(cand.uid):
+            return
+        key = cand.dedupe_key
+        prev = by_uid.get(key)
+        if prev is None:
+            by_uid[key] = cand
+            return
+        # Same episode from two backends: keep the better score, prefer the
+        # record that actually has audio, and merge the match reasons.
+        winner = prev if (prev.audio_url and not cand.audio_url) else (
+            cand if (cand.audio_url and not prev.audio_url) else prev
+        )
+        loser = cand if winner is prev else prev
+        winner.score = max(prev.score, cand.score)
+        for r in loser.matched:
+            if r not in winner.matched:
+                winner.matched.append(r)
+        if not winner.feed_url and loser.feed_url:
+            winner.feed_url = loser.feed_url
+        by_uid[key] = winner
 
     # Share podcast_ingest's monthly Listen Notes counter so discovery and
     # transcript fetching draw down one budget rather than two.
@@ -358,6 +599,23 @@ def discover_for_tickers(
             continue
 
         found = 0
+
+        # --- Apple: free, no key, finds shows outside the monitored list ---
+        if "apple" in backends:
+            for term in terms:
+                before = len(by_uid)
+                for res in search_apple(
+                    term, lookback_days=lookback_days, diagnostics=diagnostics
+                ):
+                    _keep(_apple_to_candidate(res, sym, profile))
+                found += len(by_uid) - before
+                time.sleep(0.34)  # stay well under Apple's throttle
+
+        if "listennotes" not in backends:
+            if on_progress:
+                on_progress(sym, f"{found} candidate(s) from {len(terms)} term(s)", found)
+            continue
+
         for term in terms:
             if calls >= max_calls:
                 break
@@ -379,19 +637,26 @@ def discover_for_tickers(
                 state.mark_search(skey)
             time.sleep(0.25)  # be polite to the API
 
+            before = len(by_uid)
             for res in results:
-                cand = _result_to_candidate(res, sym, profile)
-                if not cand or cand.score < min_score:
-                    continue
-                if skip_processed and state and state.is_done(cand.uid):
-                    continue
-                prev = by_uid.get(cand.uid)
-                if prev is None or cand.score > prev.score:
-                    by_uid[cand.uid] = cand
-                    found += 1
+                _keep(_result_to_candidate(res, sym, profile))
+            found += len(by_uid) - before
 
         if on_progress:
             on_progress(sym, f"{found} candidate(s) from {len(terms)} term(s)", found)
+
+    # --- RSS: one pass over the monitored feeds, scored against every ticker ---
+    if "rss" in backends:
+        wanted = {str(t).strip().upper() for t in tickers if str(t).strip()}
+        sub_profiles = {k: v for k, v in profiles.items() if k in wanted}
+        for cand in scan_rss_feeds(
+            sub_profiles,
+            lookback_days=lookback_days,
+            min_score=min_score,
+            on_progress=(lambda m: on_progress("RSS", m, 0)) if on_progress else None,
+            diagnostics=diagnostics,
+        ):
+            _keep(cand)
 
     if diagnostics is not None and calls >= max_calls:
         diagnostics.append(

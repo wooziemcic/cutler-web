@@ -129,6 +129,108 @@ class ResearchStore:
         return list(self._load_index().values())
 
 
+
+# ---------------------------------------------------------------------------
+# Free transcript sources, tried before anything that costs money
+# ---------------------------------------------------------------------------
+
+def _strip_captions(text: str) -> str:
+    """Turn a VTT/SRT caption file into plain prose.
+
+    Drops cue numbers, timing lines and WEBVTT headers, keeps any speaker
+    prefix the file carries, and collapses the result.
+    """
+    import re as _re
+
+    lines = []
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not s or s.upper().startswith("WEBVTT") or s.isdigit():
+            continue
+        if "-->" in s:  # timing cue
+            continue
+        lines.append(s)
+    out = " ".join(lines)
+    return _re.sub(r"\s+", " ", out).strip()
+
+
+def fetch_feed_transcript(feed_url: str, *, guid: str = "", title: str = "", timeout: int = 20) -> str:
+    """Look for a transcript published in the podcast's own RSS feed.
+
+    Two places carry one for free: the <podcast:transcript> tag from the
+    Podcasting 2.0 namespace, and occasionally a full transcript inline in the
+    entry content. Costs nothing but one feed fetch, so it runs before any paid
+    speech-to-text.
+    """
+    if not feed_url:
+        return ""
+    try:
+        import feedparser
+        import requests
+
+        parsed = feedparser.parse(feed_url)
+    except Exception:
+        return ""
+
+    def _matches(entry) -> bool:
+        if guid and str(entry.get("id") or entry.get("guid") or "") == guid:
+            return True
+        if title:
+            a = "".join(ch for ch in str(entry.get("title") or "").lower() if ch.isalnum())
+            b = "".join(ch for ch in title.lower() if ch.isalnum())
+            return bool(a) and (a[:60] == b[:60])
+        return False
+
+    entry = next((e for e in getattr(parsed, "entries", []) or [] if _matches(e)), None)
+    if entry is None:
+        return ""
+
+    # 1. <podcast:transcript url="..." type="..."/>
+    urls: list = []
+    for key in ("podcast_transcript", "transcript"):
+        val = entry.get(key)
+        if isinstance(val, dict) and val.get("url"):
+            urls.append(str(val["url"]))
+        elif isinstance(val, list):
+            urls.extend(str(v.get("url")) for v in val if isinstance(v, dict) and v.get("url"))
+    for link in entry.get("links", []) or []:
+        if "transcript" in str(link.get("rel", "")).lower() and link.get("href"):
+            urls.append(str(link["href"]))
+
+    import requests as _rq
+
+    for url in urls:
+        try:
+            resp = _rq.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 CutlerResearch"})
+            resp.raise_for_status()
+            body = resp.text or ""
+        except Exception:
+            continue
+        if url.lower().endswith((".vtt", ".srt")) or "-->" in body[:2000]:
+            body = _strip_captions(body)
+        elif url.lower().endswith(".json"):
+            try:
+                import json as _json
+
+                data = _json.loads(body)
+                segs = data.get("segments") if isinstance(data, dict) else None
+                if isinstance(segs, list):
+                    body = " ".join(str(s.get("body") or s.get("text") or "") for s in segs)
+            except Exception:
+                pass
+        body = body.strip()
+        if body:
+            return body
+
+    # 2. A full transcript sometimes sits inline in the entry content.
+    try:
+        import podcast_ingest as ing
+
+        text, _src = ing._extract_text_from_rss_entry(entry)
+        return text or ""
+    except Exception:
+        return ""
+
 # ---------------------------------------------------------------------------
 # Transcript acquisition for a discovered episode
 # ---------------------------------------------------------------------------
@@ -152,16 +254,18 @@ def acquire_transcript(
         print(f"    [WARN] podcast_ingest unavailable: {exc}")
         return "", "none"
 
-    # 1. Listen Notes episode endpoint - we already have a stable id, so this
-    #    is one call and needs no search.
-    try:
-        text = _listennotes_transcript_by_id(candidate.episode_id, output_root)
-        if text and ing._looks_like_transcript(text):
-            return text, "listennotes"
-    except Exception:
-        pass
+    # 1. A transcript published in the podcast's own feed. Free.
+    if getattr(candidate, "feed_url", ""):
+        try:
+            text = fetch_feed_transcript(
+                candidate.feed_url, guid=getattr(candidate, "guid", ""), title=candidate.title
+            )
+            if text and ing._looks_like_transcript(text):
+                return text, "rss_transcript"
+        except Exception:
+            pass
 
-    # 2. Transcript published on the episode page.
+    # 2. Transcript published on the episode page. Free.
     if candidate.page_url:
         try:
             text = ing._fetch_html_transcript(candidate.page_url)
@@ -170,7 +274,8 @@ def acquire_transcript(
         except Exception:
             pass
 
-    # 3. Podchaser.
+    # 3. Podchaser, then Listen Notes. Both are quota/token gated, so they sit
+    #    after the genuinely free sources but before paid transcription.
     try:
         text = ing._fetch_podchaser_transcript(
             podcast_name=candidate.podcast_name,
@@ -182,7 +287,17 @@ def acquire_transcript(
     except Exception:
         pass
 
-    # 4. Speech-to-text - the expensive option, so it is last.
+    if candidate.episode_id.startswith("listennotes:") or not candidate.episode_id.startswith(("apple:", "rss:")):
+        try:
+            text = _listennotes_transcript_by_id(candidate.episode_id, output_root)
+            if text and ing._looks_like_transcript(text):
+                return text, "listennotes"
+        except Exception:
+            pass
+
+    # 4. Speech-to-text. This is the only step that costs money, so it runs
+    #    only after every free source has been tried and only when explicitly
+    #    allowed by the caller.
     if allow_stt and candidate.audio_url:
         try:
             tmp = Path(output_root) / "_whisper_tmp"
