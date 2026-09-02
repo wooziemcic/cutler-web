@@ -4229,6 +4229,309 @@ def _podcast_run_all_group_ids(n_groups: int = 9) -> list[list[str]]:
 
 
 
+
+# ---------------------- Podcast discovery (ticker-driven) ----------------------
+
+def _pod_discovery_root() -> Path:
+    """Durable home for discovery state and the research store."""
+    d = BASE / "Podcasts" / "_discovery"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def run_podcast_discovery(
+    tickers: List[str],
+    *,
+    lookback_days: int = 7,
+    max_episodes: int = 15,
+    allow_stt: bool = True,
+    skip_processed: bool = True,
+    on_progress=None,
+):
+    """Discover -> transcribe -> verify -> excerpt, for the given tickers.
+
+    Thin wrapper so both the Podcast page and the Run All step share one path.
+    Returns (processed_episodes, candidates, profiles).
+    """
+    from podcast_discovery import DiscoveryState, discover_for_tickers
+    from podcast_entities import build_profiles
+    from podcast_research import ResearchStore, process_candidates
+
+    root = _pod_discovery_root()
+    state = DiscoveryState(root / "discovery_state.json")
+    store = ResearchStore(root)
+    profiles = build_profiles(tickers)
+
+    cands = discover_for_tickers(
+        tickers,
+        lookback_days=lookback_days,
+        state=state,
+        profiles=profiles,
+        skip_processed=skip_processed,
+        on_progress=(lambda s, m, n: on_progress(f"{s}: {m}")) if on_progress else None,
+    )
+    state.save()
+
+    processed = process_candidates(
+        cands,
+        output_root=root,
+        profiles=profiles,
+        state=state,
+        store=store,
+        allow_stt=allow_stt,
+        max_episodes=max_episodes,
+        on_progress=(lambda uid, m: on_progress(f"{uid}: {m}")) if on_progress else None,
+    )
+    return processed, cands, profiles
+
+
+def build_discovery_pdf(processed, profiles, *, output_path: Path, lookback_days: int, include_ai: bool = True) -> Optional[Path]:
+    """Render discovery results through the existing Cutler PDF framework."""
+    from podcast_report import build_sections
+
+    sections = build_sections(
+        processed,
+        company_names={k: (v.company or k) for k, v in (profiles or {}).items()},
+        include_ai=include_ai,
+        model=str(st.session_state.get("ai_score_model", "gpt-4o-mini")),
+    )
+    if not sections:
+        return None
+    now_et = _now_et()
+    return _build_text_pdf(
+        output_path=output_path,
+        title="Cutler Capital - Podcast Intelligence",
+        subtitle=(
+            f"Generated {now_et:%Y-%m-%d %I:%M %p %Z} - "
+            f"Ticker-driven discovery - last {lookback_days} days"
+        ),
+        sections=sections,
+    )
+
+
+def draw_podcast_discovery_panel() -> None:
+    """Ticker-driven discovery UI, alongside the existing monitored feeds."""
+    from podcast_entities import build_profiles
+
+    with st.container(border=True, key="ccpanel_pod_discovery"):
+        st.markdown(
+            "<div class='cc-panel-h'>Podcast discovery</div>"
+            "<div class='cc-panel-sub'>Search the whole podcast universe for recent "
+            "episodes about our companies or the people who run them - not just the "
+            "monitored feeds.</div>",
+            unsafe_allow_html=True,
+        )
+
+        try:
+            universe = sorted(get_ticker_universe().keys())
+        except Exception:
+            universe = []
+
+        c1, c2 = st.columns([3, 1], gap="medium")
+        with c1:
+            scope = st.radio(
+                "Scope",
+                ["All Cutler tickers", "Selected tickers"],
+                horizontal=True,
+                key="pod_disc_scope",
+            )
+            if scope == "Selected tickers":
+                chosen = st.multiselect(
+                    "Tickers", options=universe, default=[], key="pod_disc_tickers"
+                )
+            else:
+                chosen = universe
+        with c2:
+            lookback = st.number_input(
+                "Lookback (days)", min_value=1, max_value=90, value=7, step=1,
+                key="pod_disc_lookback",
+                help="Defaults to the last 7 days.",
+            )
+            max_eps = st.number_input(
+                "Max episodes to analyse", min_value=1, max_value=60, value=15, step=5,
+                key="pod_disc_max",
+                help="Caps transcription spend for one run.",
+            )
+
+        if not chosen:
+            st.caption("Select at least one ticker to search.")
+            return
+
+        # Show exactly what will be searched, so the analyst can see why an
+        # episode was or was not found.
+        with st.expander(f"Entities being searched ({len(chosen)} ticker(s))", expanded=False):
+            profiles = build_profiles(chosen)
+            searchable = [p for p in profiles.values() if p.search_terms()]
+            skipped = [p for p in profiles.values() if not p.search_terms()]
+            for prof in list(searchable)[:60]:
+                st.markdown(f"**{prof.ticker}** - {prof.describe()}")
+            if skipped:
+                st.caption(
+                    f"{len(skipped)} ticker(s) skipped as ambiguous with no company or "
+                    f"executive on file: {', '.join(p.ticker for p in skipped[:20])}"
+                    + (" ..." if len(skipped) > 20 else "")
+                )
+                st.caption(
+                    "Add aliases or executives to podcast_entities.csv to make these searchable."
+                )
+
+        b1, b2, b3 = st.columns([1, 1, 2])
+        with b1:
+            go = st.button("Discover & analyse", type="primary", use_container_width=True, key="pod_disc_go")
+        with b2:
+            rescan = st.checkbox("Re-check processed", value=False, key="pod_disc_rescan",
+                                 help="Off by default so reruns skip episodes already handled.")
+        with b3:
+            allow_stt = st.checkbox(
+                "Allow transcription fallback", value=True, key="pod_disc_stt",
+                help="Speech-to-text when no published transcript exists. Costs money.",
+            )
+
+        if go:
+            log = st.empty()
+            prog = st.progress(0.0)
+            lines: list[str] = []
+
+            def _note(msg: str) -> None:
+                lines.append(msg)
+                log.caption(" | ".join(lines[-3:]))
+
+            try:
+                with st.spinner("Searching podcasts, fetching transcripts, extracting evidence..."):
+                    processed, cands, profiles = run_podcast_discovery(
+                        list(chosen),
+                        lookback_days=int(lookback),
+                        max_episodes=int(max_eps),
+                        allow_stt=bool(allow_stt),
+                        skip_processed=not bool(rescan),
+                        on_progress=_note,
+                    )
+                prog.progress(1.0)
+                st.session_state["pod_disc_processed"] = processed
+                st.session_state["pod_disc_candidates"] = cands
+                st.session_state["pod_disc_profiles"] = profiles
+                st.session_state["pod_disc_lookback_used"] = int(lookback)
+            except Exception as exc:
+                prog.empty()
+                st.error(f"Discovery failed: {type(exc).__name__}: {exc}")
+                return
+            finally:
+                prog.empty()
+
+        processed = st.session_state.get("pod_disc_processed") or []
+        cands = st.session_state.get("pod_disc_candidates") or []
+        profiles = st.session_state.get("pod_disc_profiles") or {}
+
+        if not cands and not processed:
+            st.caption("No run yet. Choose a scope and press Discover & analyse.")
+            return
+
+        reportable = [p for p in processed if p.reportable]
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Candidates found", len(cands))
+        m2.metric("Episodes analysed", len(processed))
+        m3.metric("Materially relevant", len(reportable))
+
+        if cands:
+            with st.expander(f"Candidate episodes ({len(cands)}) - why each matched", expanded=False):
+                rows = []
+                done = {p.candidate.uid: p for p in processed}
+                for c in cands[:200]:
+                    pe = done.get(c.uid)
+                    rows.append(
+                        {
+                            "Ticker": c.ticker,
+                            "Score": round(c.score, 1),
+                            "Published": (c.published or "")[:10],
+                            "Podcast": c.podcast_name,
+                            "Episode": c.title[:70],
+                            "Matched on": c.why(),
+                            "Status": (pe.relevance.label if pe else "not analysed"),
+                        }
+                    )
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        if not reportable:
+            st.caption(
+                "No episode passed transcript verification. Passing mentions and "
+                "irrelevant episodes are excluded by design."
+            )
+            return
+
+        st.markdown("#### Verbatim evidence")
+        for pe in reportable:
+            c = pe.candidate
+            with st.expander(
+                f"{c.ticker} - {c.podcast_name} - {c.title[:70]}  ({pe.relevance.label})",
+                expanded=False,
+            ):
+                st.caption(
+                    f"{(c.published or '')[:10]} - {pe.relevance.reason} - "
+                    f"transcript via {pe.transcript_source} ({pe.transcript_words:,} words)"
+                )
+                for i, ex in enumerate(pe.excerpts, 1):
+                    head = f"**[{i}] {ex.topic_label}**"
+                    if ex.time_range:
+                        head += f"  -  `{ex.time_range}`"
+                    if ex.speakers:
+                        head += f"  -  {' / '.join(ex.speakers)}"
+                    st.markdown(head)
+                    st.markdown(
+                        f"<div style='border-left:3px solid var(--cc-plum);padding:.5rem .8rem;"
+                        f"background:#fbfbfd;border-radius:6px;margin-bottom:.6rem;'>"
+                        f"{html_lib.escape(ex.text)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(f"{ex.words} words, verbatim from transcript")
+
+                from podcast_research import ResearchStore
+
+                full = ResearchStore(_pod_discovery_root()).read_transcript(c.episode_id)
+                if full:
+                    with st.expander("Full transcript", expanded=False):
+                        st.text_area(
+                            "Transcript", value=full, height=300,
+                            key=f"pod_disc_tx_{c.episode_id}", disabled=True,
+                        )
+
+        st.divider()
+        pc1, pc2 = st.columns([1, 2])
+        with pc1:
+            build_pdf = st.button("Build discovery PDF", use_container_width=True, key="pod_disc_pdf")
+        with pc2:
+            with_ai = st.checkbox("Include AI interpretation", value=True, key="pod_disc_ai")
+
+        if build_pdf:
+            try:
+                now_et = _now_et()
+                out = CP_DIR / f"{now_et:%m.%d.%y} Podcast Discovery ALL.pdf"
+                with st.spinner("Building evidence-first PDF..."):
+                    made = build_discovery_pdf(
+                        reportable, profiles, output_path=out,
+                        lookback_days=int(st.session_state.get("pod_disc_lookback_used", 7)),
+                        include_ai=bool(with_ai),
+                    )
+                if made and Path(made).exists():
+                    st.session_state["pod_disc_pdf"] = str(made)
+                    st.success(f"Built {Path(made).name}")
+                else:
+                    st.warning("Nothing to render.")
+            except Exception as exc:
+                st.error(f"PDF build failed: {type(exc).__name__}: {exc}")
+
+        pdf_path = st.session_state.get("pod_disc_pdf")
+        if pdf_path and Path(pdf_path).exists():
+            st.download_button(
+                "Download Podcast Discovery PDF",
+                data=Path(pdf_path).read_bytes(),
+                file_name=Path(pdf_path).name,
+                mime="application/pdf",
+                use_container_width=True,
+                key="pod_disc_dl",
+            )
+
+
+
 def draw_podcast_intelligence_section():
     st.subheader("Podcast Intelligence — Company mentions across finance podcasts")
 
@@ -8813,6 +9116,8 @@ def draw_run_all_section(*, use_first_word: bool, embedded: bool = False) -> Non
 
         if clear_all:
             _clear_run_all_state()
+            # podcasts_runall lives inside run_all_state, so the discovery flag
+            # goes with it and the next run rediscovers from scratch.
             st.rerun()
 
         if start_all:
@@ -9073,6 +9378,52 @@ def draw_run_all_section(*, use_first_word: bool, embedded: bool = False) -> Non
                         pr = {}
                     group_index = int(pr.get("group_index", 0))
 
+                    # --- Phase 0: ticker-driven discovery -------------------
+                    # Its own checkpointed rerun, so the podcasts step stays a
+                    # sequence of short operations. Results are written where the
+                    # merge phase below already looks, so they flow into the same
+                    # combined PDF as the monitored feeds.
+                    if not pr.get("discovery_done"):
+                        disc_dir = run_dir / "_discovery"
+                        disc_dir.mkdir(parents=True, exist_ok=True)
+                        with st.status(
+                            f"Run All: Podcasts — discovering episodes by ticker/company/executive "
+                            f"(last {int(cfg.get('podcast_discovery_lookback_days', 7))} days)",
+                            expanded=True,
+                        ):
+                            try:
+                                _disc_universe = [
+                                    t for t in get_ticker_universe().keys() if _is_probable_ticker(t)
+                                ]
+                                _disc_days = int(cfg.get("podcast_discovery_lookback_days", 7))
+                                _disc_max = int(cfg.get("podcast_discovery_max_episodes", 12))
+                                st.caption(f"Searching {len(_disc_universe)} ticker(s)…")
+                                _processed, _cands, _profiles = run_podcast_discovery(
+                                    _disc_universe,
+                                    lookback_days=_disc_days,
+                                    max_episodes=_disc_max,
+                                    allow_stt=True,
+                                    skip_processed=True,
+                                )
+                                from podcast_research import to_excerpt_records
+
+                                _recs = to_excerpt_records(_processed)
+                                _save_json_safe(disc_dir / "podcast_excerpts.json", _recs)
+                                _rep = [x for x in _processed if x.reportable]
+                                st.caption(
+                                    f"{len(_cands)} candidate(s), {len(_processed)} analysed, "
+                                    f"{len(_rep)} materially relevant."
+                                )
+                            except Exception as _disc_exc:
+                                # Discovery is additive; never let it stop Run All.
+                                st.warning(f"Podcast discovery skipped: {_disc_exc}")
+                                _save_json_safe(disc_dir / "podcast_excerpts.json", {})
+
+                        pr["discovery_done"] = True
+                        ra_state["podcasts_runall"] = pr
+                        _save_run_all_state(ra_state)
+                        st.rerun()
+
                     # Prefer the same grouping logic used in the Podcast tab (9 buckets).
                     groups = _podcast_run_all_group_ids(n_groups=9)
                     if not groups:
@@ -9185,6 +9536,13 @@ def draw_run_all_section(*, use_first_word: bool, embedded: bool = False) -> Non
                         ):
                             merged_excerpts: dict = {}
                             merged_insights = []
+
+                            # Discovery results merge in exactly like a group, so
+                            # both paths land in one combined PDF.
+                            merged_excerpts = _merge_podcast_excerpts_dict(
+                                merged_excerpts,
+                                _load_json_safe(run_dir / "_discovery" / "podcast_excerpts.json", {}),
+                            )
 
                             for gi in range(total_groups):
                                 group_dir = run_dir / f"g{gi + 1:02d}"
@@ -10384,6 +10742,10 @@ def main():
             draw_dashboard_section()
 
     def page_podcast() -> None:
+        # Ticker-driven discovery sits above the existing monitored-feed tool;
+        # both feed the same downstream evidence pipeline.
+        draw_podcast_discovery_panel()
+        st.divider()
         if st.button("Clean this page's cache", key="clean_podcast_cache", use_container_width=True):
             _clear_session_keys(
                 exact=["podcast_cache","podcast_last_cache_key","pod_export_pdf_path","podcast_pdf_bytes","podcast_pdf_name"],
