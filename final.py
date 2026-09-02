@@ -4509,6 +4509,34 @@ def draw_podcast_discovery_panel() -> None:
         m2.metric("Episodes analysed", len(processed))
         m3.metric("Materially relevant", len(reportable))
 
+        # Apple's episode index is incomplete - Morgan Stanley's "Hard Lessons"
+        # is in Apple's show index while none of its episodes are searchable, so
+        # a Brad Jacobs interview there is invisible to episode search. RSS
+        # scanning is exhaustive over feeds we track, so the durable fix is to
+        # track the shows that keep producing relevant material. Surface those
+        # here rather than leaving it to be noticed by hand.
+        try:
+            from podcast_discovery import load_monitored_feeds
+
+            _monitored = {n.strip().lower() for n, _u in load_monitored_feeds()}
+            _unmonitored: dict = {}
+            for _pe in reportable:
+                _pod = (_pe.candidate.podcast_name or "").strip()
+                if _pod and _pod.lower() not in _monitored:
+                    _unmonitored.setdefault(_pod, []).append(_pe.candidate)
+            if _unmonitored:
+                st.info(
+                    "Relevant episodes came from "
+                    f"{len(_unmonitored)} podcast(s) you do not monitor: "
+                    + ", ".join(sorted(_unmonitored)[:6])
+                    + (" ..." if len(_unmonitored) > 6 else "")
+                    + ". Adding their feeds to podcast_sources.csv makes future "
+                    "episodes findable by the free RSS sweep, which is exhaustive "
+                    "over tracked feeds."
+                )
+        except Exception:
+            pass
+
         if cands:
             with st.expander(f"Candidate episodes ({len(cands)}) - why each matched", expanded=False):
                 rows = []
@@ -4565,7 +4593,13 @@ def draw_podcast_discovery_panel() -> None:
 
                 full = ResearchStore(_pod_discovery_root()).read_transcript(c.episode_id)
                 if full:
-                    with st.expander("Full transcript", expanded=False):
+                    # Streamlit forbids an expander inside an expander, and this
+                    # block already sits in the per-episode one. A checkbox gives
+                    # the same show/hide without nesting.
+                    if st.checkbox(
+                        f"Show full transcript ({len(full.split()):,} words)",
+                        key=f"pod_disc_show_tx_{c.episode_id}",
+                    ):
                         st.text_area(
                             "Transcript", value=full, height=300,
                             key=f"pod_disc_tx_{c.episode_id}", disabled=True,
