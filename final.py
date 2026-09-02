@@ -4537,6 +4537,78 @@ def draw_podcast_discovery_panel() -> None:
         except Exception:
             pass
 
+        # An episode can be found and still be unusable: many feeds ship only a
+        # blurb, and some carry no episode link at all, so the transcript ladder
+        # has nothing free to work with and the episode lands as a Passing
+        # Mention. Publishers often post the full transcript on their own site,
+        # so let that URL be supplied directly - it rescues the episode without
+        # paying for transcription.
+        _weak = [
+            p for p in processed
+            if not p.reportable and p.transcript_words < 800
+        ]
+        if _weak:
+            with st.expander(
+                f"Episodes with no usable transcript ({len(_weak)}) - add one by URL",
+                expanded=False,
+            ):
+                st.caption(
+                    "These were found but had too little text to judge. If the "
+                    "publisher posts a transcript, paste its page URL and it will be "
+                    "fetched, stored and re-analysed."
+                )
+                for _pe in _weak:
+                    _c = _pe.candidate
+                    st.markdown(f"**{_c.podcast_name} - {_c.title[:70]}**")
+                    st.caption(
+                        f"{(_c.published or '')[:10]} - {_pe.relevance.label}: "
+                        f"{_pe.relevance.reason} ({_pe.transcript_words} words)"
+                    )
+                    _url = st.text_input(
+                        "Transcript page URL",
+                        key=f"pod_tx_url_{_c.episode_id}",
+                        placeholder="https://...",
+                        label_visibility="collapsed",
+                    )
+                    if st.button("Fetch transcript", key=f"pod_tx_go_{_c.episode_id}"):
+                        if not _url.strip():
+                            st.warning("Paste a URL first.")
+                        else:
+                            try:
+                                from podcast_research import (
+                                    ResearchStore,
+                                    fetch_page_transcript,
+                                )
+
+                                with st.spinner("Fetching and extracting..."):
+                                    _tx = fetch_page_transcript(_url.strip())
+                                if not _tx:
+                                    st.error(
+                                        "No speaker-labelled transcript found on that page."
+                                    )
+                                else:
+                                    ResearchStore(_pod_discovery_root()).save(
+                                        episode_id=_c.episode_id,
+                                        metadata={
+                                            "episode_id": _c.episode_id,
+                                            "tickers": [_c.ticker],
+                                            "podcast_name": _c.podcast_name,
+                                            "title": _c.title,
+                                            "published": _c.published,
+                                            "transcript_source": "manual_page",
+                                            "source_url": _url.strip(),
+                                        },
+                                        transcript=_tx,
+                                    )
+                                    st.success(
+                                        f"Stored {len(_tx.split()):,} words. "
+                                        "Re-run Discover & analyse with "
+                                        "'Re-check processed' ticked to use it."
+                                    )
+                            except Exception as _exc:
+                                st.error(f"Failed: {type(_exc).__name__}: {_exc}")
+                    st.divider()
+
         if cands:
             with st.expander(f"Candidate episodes ({len(cands)}) - why each matched", expanded=False):
                 rows = []

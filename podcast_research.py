@@ -154,6 +154,126 @@ def _strip_captions(text: str) -> str:
     return _re.sub(r"\s+", " ", out).strip()
 
 
+def extract_html_transcript(html: str, min_words: int = 400) -> str:
+    """Pull a speaker-labelled transcript out of an episode web page.
+
+    Publishers who post a transcript render it as alternating speaker turns.
+    Finding those turns is more reliable than guessing a container class, and
+    it preserves the attribution the page already gives rather than inventing
+    one.
+
+    The hard part is not finding candidate turns but telling them from page
+    chrome: a navigation block like "Core Values" or "Personal Finance"
+    followed by a sentence looks identical to a speaker turn in isolation. The
+    discriminator is repetition - a real conversation has two or three names
+    alternating many times, while chrome labels appear once each.
+
+    Returns "Speaker: text" lines for parse_transcript(), or "" if no
+    transcript is present.
+    """
+    import re as _re
+
+    if not html:
+        return ""
+
+    body = _re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=_re.S | _re.I)
+    body = _re.sub(r"<(br|/p|/div|/h[1-6]|/li)[^>]*>", "\n", body, flags=_re.I)
+    body = _re.sub(r"<[^>]+>", "\n", body)
+    try:
+        import html as _htmllib
+
+        body = _htmllib.unescape(body)
+    except Exception:
+        pass
+    lines = [l.strip() for l in body.splitlines()]
+    lines = [l for l in lines if l]
+
+    name_re = _re.compile(r"^([A-Z][A-Za-z.'-]{1,20}(?:\s+[A-Z][A-Za-z.'-]{1,20}){0,3})\s*:?\s*$")
+    inline_re = _re.compile(r"^([A-Z][A-Za-z.'-]{1,20}(?:\s+[A-Z][A-Za-z.'-]{1,20}){0,3})\s*:\s+(\S.*)$")
+
+    turns: list = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m_inline = inline_re.match(line)
+        if m_inline and len(m_inline.group(2).split()) >= 4:
+            turns.append((m_inline.group(1), m_inline.group(2), i))
+            i += 1
+            continue
+        m_name = name_re.match(line)
+        if m_name and i + 1 < len(lines):
+            nxt = lines[i + 1]
+            if len(nxt.split()) >= 6 and not name_re.match(nxt):
+                turns.append((m_name.group(1), nxt, i))
+                i += 2
+                continue
+        i += 1
+
+    if len(turns) < 6:
+        return ""
+
+    # Telling a transcript from page chrome comes down to repetition: a real
+    # conversation has a couple of names taking turns over and over, while
+    # navigation labels ("Research", "Investment Management") appear a handful
+    # of times at most.
+    #
+    # Names are written inconsistently on the same page - this one carries
+    # "Brad Jacobs", "BRAD JACOBS" and a bare "Jacobs" - so speakers are keyed
+    # on surname, otherwise one voice looks like three minor ones.
+    def _key(name: str) -> str:
+        parts = name.lower().replace(".", " ").split()
+        return parts[-1] if parts else ""
+
+    counts: dict = {}
+    for sp, _t, _i in turns:
+        k = _key(sp)
+        if k:
+            counts[k] = counts.get(k, 0) + 1
+
+    ranked = sorted(counts.items(), key=lambda kv: -kv[1])
+    if len(ranked) < 2 or ranked[1][1] < 3:
+        return ""  # no second recurring voice: not an interview
+
+    # An interview is two voices, sometimes with a narrator, so the top three
+    # surnames are the conversation and everything else is furniture. Anyone
+    # far below the second speaker is a passing quote, not a participant.
+    floor = max(3, ranked[1][1] // 3)
+    dominant = {k for k, c in ranked[:3] if c >= floor}
+    if len(dominant) < 2:
+        return ""
+
+    # Publishers often print the same transcript twice on one page - a video
+    # version and a text version - which would otherwise duplicate every
+    # excerpt. Keep the first occurrence of each distinct line.
+    seen: set = set()
+    kept = []
+    for sp, txt, idx in sorted(turns, key=lambda t: t[2]):
+        if _key(sp) not in dominant:
+            continue
+        fingerprint = (_key(sp), " ".join(txt.lower().split())[:160])
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        kept.append((sp, txt, idx))
+
+    if len(kept) < 6:
+        return ""
+
+    # One page can print the same person as "Brad Jacobs", "BRAD JACOBS" and a
+    # bare "Jacobs". Settle on the fullest, properly-cased variant so the report
+    # attributes every turn to one name instead of three.
+    canonical: dict = {}
+    for sp, _t, _i in kept:
+        k = _key(sp)
+        cand = sp.title() if sp.isupper() else sp
+        best = canonical.get(k)
+        if best is None or len(cand.split()) > len(best.split()):
+            canonical[k] = cand
+
+    out = "\n".join(f"{canonical.get(_key(sp), sp)}: {txt}" for sp, txt, _ in kept)
+    return out if len(out.split()) >= min_words else ""
+
+
 def fetch_feed_transcript(feed_url: str, *, guid: str = "", title: str = "", timeout: int = 20) -> str:
     """Look for a transcript published in the podcast's own RSS feed.
 
@@ -231,6 +351,35 @@ def fetch_feed_transcript(feed_url: str, *, guid: str = "", title: str = "", tim
     except Exception:
         return ""
 
+def fetch_page_transcript(url: str, timeout: int = 30) -> str:
+    """Fetch a web page and pull a speaker-labelled transcript out of it.
+
+    Many publishers post the full transcript on their own site even when the
+    RSS feed carries nothing but a blurb - Morgan Stanley's Hard Lessons is one,
+    and its feed has no episode link at all. Given the URL this recovers the
+    real conversation for free, which is otherwise a paid transcription.
+    """
+    if not url:
+        return ""
+    try:
+        import requests as _rq
+
+        resp = _rq.get(
+            url,
+            timeout=timeout,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                )
+            },
+        )
+        resp.raise_for_status()
+    except Exception:
+        return ""
+    return extract_html_transcript(resp.text)
+
+
 # ---------------------------------------------------------------------------
 # Transcript acquisition for a discovered episode
 # ---------------------------------------------------------------------------
@@ -267,6 +416,12 @@ def acquire_transcript(
 
     # 2. Transcript published on the episode page. Free.
     if candidate.page_url:
+        try:
+            text = fetch_page_transcript(candidate.page_url)
+            if text:
+                return text, "html_page"
+        except Exception:
+            pass
         try:
             text = ing._fetch_html_transcript(candidate.page_url)
             if text and ing._looks_like_transcript(text):
