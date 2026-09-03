@@ -79,19 +79,24 @@ def build_ai_commentary(
     episode_title: str,
     model: str = "gpt-4o-mini",
     chat_fn: Optional[Callable] = None,
-) -> tuple[str, str]:
-    """Return (why_it_matters, key_takeaways). Empty strings on any failure.
+) -> tuple[str, str, str]:
+    """Return (why_it_matters, key_takeaways, error).
+
+    error is "" on success and otherwise a short reason the section could
+    not be produced - the caller shows this instead of silently omitting
+    the section, since "AI interpretation" checked on with nothing rendered
+    and no explanation looks like a missing feature, not a skipped one.
 
     Deliberately fed only the already-selected excerpts. The model cannot
     reach the full transcript, so it cannot surface a "quote" nobody selected.
     """
     if not excerpts:
-        return "", ""
+        return "", "", "no excerpts to comment on"
     if chat_fn is None:
         try:
             from openai_legacy import chat_completion_text as chat_fn  # type: ignore
-        except Exception:
-            return "", ""
+        except Exception as exc:
+            return "", "", f"openai_legacy unavailable: {type(exc).__name__}: {exc}"
 
     body = "\n\n".join(f"[{i}] {e.topic_label}\n{e.text}" for i, e in enumerate(excerpts, 1))
     prompt = (
@@ -111,10 +116,12 @@ def build_ai_commentary(
             temperature=0.1,
             max_tokens=400,
         )
-        if err or not text:
-            return "", ""
-    except Exception:
-        return "", ""
+        if err:
+            return "", "", err
+        if not text:
+            return "", "", "empty_response"
+    except Exception as exc:
+        return "", "", f"{type(exc).__name__}: {exc}"
 
     why, takeaways = "", ""
     if "TAKEAWAYS:" in text:
@@ -123,7 +130,7 @@ def build_ai_commentary(
         takeaways = tail.strip()
     else:
         why = text.replace("WHY:", "").strip()
-    return why, takeaways
+    return why, takeaways, ""
 
 
 def build_sections(
@@ -193,22 +200,24 @@ def build_sections(
                 body.append("")
 
             if include_ai:
-                why, takeaways = build_ai_commentary(
+                why, takeaways, ai_err = build_ai_commentary(
                     pe.excerpts,
                     ticker=ticker,
                     episode_title=c.title,
                     model=model,
                     chat_fn=chat_fn,
                 )
+                body.append("-" * 72)
+                body.append("AI INTERPRETATION (secondary - the excerpts above are the evidence)")
+                body.append("-" * 72)
                 if why or takeaways:
-                    body.append("-" * 72)
-                    body.append("AI INTERPRETATION (secondary - the excerpts above are the evidence)")
-                    body.append("-" * 72)
                     if why:
                         body.append(f"Why it matters: {why}")
                     if takeaways:
                         body.append("")
                         body.append(f"Key takeaways:\n{takeaways}")
+                else:
+                    body.append(f"Not generated: {ai_err or 'unknown error'}")
 
             sections.append((f"{heading_ticker}  -  {c.podcast_name}", "\n".join(body)))
 
