@@ -537,13 +537,26 @@ def discover_for_tickers(
     by_uid: Dict[str, Candidate] = {}
     calls = 0
     cached_skips = 0
+    done_skips = 0
     backends = tuple(b.strip().lower() for b in (backends or DEFAULT_BACKENDS))
 
     def _keep(cand: Optional[Candidate]) -> None:
         """Add a candidate, deduping across backends on episode identity."""
+        nonlocal done_skips
         if cand is None or cand.score < min_score:
             return
-        if skip_processed and state and state.is_done(cand.uid):
+        # Keyed on dedupe_key, not uid: Apple and RSS number the same episode
+        # differently, so a candidate already handled under one backend's uid
+        # must still be recognised - and skipped - when the other backend
+        # surfaces it later. Otherwise the "already handled" record is
+        # backend-specific and a paid transcription can run twice for one
+        # episode.
+        if skip_processed and state and state.is_done(cand.dedupe_key):
+            # Still matches, just already handled in an earlier run - including
+            # one that came back "irrelevant" or "no transcript". Note it so a
+            # zero-candidate result can be told apart from nothing having been
+            # published, rather than reporting a silent, misleading zero.
+            done_skips += 1
             return
         key = cand.dedupe_key
         prev = by_uid.get(key)
@@ -668,6 +681,13 @@ def discover_for_tickers(
         diagnostics.append(
             f"All {cached_skips} search(es) were skipped because the same queries ran "
             "in the last 20 hours. Tick 'Re-check processed' to force a fresh search."
+        )
+    if diagnostics is not None and done_skips:
+        diagnostics.append(
+            f"{done_skips} matching episode(s) were filtered out because an earlier "
+            "run already marked them done - including ones that came back "
+            "'irrelevant' or 'no transcript'. Tick 'Re-check processed' to bring "
+            "them back, e.g. to retry with a manually supplied transcript URL."
         )
 
     out = sorted(by_uid.values(), key=lambda c: (-c.score, c.published), reverse=False)

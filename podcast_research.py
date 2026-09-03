@@ -551,8 +551,14 @@ def process_candidates(
                 on_progress(cand.uid, msg)
 
         try:
-            # Reuse a transcript we already paid for.
-            transcript = store.read_transcript(cand.episode_id)
+            # Reuse a transcript we already paid for. Keyed on dedupe_key, not
+            # episode_id: Apple and RSS can each surface the same episode
+            # under a different id, and which one wins the cross-backend
+            # merge can vary run to run, so storage has to be addressed by
+            # the identity that's stable across backends - otherwise a
+            # transcript fetched (or manually supplied) under one backend's
+            # id is invisible the next time the other backend wins.
+            transcript = store.read_transcript(cand.dedupe_key)
             source = "cached" if transcript else ""
             if not transcript:
                 note("fetching transcript")
@@ -563,9 +569,9 @@ def process_candidates(
             if not transcript:
                 note("no transcript available")
                 if state:
-                    state.mark(cand.uid, "no_transcript", title=cand.title)
+                    state.mark(cand.dedupe_key, "no_transcript", title=cand.title)
                 store.save(
-                    episode_id=cand.episode_id,
+                    episode_id=cand.dedupe_key,
                     metadata={
                         "episode_id": cand.episode_id,
                         "tickers": [cand.ticker],
@@ -580,6 +586,20 @@ def process_candidates(
                         "matched_on": cand.matched,
                         "source": cand.source,
                     },
+                )
+                # Still surfaced (not skipped) so the manual-URL override in
+                # the UI can offer it - a dead audio link or an unreadable
+                # feed is exactly the case a publisher's own transcript page
+                # rescues.
+                out.append(
+                    ProcessedEpisode(
+                        candidate=cand,
+                        relevance=Relevance(
+                            "Unknown", 0.0, "no transcript could be obtained"
+                        ),
+                        transcript_source="none",
+                        transcript_words=0,
+                    )
                 )
                 continue
 
@@ -609,7 +629,7 @@ def process_candidates(
                 note(f"{rel.label} - not reportable")
 
             store.save(
-                episode_id=cand.episode_id,
+                episode_id=cand.dedupe_key,
                 metadata={
                     "episode_id": cand.episode_id,
                     "tickers": [cand.ticker],
@@ -633,7 +653,7 @@ def process_candidates(
             )
             if state:
                 state.mark(
-                    cand.uid,
+                    cand.dedupe_key,
                     "analyzed" if rel.reportable else "irrelevant",
                     relevance=rel.label,
                     title=cand.title,
@@ -653,7 +673,7 @@ def process_candidates(
             # One bad episode must not end the run.
             note(f"failed: {type(exc).__name__}: {exc}")
             if state:
-                state.mark(cand.uid, "error", error=str(exc)[:200], title=cand.title)
+                state.mark(cand.dedupe_key, "error", error=str(exc)[:200], title=cand.title)
             continue
 
     if state:
