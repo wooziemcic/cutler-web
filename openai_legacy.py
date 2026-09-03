@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-import openai
+from openai import OpenAI
 
 
 def get_openai_api_key() -> str:
@@ -25,7 +25,7 @@ def chat_completion_text(
     max_tokens: Optional[int] = None,
     api_key: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """Return text and an error string using the legacy OpenAI 0.28 chat API."""
+    """Return text and an error string using the current OpenAI chat API."""
     key = (api_key or get_openai_api_key()).strip()
     if not key:
         return "", "missing_api_key"
@@ -39,9 +39,9 @@ def chat_completion_text(
         kwargs["max_tokens"] = int(max_tokens)
 
     try:
-        openai.api_key = key
-        response = openai.ChatCompletion.create(**kwargs)
-        text = str(response["choices"][0]["message"]["content"] or "").strip()
+        client = OpenAI(api_key=key)
+        response = client.chat.completions.create(**kwargs)
+        text = (response.choices[0].message.content or "").strip()
         if not text:
             return "", "empty_response"
         return text, ""

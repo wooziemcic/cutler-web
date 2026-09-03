@@ -17,14 +17,12 @@ from dotenv import load_dotenv
 import feedparser
 import requests
 from bs4 import BeautifulSoup
-import openai
 
 from podcasts_config import PODCASTS, Podcast
 
 # ----- Env / OpenAI setup -----
 HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / ".env")
-openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Whisper chunking
 WHISPER_CHUNK_BYTES = 20 * 1024 * 1024  # 20 MB per chunk, safely below 25 MB API limit
@@ -488,29 +486,18 @@ def _download_audio_to_tmp(
     return out_path
 
 
-def _openai_has_legacy_audio() -> bool:
-    """True only on openai<1.0, where openai.Audio.transcribe still exists.
-
-    openai>=1.0 swaps openai.Audio for APIRemovedInV1Proxy, which answers
-    hasattr() with True for every name and then raises on call, so the version
-    is the only reliable signal."""
-    try:
-        return int(str(getattr(openai, "__version__", "0")).split(".")[0]) < 1
-    except Exception:
-        return False
-
-
 def _transcribe_with_whisper(
     audio_url: str,
     tmp_dir: Path,
 ) -> Optional[str]:
-    # This calls openai.Audio.transcribe, the pre-1.0 interface. On a modern
-    # openai package that raises, and downloading the episode first would waste
-    # a full audio download per episode before failing. Check the interface is
-    # actually there before touching the network so the caller can fall through
-    # to Deepgram immediately.
-    if not _openai_has_legacy_audio():
-        print("    [INFO] Whisper needs openai<1.0; falling through to Deepgram.")
+    # Downloading the episode first would waste a full audio download per
+    # episode before failing, so confirm the client is importable before
+    # touching the network - an environment without the openai package (or
+    # without network access to it) falls through to Deepgram immediately.
+    try:
+        from openai import OpenAI
+    except Exception:
+        print("    [INFO] openai client unavailable; falling through to Deepgram.")
         return None
 
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -520,13 +507,11 @@ def _transcribe_with_whisper(
         return None
 
     try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY") or None)
         with audio_path.open("rb") as f:
             print(f"    [INFO] Calling Whisper on {audio_path.name}.")
-            resp = openai.Audio.transcribe(
-                model="whisper-1",
-                file=f,
-            )
-        text = (resp.get("text") or "").strip()
+            resp = client.audio.transcriptions.create(model="whisper-1", file=f)
+        text = (resp.text or "").strip()
         if not text:
             return None
         return text
