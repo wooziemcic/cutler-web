@@ -242,18 +242,42 @@ def extract_html_transcript(html: str, min_words: int = 400) -> str:
     if len(dominant) < 2:
         return ""
 
-    # Publishers often print the same transcript twice on one page - a video
-    # version and a text version - which would otherwise duplicate every
-    # excerpt. Keep the first occurrence of each distinct line.
-    seen: set = set()
+    # Publishers often print the same transcript twice on one page - e.g. a
+    # video player's caption track and a separately edited text transcript -
+    # which would otherwise duplicate every excerpt. The two renderings of
+    # the same line are rarely byte-identical (different punctuation, a
+    # dropped filler word, a name spelled two ways), so an exact-match
+    # fingerprint misses most real duplicates. Compare each candidate line
+    # against ones already kept from the same speaker and drop it if it's
+    # a close rewrite, not just an exact repeat.
+    import difflib as _difflib
+
+    def _norm(txt: str) -> str:
+        t = _re.sub(r"[^a-z0-9\s]", " ", txt.lower())
+        return " ".join(t.split())
+
+    seen_norm: Dict[str, list] = {}
     kept = []
     for sp, txt, idx in sorted(turns, key=lambda t: t[2]):
-        if _key(sp) not in dominant:
+        k = _key(sp)
+        if k not in dominant:
             continue
-        fingerprint = (_key(sp), " ".join(txt.lower().split())[:160])
-        if fingerprint in seen:
+        norm = _norm(txt)
+        prior_lines = seen_norm.setdefault(k, [])
+        # autojunk=False: SequenceMatcher's default autojunk heuristic
+        # starts treating frequent characters as "popular"/ignorable once a
+        # sequence passes 200 elements, which silently wrecks ratio() on
+        # ordinary-length turns (a genuine ~96%-similar 400-char pair once
+        # scored 0.03 with it on). Turns here are plain character strings,
+        # not the line-based diffs the heuristic is tuned for, so it must
+        # stay off for ratio() to mean what it says.
+        is_dup = any(
+            _difflib.SequenceMatcher(None, norm, prior, autojunk=False).ratio() >= 0.75
+            for prior in prior_lines
+        )
+        if is_dup:
             continue
-        seen.add(fingerprint)
+        prior_lines.append(norm)
         kept.append((sp, txt, idx))
 
     if len(kept) < 6:
