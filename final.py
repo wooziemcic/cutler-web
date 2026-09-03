@@ -4403,11 +4403,12 @@ def draw_podcast_discovery_panel() -> None:
         if any(s.startswith("Monitored") for s in src_labels): _backends.append("rss")
         if any(s.startswith("Listen") for s in src_labels): _backends.append("listennotes")
 
+        st.session_state.setdefault("pod_disc_rescan", False)
         b1, b2, b3 = st.columns([1, 1, 2])
         with b1:
             go = st.button("Discover & analyse", type="primary", use_container_width=True, key="pod_disc_go")
         with b2:
-            rescan = st.checkbox("Re-check processed", value=False, key="pod_disc_rescan",
+            rescan = st.checkbox("Re-check processed", key="pod_disc_rescan",
                                  help="Off by default so reruns skip episodes already handled.")
         with b3:
             allow_stt = st.checkbox(
@@ -4476,11 +4477,28 @@ def draw_podcast_discovery_panel() -> None:
             return
 
         if not cands and not processed:
+            _done_filtered = [d for d in informational if "already marked done" in d]
             if blocking:
                 st.caption(
                     "0 candidates. The messages above explain why - this is an API "
                     "problem, not an empty result."
                 )
+            elif _done_filtered:
+                # A real match exists but was suppressed because an earlier run
+                # already handled it - including a run that came back
+                # irrelevant. Widening the lookback window will not surface it;
+                # only rechecking will, so say that instead of the generic
+                # "nothing published" message.
+                st.caption(
+                    "0 new candidates. " + _done_filtered[0].split(". ", 1)[0] + "."
+                )
+                if st.button(
+                    "Re-check processed and search again",
+                    key="pod_disc_recheck_now",
+                ):
+                    st.session_state["pod_disc_rescan"] = True
+                    st.session_state["pod_disc_has_run"] = False
+                    st.rerun()
             else:
                 _used = int(st.session_state.get("pod_disc_lookback_used", 7))
                 st.caption(
@@ -4537,25 +4555,27 @@ def draw_podcast_discovery_panel() -> None:
         except Exception:
             pass
 
-        # An episode can be found and still be unusable: many feeds ship only a
-        # blurb, and some carry no episode link at all, so the transcript ladder
-        # has nothing free to work with and the episode lands as a Passing
-        # Mention. Publishers often post the full transcript on their own site,
-        # so let that URL be supplied directly - it rescues the episode without
-        # paying for transcription.
-        _weak = [
-            p for p in processed
-            if not p.reportable and p.transcript_words < 800
-        ]
+        # An episode can be found and still fail to be reportable in two ways:
+        # many feeds ship only a blurb (nothing for the transcript ladder to
+        # work with), or a paid transcription came back but missed the
+        # company - e.g. a spelled-out ticker like "QXO" heard by ASR as
+        # "Q O", so the company-mention count is zero even though the
+        # episode is genuinely about it. Word count alone can't tell those
+        # apart from a real Passing Mention, so any non-reportable episode
+        # gets the override: publishers often post the full transcript on
+        # their own site, and that URL replaces whatever is stored.
+        _weak = [p for p in processed if not p.reportable]
         if _weak:
             with st.expander(
-                f"Episodes with no usable transcript ({len(_weak)}) - add one by URL",
+                f"Episodes not reported ({len(_weak)}) - add a transcript URL",
                 expanded=False,
             ):
                 st.caption(
-                    "These were found but had too little text to judge. If the "
-                    "publisher posts a transcript, paste its page URL and it will be "
-                    "fetched, stored and re-analysed."
+                    "These were found but the stored transcript did not support "
+                    "attribution - too little text, or a transcription that missed "
+                    "the company. If the publisher posts a transcript, paste its "
+                    "page URL below; it replaces what's stored and is re-analysed "
+                    "on the next run with 'Re-check processed' ticked."
                 )
                 for _pe in _weak:
                     _c = _pe.candidate
@@ -4588,7 +4608,7 @@ def draw_podcast_discovery_panel() -> None:
                                     )
                                 else:
                                     ResearchStore(_pod_discovery_root()).save(
-                                        episode_id=_c.episode_id,
+                                        episode_id=_c.dedupe_key,
                                         metadata={
                                             "episode_id": _c.episode_id,
                                             "tickers": [_c.ticker],
@@ -4663,7 +4683,7 @@ def draw_podcast_discovery_panel() -> None:
 
                 from podcast_research import ResearchStore
 
-                full = ResearchStore(_pod_discovery_root()).read_transcript(c.episode_id)
+                full = ResearchStore(_pod_discovery_root()).read_transcript(c.dedupe_key)
                 if full:
                     # Streamlit forbids an expander inside an expander, and this
                     # block already sits in the per-episode one. A checkbox gives
@@ -4695,14 +4715,20 @@ def draw_podcast_discovery_panel() -> None:
                         include_ai=bool(with_ai),
                     )
                 if made and Path(made).exists():
-                    st.session_state["pod_disc_pdf"] = str(made)
+                    # Distinct from the button's own "pod_disc_pdf" key: a
+                    # button's session-state entry is Streamlit's bool click
+                    # flag, already instantiated by the time this runs, so
+                    # storing the built path under that same key raises
+                    # (can't modify a widget's state after it's instantiated)
+                    # and leaves pdf_path holding that bool afterwards.
+                    st.session_state["pod_disc_pdf_path"] = str(made)
                     st.success(f"Built {Path(made).name}")
                 else:
                     st.warning("Nothing to render.")
             except Exception as exc:
                 st.error(f"PDF build failed: {type(exc).__name__}: {exc}")
 
-        pdf_path = st.session_state.get("pod_disc_pdf")
+        pdf_path = st.session_state.get("pod_disc_pdf_path")
         if pdf_path and Path(pdf_path).exists():
             st.download_button(
                 "Download Podcast Discovery PDF",
